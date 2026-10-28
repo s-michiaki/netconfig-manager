@@ -1,4 +1,22 @@
-version: "3.9"
+# 開発用構成（ソースをマウントしてホットリロード）
+# 本番は docker-compose.prod.yml を使用すること
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://netconfig:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD を .env に設定してください}@db:5432/netconfig
+  REDIS_URL: redis://redis:6379/0
+  GIT_REPO_PATH: /app/configs
+  SSH_KNOWN_HOSTS: /data/ssh/known_hosts
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY を .env に設定してください}
+  DEVICE_ENCRYPTION_KEY: ${DEVICE_ENCRYPTION_KEY:?DEVICE_ENCRYPTION_KEY を .env に設定してください}
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+  SSH_HOST_KEY_POLICY: ${SSH_HOST_KEY_POLICY:-tofu}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+
+x-backend-depends: &backend-depends
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
 
 services:
   db:
@@ -6,7 +24,7 @@ services:
     environment:
       POSTGRES_DB: netconfig
       POSTGRES_USER: netconfig
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD を .env に設定してください}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -28,68 +46,54 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    environment:
-      DATABASE_URL: postgresql+asyncpg://netconfig:${POSTGRES_PASSWORD:-changeme}@db:5432/netconfig
-      REDIS_URL: redis://redis:6379/0
-      GIT_REPO_PATH: /app/configs
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+    environment: *backend-env
     volumes:
-      - config_repo:/app/configs
       - ./backend:/app
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - config_repo:/app/configs
+      - ssh_data:/data/ssh
+    depends_on: *backend-depends
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgresql+asyncpg://netconfig:${POSTGRES_PASSWORD:-changeme}@db:5432/netconfig
-      REDIS_URL: redis://redis:6379/0
-      GIT_REPO_PATH: /app/configs
+    environment: *backend-env
     volumes:
-      - config_repo:/app/configs
       - ./backend:/app
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - config_repo:/app/configs
+      - ssh_data:/data/ssh
+    depends_on: *backend-depends
     command: celery -A app.worker.celery_app worker --loglevel=info -c 4
 
   beat:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgresql+asyncpg://netconfig:${POSTGRES_PASSWORD:-changeme}@db:5432/netconfig
-      REDIS_URL: redis://redis:6379/0
+    environment: *backend-env
     volumes:
       - ./backend:/app
-    depends_on:
-      - redis
-    command: celery -A app.worker.celery_app beat --loglevel=info
+    depends_on: *backend-depends
+    # DBのスケジュールを毎分確認するタスク（dispatch_due_schedules）を起動する
+    command: celery -A app.worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      target: dev
     ports:
       - "3000:3000"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      VITE_API_BASE_URL: http://localhost:8000
+      # Vite 開発サーバーが /api を backend コンテナへ中継する
+      API_PROXY_TARGET: http://backend:8000
+    depends_on:
+      - backend
 
 volumes:
   postgres_data:
   redis_data:
   config_repo:
+  ssh_data:

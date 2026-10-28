@@ -1,13 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { api } from "../api/client";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-const WS_BASE = API_BASE.replace(/^http/, "ws");
+import { api, getToken, redirectToLogin, wsUrl } from "../api/client";
 
 interface Device {
   id: string;
@@ -16,9 +13,10 @@ interface Device {
   platform: string;
 }
 
+type Status = "idle" | "connecting" | "connected" | "error";
+
 export default function TerminalPage() {
   const { deviceId } = useParams<{ deviceId: string }>();
-  const navigate = useNavigate();
   const termRef = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -26,16 +24,30 @@ export default function TerminalPage() {
 
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedId, setSelectedId] = useState<string>(deviceId || "");
-  const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [status, setStatus] = useState<Status>("idle");
+  const connected = status === "connected" || status === "connecting";
 
   useEffect(() => {
-    api.get("/devices/").then((r) => setDevices(r.data));
+    api.get("/devices/").then((r) => setDevices(r.data)).catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (!termRef.current) return;
+    const mount = termRef.current;
+    if (!mount) return;
 
+    // 生成を1フレーム遅らせる。React StrictMode の二重マウントで即座に dispose されると
+    // xterm 内部のタイマーが破棄済みレンダラーを参照して例外になるため（xterm.js 5.5 の既知の問題）
+    let cleanup: (() => void) | undefined;
+    const raf = requestAnimationFrame(() => {
+      cleanup = initTerminal(mount);
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      cleanup?.();
+    };
+  }, []);
+
+  const initTerminal = (mount: HTMLDivElement) => {
     const term = new Terminal({
       theme: {
         background: "#0d1117",
@@ -51,11 +63,9 @@ export default function TerminalPage() {
     });
 
     const fit = new FitAddon();
-    const webLinks = new WebLinksAddon();
-
     term.loadAddon(fit);
-    term.loadAddon(webLinks);
-    term.open(termRef.current);
+    term.loadAddon(new WebLinksAddon());
+    term.open(mount);
     fit.fit();
 
     term.writeln("\x1b[32mNetConfig Manager — SSH Terminal\x1b[0m");
@@ -64,64 +74,78 @@ export default function TerminalPage() {
     terminal.current = term;
     fitAddon.current = fit;
 
+    const send = (msg: object) => {
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    };
+
+    // ハンドラは端末生成時に1回だけ登録し、送信先は常に現在の WebSocket を参照する
+    // （接続のたびに登録すると、再接続するごとにハンドラが増え続ける）
+    const dataSub = term.onData((data) => send({ type: "input", data }));
+    const resizeSub = term.onResize(({ cols, rows }) => send({ type: "resize", cols, rows }));
+
     const resizeObserver = new ResizeObserver(() => fit.fit());
-    resizeObserver.observe(termRef.current);
+    resizeObserver.observe(mount);
 
     return () => {
       resizeObserver.disconnect();
-      term.dispose();
+      dataSub.dispose();
+      resizeSub.dispose();
       wsRef.current?.close();
+      wsRef.current = null;
+      term.dispose();
+      terminal.current = null;
     };
-  }, []);
+  };
 
   const connect = () => {
-    if (!selectedId || !terminal.current) return;
+    const term = terminal.current;
+    const token = getToken();
+    if (!selectedId || !term) return;
+    if (!token) return redirectToLogin();
     wsRef.current?.close();
 
     setStatus("connecting");
-    terminal.current.writeln(`\r\n\x1b[33m接続中...\x1b[0m`);
+    term.writeln(`\r\n\x1b[33m接続中...\x1b[0m`);
 
-    const ws = new WebSocket(`${WS_BASE}/api/terminal/ws/${selectedId}`);
+    const ws = new WebSocket(wsUrl(`/terminal/ws/${selectedId}`));
     wsRef.current = ws;
+    let received = false;
 
     ws.onopen = () => {
-      setConnected(true);
-      setStatus("connected");
-      const device = devices.find((d) => d.id === selectedId);
-      terminal.current?.writeln(`\r\n\x1b[32m✓ ${device?.name} に接続しました\x1b[0m\r\n`);
+      fitAddon.current?.fit();
+      // 最初のメッセージで認証し、現在の端末サイズも伝える（PTYを正しいサイズで開くため）
+      ws.send(JSON.stringify({ type: "auth", token, cols: term.cols, rows: term.rows }));
     };
 
     ws.onmessage = (e) => {
-      terminal.current?.write(e.data);
+      if (!received) {
+        received = true;
+        setStatus("connected");
+      }
+      term.write(e.data);
     };
 
-    ws.onclose = () => {
-      setConnected(false);
-      setStatus("idle");
-      terminal.current?.writeln("\r\n\x1b[31m接続が切断されました\x1b[0m\r\n");
+    ws.onclose = (e) => {
+      if (wsRef.current !== ws) return; // 新しい接続に置き換え済み
+      wsRef.current = null;
+      if (e.code === 4401) {
+        term.writeln("\r\n\x1b[31m認証の有効期限が切れました。再ログインしてください\x1b[0m");
+        setTimeout(redirectToLogin, 1500);
+        return;
+      }
+      setStatus((s) => (s === "error" ? s : "idle"));
+      term.writeln("\r\n\x1b[31m接続が切断されました\x1b[0m\r\n");
     };
 
     ws.onerror = () => {
       setStatus("error");
-      terminal.current?.writeln("\r\n\x1b[31mSSH接続エラー\x1b[0m\r\n");
+      term.writeln("\r\n\x1b[31mWebSocket接続エラー\x1b[0m\r\n");
     };
-
-    // キー入力をWebSocketへ転送
-    terminal.current.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data);
-    });
-
-    // リサイズをサーバーへ通知
-    terminal.current.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "resize", cols, rows }));
-      }
-    });
   };
 
   const disconnect = () => {
     wsRef.current?.close();
-    setConnected(false);
     setStatus("idle");
   };
 
@@ -141,9 +165,7 @@ export default function TerminalPage() {
           <span className="page-title">SSH ターミナル</span>
           {statusBadge}
           {selectedDevice && (
-            <span style={{ fontSize: 12, color: "var(--color-muted)" }}>
-              {selectedDevice.hostname}
-            </span>
+            <span style={{ fontSize: 12, color: "var(--color-muted)" }}>{selectedDevice.hostname}</span>
           )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>

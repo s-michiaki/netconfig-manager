@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "../api/client";
+import { api, errorMessage } from "../api/client";
+import { PERM, useAuth } from "../auth";
 
 interface Device {
   id: string;
@@ -11,6 +12,7 @@ interface Device {
   username: string;
   description: string | null;
   is_active: boolean;
+  has_enable_secret: boolean;
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -23,63 +25,118 @@ const PLATFORM_LABELS: Record<string, string> = {
   huawei: "Huawei VRP",
 };
 
-function AddDeviceModal({ onClose, onSave }: { onClose: () => void; onSave: () => void }) {
-  const [form, setForm] = useState({
-    name: "", hostname: "", platform: "cisco_ios", port: 22,
-    username: "", password: "", enable_secret: "", description: "",
-  });
+const EMPTY_FORM = {
+  name: "", hostname: "", platform: "cisco_ios", port: 22,
+  username: "", password: "", enable_secret: "", description: "", is_active: true,
+  clear_enable_secret: false,
+};
+
+function DeviceModal({
+  device, onClose, onSave,
+}: { device: Device | null; onClose: () => void; onSave: () => void }) {
+  const isEdit = device !== null;
+  const [form, setForm] = useState(() =>
+    device
+      ? { ...EMPTY_FORM, ...device, description: device.description ?? "", password: "", enable_secret: "" }
+      : EMPTY_FORM
+  );
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const handleSubmit = async () => {
-    await api.post("/devices/", form);
-    onSave();
-    onClose();
+    setSaving(true);
+    setError("");
+    const body = {
+      name: form.name,
+      hostname: form.hostname,
+      platform: form.platform,
+      port: form.port,
+      username: form.username,
+      description: form.description || null,
+      is_active: form.is_active,
+      // 編集時、空欄のパスワードは「変更しない」
+      password: form.password || undefined,
+      enable_secret: form.enable_secret || undefined,
+      ...(isEdit ? { clear_enable_secret: form.clear_enable_secret } : {}),
+    };
+    try {
+      if (isEdit) await api.put(`/devices/${device.id}`, body);
+      else await api.post("/devices/", body);
+      onSave();
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const canSave = form.name && form.hostname && form.username && (isEdit || form.password);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <p className="modal-title">デバイス追加</p>
+        <p className="modal-title">{isEdit ? "デバイス編集" : "デバイス追加"}</p>
         <div className="form-group">
           <label className="form-label">ホスト名（識別名）</label>
-          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input value={form.name} onChange={(e) => set("name", e.target.value)} />
         </div>
         <div className="form-group">
           <label className="form-label">IPアドレス / FQDN</label>
-          <input value={form.hostname} onChange={(e) => setForm({ ...form, hostname: e.target.value })} />
+          <input value={form.hostname} onChange={(e) => set("hostname", e.target.value)} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
           <div className="form-group">
             <label className="form-label">プラットフォーム</label>
-            <select value={form.platform} onChange={(e) => setForm({ ...form, platform: e.target.value })}>
+            <select value={form.platform} onChange={(e) => set("platform", e.target.value)}>
               {Object.entries(PLATFORM_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
           </div>
           <div className="form-group">
             <label className="form-label">SSHポート</label>
-            <input type="number" value={form.port} onChange={(e) => setForm({ ...form, port: +e.target.value })} />
+            <input type="number" min={1} max={65535} value={form.port} onChange={(e) => set("port", +e.target.value)} />
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <div className="form-group">
             <label className="form-label">ユーザー名</label>
-            <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+            <input value={form.username} onChange={(e) => set("username", e.target.value)} />
           </div>
           <div className="form-group">
-            <label className="form-label">パスワード</label>
-            <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            <label className="form-label">パスワード{isEdit && "（変更時のみ）"}</label>
+            <input type="password" autoComplete="new-password" value={form.password}
+              onChange={(e) => set("password", e.target.value)} />
           </div>
         </div>
         <div className="form-group">
-          <label className="form-label">Enableシークレット（任意）</label>
-          <input type="password" value={form.enable_secret} onChange={(e) => setForm({ ...form, enable_secret: e.target.value })} />
+          <label className="form-label">
+            Enableシークレット（任意{isEdit && device.has_enable_secret ? "・設定済み。変更時のみ入力" : ""}）
+          </label>
+          <input type="password" autoComplete="new-password" value={form.enable_secret}
+            onChange={(e) => set("enable_secret", e.target.value)} disabled={form.clear_enable_secret} />
+          {isEdit && device.has_enable_secret && (
+            <label className="form-check" style={{ marginTop: 6 }}>
+              <input type="checkbox" checked={form.clear_enable_secret}
+                onChange={(e) => set("clear_enable_secret", e.target.checked)} />
+              Enableシークレットを削除する
+            </label>
+          )}
         </div>
         <div className="form-group">
           <label className="form-label">説明（任意）</label>
-          <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+          <input value={form.description} onChange={(e) => set("description", e.target.value)} />
         </div>
+        <label className="form-check" style={{ marginBottom: 14 }}>
+          <input type="checkbox" checked={form.is_active} onChange={(e) => set("is_active", e.target.checked)} />
+          有効（一括収集・スケジュール収集の対象にする）
+        </label>
+        {error && <p className="form-error">{error}</p>}
         <div className="btn-row">
           <button className="btn" onClick={onClose}>キャンセル</button>
-          <button className="btn btn-primary" onClick={handleSubmit}>追加</button>
+          <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || !canSave}>
+            {isEdit ? "保存" : "追加"}
+          </button>
         </div>
       </div>
     </div>
@@ -88,64 +145,98 @@ function AddDeviceModal({ onClose, onSave }: { onClose: () => void; onSave: () =
 
 export default function DevicesPage() {
   const navigate = useNavigate();
+  const { can } = useAuth();
+  const canWrite = can(PERM.DEVICE_WRITE);
+  const canTerminal = can(PERM.TERMINAL);
   const [devices, setDevices] = useState<Device[]>([]);
-  const [showModal, setShowModal] = useState(false);
+  const [modal, setModal] = useState<{ device: Device | null } | null>(null);
   const [collecting, setCollecting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
-  const load = () => api.get("/devices/").then((r) => setDevices(r.data));
+  const load = () =>
+    api.get<Device[]>("/devices/").then((r) => setDevices(r.data)).catch((e) => setError(errorMessage(e)));
   useEffect(() => { load(); }, []);
 
   const collectAll = async () => {
     setCollecting(true);
-    await api.post("/devices/collect/all");
-    setTimeout(() => setCollecting(false), 3000);
+    setError("");
+    try {
+      await api.post("/devices/collect/all");
+      setMessage("全デバイスの収集をキューに投入しました。結果は「世代管理」で確認できます。");
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setTimeout(() => setCollecting(false), 3000);
+    }
   };
 
-  const deleteDevice = async (id: string, e: React.MouseEvent) => {
+  const deleteDevice = async (d: Device, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm("このデバイスを削除しますか？")) return;
-    await api.delete(`/devices/${id}`);
-    load();
+    if (!confirm(`「${d.name}」を削除しますか？`)) return;
+    try {
+      await api.delete(`/devices/${d.id}`);
+      load();
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+
+  const editDevice = (d: Device, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setModal({ device: d });
   };
 
   return (
     <div className="page">
-      {showModal && <AddDeviceModal onClose={() => setShowModal(false)} onSave={load} />}
+      {modal && <DeviceModal device={modal.device} onClose={() => setModal(null)} onSave={load} />}
       <div className="page-header">
         <span className="page-title">デバイス管理</span>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" onClick={() => setShowModal(true)}>＋ 追加</button>
-          <button className="btn btn-primary" onClick={collectAll} disabled={collecting}>
-            {collecting ? "収集中..." : "↻ 一括収集"}
-          </button>
+          {canWrite && <button className="btn" onClick={() => setModal({ device: null })}>＋ 追加</button>}
+          {can(PERM.COLLECT) && (
+            <button className="btn btn-primary" onClick={collectAll} disabled={collecting}>
+              {collecting ? "投入中..." : "↻ 一括収集"}
+            </button>
+          )}
         </div>
       </div>
 
       <div className="page-body">
+        {error && <p className="form-error">{error}</p>}
+        {message && <p style={{ fontSize: 12, color: "var(--color-success)", marginBottom: 12 }}>{message}</p>}
         <p className="section-label">登録済みデバイス ({devices.length}台)</p>
         <div className="device-grid">
           {devices.map((d) => (
-            <div key={d.id} className="device-card" onClick={() => navigate(`/terminal/${d.id}`)}>
+            <div
+              key={d.id}
+              className="device-card"
+              style={canTerminal ? undefined : { cursor: "default" }}
+              onClick={() => canTerminal && navigate(`/terminal/${d.id}`)}
+            >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <span className={`badge ${d.is_active ? "badge-success" : "badge-neutral"}`}>
                   {d.is_active ? "● Active" : "Inactive"}
                 </span>
-                <button
-                  className="btn btn-danger"
-                  style={{ padding: "2px 8px", fontSize: 11 }}
-                  onClick={(e) => deleteDevice(d.id, e)}
-                >
-                  削除
-                </button>
+                {canWrite && <div style={{ display: "flex", gap: 4 }}>
+                  <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={(e) => editDevice(d, e)}>
+                    編集
+                  </button>
+                  <button className="btn btn-danger" style={{ padding: "2px 8px", fontSize: 11 }} onClick={(e) => deleteDevice(d, e)}>
+                    削除
+                  </button>
+                </div>}
               </div>
               <p className="device-card-name">{d.name}</p>
               <p className="device-card-info">{d.hostname}</p>
               <p className="device-card-info" style={{ marginTop: 2 }}>
                 {PLATFORM_LABELS[d.platform] || d.platform} · port {d.port}
               </p>
-              <p style={{ fontSize: 11, color: "var(--color-accent)", marginTop: 8 }}>
-                クリックでターミナルを開く →
-              </p>
+              {canTerminal && (
+                <p style={{ fontSize: 11, color: "var(--color-accent)", marginTop: 8 }}>
+                  クリックでターミナルを開く →
+                </p>
+              )}
             </div>
           ))}
         </div>

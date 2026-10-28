@@ -4,6 +4,8 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.crypto import EncryptedString
+from app.core.timeutil import utcnow
 from app.models.base import Base
 
 
@@ -16,13 +18,13 @@ class Device(Base):
     platform: Mapped[str] = mapped_column(String(64), nullable=False)  # cisco_ios, juniper_junos, etc.
     port: Mapped[int] = mapped_column(Integer, default=22)
     username: Mapped[str] = mapped_column(String(128), nullable=False)
-    # パスワードは実運用では vault / encrypted column を推奨
-    password: Mapped[str] = mapped_column(String(256), nullable=False)
-    enable_secret: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Fernet で暗号化して保存（DEVICE_ENCRYPTION_KEY）。カラム型は既存の VARCHAR(256) のまま
+    password: Mapped[str] = mapped_column(EncryptedString(256), nullable=False)
+    enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     config_snapshots: Mapped[list["ConfigSnapshot"]] = relationship(
         "ConfigSnapshot", back_populates="device", cascade="all, delete-orphan"
@@ -40,10 +42,10 @@ class ConfigSnapshot(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     device_id: Mapped[str] = mapped_column(String(36), ForeignKey("devices.id"), nullable=False)
     commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)
-    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     lines_added: Mapped[int] = mapped_column(Integer, default=0)
     lines_removed: Mapped[int] = mapped_column(Integer, default=0)
-    triggered_by: Mapped[str] = mapped_column(String(64), default="schedule")  # schedule / manual
+    triggered_by: Mapped[str] = mapped_column(String(64), default="manual")  # schedule / manual
 
     device: Mapped["Device"] = relationship("Device", back_populates="config_snapshots")
 
@@ -55,7 +57,7 @@ class CollectLog(Base):
     device_id: Mapped[str] = mapped_column(String(36), ForeignKey("devices.id"), nullable=False)
     status: Mapped[str] = mapped_column(Enum("success", "failed", name="collect_status"), nullable=False)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     device: Mapped["Device"] = relationship("Device", back_populates="collect_logs")
@@ -69,4 +71,4 @@ class Schedule(Base):
     cron_expression: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str] = mapped_column(String(256), default="all")  # "all" or device_id
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// 開発サーバーは /api を backend に中継する（ブラウザからは同一オリジンに見える）
+// Docker では API_PROXY_TARGET=http://backend:8000 を指定する
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -8,7 +10,7 @@ export default defineConfig({
     port: 3000,
     proxy: {
       "/api": {
-        target: process.env.VITE_API_BASE_URL || "http://localhost:8000",
+        target: process.env.API_PROXY_TARGET || "http://localhost:8000",
         changeOrigin: true,
         ws: true,
       },
