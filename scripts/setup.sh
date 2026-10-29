@@ -146,14 +146,14 @@ cd "$INSTALL_DIR"
 # =========================
 # 導入前チェック（check_env.sh があれば実行）
 # =========================
-if [ -f scripts/check_env.sh ]; then
+# 更新時は自分のコンテナがポートを使用中で NG と誤判定されるため、初回のみ実行する
+if [ "$FIRST_INSTALL" -eq 0 ]; then
+  echo "[INFO] Update mode: skipping pre-install check"
+elif [ -f scripts/check_env.sh ]; then
   echo "[INFO] Running pre-install check..."
   if ! sudo bash scripts/check_env.sh -m prod | sed 's/^/       /'; then
-    # 2回目以降は自分のコンテナがポートを使っているので NG になる。初回のみ確認する
-    if [ "$FIRST_INSTALL" -eq 1 ]; then
-      read -r -p "チェックで NG がありました。続行しますか？ [y/N]: " Red_CONT
-      [ "${Red_CONT}" = "y" ] || [ "${Red_CONT}" = "Y" ] || { echo "中止しました"; exit 1; }
-    fi
+    read -r -p "チェックで NG がありました。続行しますか？ [y/N]: " Red_CONT
+    [ "${Red_CONT}" = "y" ] || [ "${Red_CONT}" = "Y" ] || { echo "中止しました"; exit 1; }
   fi
 fi
 
@@ -230,7 +230,11 @@ fi
 # コンテナのビルド・起動
 # =========================
 echo "[INFO] Building and starting containers (初回は数分かかります)..."
-sudo podman-compose -f "$COMPOSE_FILE" up -d --build
+# podman-compose は compose ファイルが変わらない限り既存コンテナを作り直さない
+# （イメージだけ更新しても古いコンテナが動き続ける）ため、ビルド後に必ず再作成する。
+# ボリューム（DB・コンフィグ履歴）は保持される
+sudo podman-compose -f "$COMPOSE_FILE" build
+sudo podman-compose -f "$COMPOSE_FILE" up -d --force-recreate
 
 # =========================
 # 再起動後の自動起動（Podman にはデーモンが無いため）

@@ -102,6 +102,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 - フロントエンドはビルド済みファイルを nginx で配信し、`/api`（WebSocket含む）を backend へ中継します
 - 外部公開されるのは `HTTP_PORT`（既定 80）のみです。backend / DB / Redis はコンテナ内部ネットワークのみ
 - HTTPS は前段のリバースプロキシ・ロードバランサーで終端してください（ターミナルの通信に機器の操作内容が流れるため、本番では HTTPS 必須）
+- Podman（podman-compose）で手動更新する場合は、イメージ再ビルド後に `podman-compose -f docker-compose.prod.yml up -d --force-recreate` でコンテナを作り直してください（podman-compose は compose ファイルが変わらないと既存コンテナを再作成しません。`setup.sh` は自動で行います）
 
 ---
 
