@@ -1,5 +1,5 @@
 # ---- 依存関係 ----
-FROM node:20-alpine AS deps
+FROM docker.io/library/node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -16,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # ---- 本番用（docker-compose.prod.yml）: nginx で静的配信 + /api を backend へ中継 ----
-FROM nginx:1.27-alpine AS prod
+FROM docker.io/library/nginx:1.27-alpine AS prod
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
