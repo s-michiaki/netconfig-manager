@@ -25,8 +25,9 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.permissions import Perm, has_permission
 from app.core.ssh_hostkeys import describe_ssh_error, load_known_hosts
-from app.models.device import Device
+from app.core.ssh_jump import JumpHostError, connect_jump, open_tunnel
 from app.services.config_service import DeviceConnectionInfo
+from app.services.connection import load_connection_info
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,10 +51,16 @@ class TerminalSession:
 
     def __init__(self, device: DeviceConnectionInfo):
         self.device = device
+        self.jump_client: paramiko.SSHClient | None = None
         self.ssh: paramiko.SSHClient | None = None
         self.channel: paramiko.Channel | None = None
 
     def connect(self, cols: int, rows: int) -> None:
+        sock = None
+        if self.device.jump:
+            # 踏み台へ接続し、機器宛ての direct-tcpip チャネルをソケットとして使う
+            self.jump_client = connect_jump(self.device.jump)
+            sock = open_tunnel(self.jump_client, self.device.jump.name, self.device.hostname, self.device.port)
         self.ssh = paramiko.SSHClient()
         load_known_hosts(self.ssh)
         self.ssh.connect(
@@ -65,6 +72,7 @@ class TerminalSession:
             auth_timeout=settings.SSH_AUTH_TIMEOUT,
             look_for_keys=False,
             allow_agent=False,
+            sock=sock,
         )
         self.channel = self.ssh.get_transport().open_session()
         self.channel.get_pty(term="xterm-256color", width=cols, height=rows)
@@ -87,17 +95,13 @@ class TerminalSession:
         finally:
             if self.ssh:
                 self.ssh.close()
+            if self.jump_client:
+                self.jump_client.close()
 
 
 async def _load_device(device_id: str) -> DeviceConnectionInfo | None:
     async with AsyncSessionLocal() as db:
-        d = await db.get(Device, device_id)
-        if d is None:
-            return None
-        return DeviceConnectionInfo(
-            id=d.id, name=d.name, hostname=d.hostname, platform=d.platform, port=d.port,
-            username=d.username, password=d.password, enable_secret=d.enable_secret,
-        )
+        return await load_connection_info(db, device_id)
 
 
 @router.websocket("/ws/{device_id}")
@@ -136,10 +140,17 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     except Exception as e:  # noqa: BLE001
         logger.warning("SSH接続失敗 user=%s device=%s: %r", user.username, device.name, e)
         await loop.run_in_executor(None, session.close)
-        await websocket.send_text(f"\r\nSSH接続に失敗しました: {describe_ssh_error(e)}\r\n")
+        reason = str(e) if isinstance(e, JumpHostError) else describe_ssh_error(e)
+        await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
         await websocket.close()
         return
-    logger.info("ターミナル開始 user=%s device=%s(%s)", user.username, device.name, device.hostname)
+    logger.info(
+        "ターミナル開始 user=%s device=%s(%s)%s",
+        user.username,
+        device.name,
+        device.hostname,
+        f" via={device.jump.name}" if device.jump else "",
+    )
 
     stop = threading.Event()
 

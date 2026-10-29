@@ -20,7 +20,12 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, Schedule
-from app.services.config_service import CollectResult, DeviceConnectionInfo, collect_config_sync
+from app.services.config_service import (
+    CollectResult,
+    DeviceConnectionInfo,
+    collect_config_sync,
+)
+from app.services.connection import load_connection_info
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +75,7 @@ def _run_async(coro):
 
 async def _get_device(device_id: str) -> DeviceConnectionInfo | None:
     async with _sessionmaker()() as db:
-        device = await db.get(Device, device_id)
-        if device is None:
-            return None
-        return DeviceConnectionInfo(
-            id=device.id,
-            name=device.name,
-            hostname=device.hostname,
-            platform=device.platform,
-            port=device.port,
-            username=device.username,
-            password=device.password,
-            enable_secret=device.enable_secret,
-        )
+        return await load_connection_info(db, device_id)
 
 
 async def _save_result(device_id: str, result: CollectResult, started_at: datetime, triggered_by: str):

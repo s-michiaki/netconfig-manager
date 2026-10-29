@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -5,13 +6,14 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 
-from app.api import auth, configs, devices, schedules, tasks, terminal, users
+from app.api import auth, configs, devices, jump_hosts, schedules, tasks, terminal, users
 from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
 from app.core.database import AsyncSessionLocal, engine
+from app.core.migrate import run_migrations
 from app.core.permissions import Perm
-from app.models import Base, Device
+from app.models import Device
 from app.services.config_service import migrate_legacy_repo
 
 logging.basicConfig(level=logging.INFO)
@@ -48,9 +50,8 @@ async def _migrate_legacy_repos() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # NOTE: 既存テーブルへのカラム追加は create_all では行われない。スキーマ変更時は Alembic を導入すること
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # DBスキーマを最新化（Alembic）。Alembic 導入前のDBも自動で引き継ぐ
+    await asyncio.to_thread(run_migrations)
     await _encrypt_legacy_passwords()
     await _migrate_legacy_repos()
     async with AsyncSessionLocal() as db:
@@ -62,7 +63,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -80,6 +81,7 @@ protected = [Depends(get_current_user)]
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(devices.router, prefix="/api/devices", tags=["devices"], dependencies=protected)
+app.include_router(jump_hosts.router, prefix="/api/jump-hosts", tags=["jump-hosts"], dependencies=protected)
 app.include_router(configs.router, prefix="/api/configs", tags=["configs"], dependencies=protected)
 app.include_router(schedules.router, prefix="/api/schedules", tags=["schedules"], dependencies=protected)
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependencies=protected)

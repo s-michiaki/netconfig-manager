@@ -1,6 +1,6 @@
 """機器パスワード等をDBに暗号化して保存するための型"""
 from cryptography.fernet import Fernet
-from sqlalchemy import String
+from sqlalchemy import String, Text
 from sqlalchemy.types import TypeDecorator
 
 from app.core.config import settings
@@ -39,3 +39,10 @@ class EncryptedString(TypeDecorator):
         if value is None:
             return None
         return decrypt(value)
+
+
+class EncryptedText(EncryptedString):
+    """長い値（SSH秘密鍵など）用。暗号化後の長さに上限が無い TEXT カラム"""
+
+    impl = Text
+    cache_ok = True

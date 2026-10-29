@@ -4,9 +4,30 @@ from datetime import datetime
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.crypto import EncryptedString
+from app.core.crypto import EncryptedString, EncryptedText
 from app.core.timeutil import utcnow
 from app.models.base import Base
+
+
+class JumpHost(Base):
+    """踏み台サーバ（1段のみ）。機器は jump_host_id でこれを経由して接続する"""
+
+    __tablename__ = "jump_hosts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    hostname: Mapped[str] = mapped_column(String(256), nullable=False)
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 認証はパスワード・秘密鍵のどちらか、または両方（すべて暗号化して保存）
+    password: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    private_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    key_passphrase: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+    devices: Mapped[list["Device"]] = relationship("Device", back_populates="jump_host")
 
 
 class Device(Base):
@@ -23,9 +44,14 @@ class Device(Base):
     enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 経由する踏み台（NULL なら直接接続）
+    jump_host_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("jump_hosts.id", name="fk_devices_jump_host_id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
+    jump_host: Mapped["JumpHost | None"] = relationship("JumpHost", back_populates="devices")
     config_snapshots: Mapped[list["ConfigSnapshot"]] = relationship(
         "ConfigSnapshot", back_populates="device", cascade="all, delete-orphan"
     )
