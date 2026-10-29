@@ -13,7 +13,11 @@ interface Device {
   description: string | null;
   is_active: boolean;
   has_enable_secret: boolean;
+  jump_host_id: string | null;
+  jump_host_name: string | null;
 }
+
+interface JumpHostOption { id: string; name: string; hostname: string; }
 
 const PLATFORM_LABELS: Record<string, string> = {
   cisco_ios: "Cisco IOS",
@@ -28,20 +32,25 @@ const PLATFORM_LABELS: Record<string, string> = {
 const EMPTY_FORM = {
   name: "", hostname: "", platform: "cisco_ios", port: 22,
   username: "", password: "", enable_secret: "", description: "", is_active: true,
-  clear_enable_secret: false,
+  clear_enable_secret: false, jump_host_id: "",
 };
 
 function DeviceModal({
-  device, onClose, onSave,
-}: { device: Device | null; onClose: () => void; onSave: () => void }) {
+  device, jumpHosts, onClose, onSave,
+}: { device: Device | null; jumpHosts: JumpHostOption[]; onClose: () => void; onSave: () => void }) {
   const isEdit = device !== null;
   const [form, setForm] = useState(() =>
     device
-      ? { ...EMPTY_FORM, ...device, description: device.description ?? "", password: "", enable_secret: "" }
+      ? {
+          ...EMPTY_FORM, ...device, description: device.description ?? "", password: "", enable_secret: "",
+          jump_host_id: device.jump_host_id ?? "",
+        }
       : EMPTY_FORM
   );
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [reach, setReach] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const handleSubmit = async () => {
@@ -55,6 +64,7 @@ function DeviceModal({
       username: form.username,
       description: form.description || null,
       is_active: form.is_active,
+      jump_host_id: form.jump_host_id || null,
       // 編集時、空欄のパスワードは「変更しない」
       password: form.password || undefined,
       enable_secret: form.enable_secret || undefined,
@@ -69,6 +79,22 @@ function DeviceModal({
       setError(errorMessage(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** 選択した踏み台から、このデバイスのIP:ポートに到達できるか確認する */
+  const testReach = async () => {
+    setTesting(true);
+    setReach(null);
+    try {
+      const r = await api.post(`/jump-hosts/${form.jump_host_id}/test`, {
+        dest_host: form.hostname, dest_port: form.port,
+      }, { timeout: 90000 });
+      setReach(r.data);
+    } catch (e) {
+      setReach({ ok: false, message: errorMessage(e) });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -97,6 +123,25 @@ function DeviceModal({
             <label className="form-label">SSHポート</label>
             <input type="number" min={1} max={65535} value={form.port} onChange={(e) => set("port", +e.target.value)} />
           </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">接続経路</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={form.jump_host_id} onChange={(e) => { set("jump_host_id", e.target.value); setReach(null); }}>
+              <option value="">直接接続</option>
+              {jumpHosts.map((j) => <option key={j.id} value={j.id}>踏み台経由: {j.name}（{j.hostname}）</option>)}
+            </select>
+            {form.jump_host_id && (
+              <button className="btn" style={{ whiteSpace: "nowrap" }} onClick={testReach} disabled={testing || !form.hostname}>
+                {testing ? "確認中..." : "到達確認"}
+              </button>
+            )}
+          </div>
+          {reach && (
+            <p style={{ fontSize: 11, marginTop: 6, color: reach.ok ? "var(--color-success)" : "var(--color-danger)" }}>
+              {reach.ok ? "✓ " : "✗ "}{reach.message}
+            </p>
+          )}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <div className="form-group">
@@ -152,11 +197,15 @@ export default function DevicesPage() {
   const [modal, setModal] = useState<{ device: Device | null } | null>(null);
   const [collecting, setCollecting] = useState(false);
   const [message, setMessage] = useState("");
+  const [jumpHosts, setJumpHosts] = useState<JumpHostOption[]>([]);
   const [error, setError] = useState("");
 
   const load = () =>
     api.get<Device[]>("/devices/").then((r) => setDevices(r.data)).catch((e) => setError(errorMessage(e)));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.get<JumpHostOption[]>("/jump-hosts/").then((r) => setJumpHosts(r.data)).catch(() => undefined);
+  }, []);
 
   const collectAll = async () => {
     setCollecting(true);
@@ -189,7 +238,7 @@ export default function DevicesPage() {
 
   return (
     <div className="page">
-      {modal && <DeviceModal device={modal.device} onClose={() => setModal(null)} onSave={load} />}
+      {modal && <DeviceModal device={modal.device} jumpHosts={jumpHosts} onClose={() => setModal(null)} onSave={load} />}
       <div className="page-header">
         <span className="page-title">デバイス管理</span>
         <div style={{ display: "flex", gap: 8 }}>
@@ -232,6 +281,9 @@ export default function DevicesPage() {
               <p className="device-card-info" style={{ marginTop: 2 }}>
                 {PLATFORM_LABELS[d.platform] || d.platform} · port {d.port}
               </p>
+              {d.jump_host_name && (
+                <p className="device-card-info" style={{ marginTop: 2 }}>↪ 踏み台経由: {d.jump_host_name}</p>
+              )}
               {canTerminal && (
                 <p style={{ fontSize: 11, color: "var(--color-accent)", marginTop: 8 }}>
                   クリックでターミナルを開く →

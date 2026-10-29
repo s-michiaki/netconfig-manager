@@ -11,7 +11,9 @@
 | 認証・認可 | JWT (PyJWT) + bcrypt + RBAC | ログイン・ロール別の権限制御 |
 | コンフィグ収集 | Netmiko | マルチベンダーSSH収集 |
 | SSHターミナル | Paramiko + WebSocket | インタラクティブシェル |
+| 踏み台経由接続 | Paramiko (direct-tcpip) | 踏み台サーバ1段を経由した収集・ターミナル |
 | 世代管理 | GitPython | コンフィグ差分・履歴 |
+| DBマイグレーション | Alembic | 起動時に自動でスキーマを最新化 |
 | タスクキュー | Celery + Redis | 非同期収集・定期収集（beat が毎分スケジュールを確認） |
 | データベース | PostgreSQL 16 | デバイス情報・ユーザー・ログ |
 | コンテナ | Podman / Docker | サービス管理 |
@@ -88,6 +90,22 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ---
 
+## 踏み台サーバ経由の接続
+
+機器に直接SSHできない環境では、踏み台サーバ（1段）を経由して接続できます。
+
+1. 「踏み台サーバ」画面で踏み台を登録する（ホスト・ポート・ユーザー名と、パスワード / 秘密鍵のどちらか、または両方）
+2. 「接続テスト」で踏み台への接続・認証を確認する
+3. デバイスの編集画面で「接続経路」に踏み台を選び、「到達確認」で踏み台から機器に届くことを確認する
+
+- 秘密鍵は OpenSSH 形式（`-----BEGIN OPENSSH PRIVATE KEY-----`）または PEM 形式の RSA / ECDSA / Ed25519 に対応します。パスフレーズ付きの鍵も使えます。PuTTY の `.ppk` は PuTTYgen で OpenSSH 形式に変換してください
+- パスワードと秘密鍵の両方を設定した場合は、鍵 → パスワードの順に試します
+- 踏み台側の sshd で TCP フォワーディングが許可されている必要があります（`AllowTcpForwarding yes`、OpenSSH の `ssh -J` と同じ仕組み）。踏み台上でシェルの起動やコマンド実行は行いません
+- 踏み台の認証情報（パスワード・秘密鍵・パスフレーズ）は機器パスワードと同様に暗号化して保存し、API の応答には含めません（鍵の種類と指紋のみ表示）
+- 踏み台自身のホスト鍵も known_hosts で検証します（`SSH_HOST_KEY_POLICY` に従う）
+- デバイスが使用中の踏み台は削除できません
+- 踏み台の登録・編集・接続テストは管理者のみ（デバイス編集権限）です
+
 ## ユーザーと権限（RBAC）
 
 ユーザーには3つのロールのいずれかを割り当てます。ユーザーの追加・ロール変更・無効化・パスワードリセットは、管理者が「ユーザー管理」画面から行います。
@@ -127,7 +145,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 - **機器パスワード**: 起動時に自動で暗号化されます（`DEVICE_ENCRYPTION_KEY` を必ず控えてください）
 - **ユーザー**: 旧版のハードコードされた `admin/admin` は廃止しました。初回起動時に `ADMIN_USERNAME` / `ADMIN_PASSWORD` で作成されます
 - **DB パスワード**: 既存の `postgres_data` ボリュームがある場合、`.env` の `POSTGRES_PASSWORD` には初回作成時の値（旧デフォルトは `changeme`）を設定してください
-- **DBスキーマ**: 今回は既存テーブルの変更はなく、`users` テーブルの追加のみです（起動時に自動作成）。今後カラムを変更する場合は Alembic を導入してください
+- **DBスキーマ**: v1.3 から Alembic でスキーマを管理します。backend 起動時に自動で最新化され、Alembic 導入前（create_all で作成）の既存DBも自動で引き継ぎます（データはそのまま）。手動で実行する場合は `docker compose exec backend python -m app.core.migrate`
+- **スキーマを変更するとき**: モデルを変更したら `docker compose exec backend alembic revision --autogenerate -m "説明"` でマイグレーションを作成し、`backend/migrations/versions/` をコミットしてください
 
 ---
 
@@ -190,6 +209,8 @@ netconfig-manager/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── requirements-dev.txt     # テスト用
+│   ├── alembic.ini              # DBマイグレーション設定
+│   ├── migrations/versions/     # マイグレーション
 │   ├── tests/                   # pytest
 │   └── app/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
@@ -200,23 +221,27 @@ netconfig-manager/
 │       │   ├── security.py      # パスワードハッシュ・JWT
 │       │   ├── permissions.py   # ロールと権限の定義（RBAC）
 │       │   ├── crypto.py        # 機器パスワード暗号化
-│       │   └── ssh_hostkeys.py  # SSH ホスト鍵検証
+│       │   ├── ssh_hostkeys.py  # SSH ホスト鍵検証
+│       │   ├── ssh_jump.py      # 踏み台経由の接続・秘密鍵の読み込み
+│       │   └── migrate.py       # 起動時のDBマイグレーション
 │       ├── models/
 │       │   ├── __init__.py      # モデル登録
 │       │   ├── base.py
-│       │   ├── device.py        # Device / ConfigSnapshot / CollectLog / Schedule
+│       │   ├── device.py        # Device / JumpHost / ConfigSnapshot / CollectLog / Schedule
 │       │   └── user.py          # User
 │       ├── api/
 │       │   ├── deps.py          # 認証・権限チェック（require）
 │       │   ├── auth.py          # ログイン・パスワード変更
 │       │   ├── devices.py       # デバイス CRUD + 収集トリガー
+│       │   ├── jump_hosts.py    # 踏み台サーバ CRUD + 接続テスト
 │       │   ├── configs.py       # 履歴・差分 API
 │       │   ├── tasks.py         # 収集タスクの状態確認
 │       │   ├── users.py         # ユーザー管理（管理者のみ）
 │       │   ├── terminal.py      # WebSocket SSH ターミナル
 │       │   └── schedules.py     # スケジュール CRUD
 │       └── services/
-│           └── config_service.py # Netmiko + GitPython
+│           ├── config_service.py # Netmiko + GitPython
+│           └── connection.py    # 接続情報（踏み台含む）の読み出し
 └── frontend/
     ├── Dockerfile               # dev / prod マルチステージ
     ├── nginx.conf               # 本番用
@@ -233,6 +258,7 @@ netconfig-manager/
         └── pages/
             ├── LoginPage.tsx    # ログイン
             ├── DevicesPage.tsx  # デバイス管理
+            ├── JumpHostsPage.tsx # 踏み台サーバ
             ├── CollectPage.tsx  # コンフィグ収集
             ├── HistoryPage.tsx  # 世代管理・差分
             ├── TerminalPage.tsx # SSH ターミナル
@@ -250,4 +276,4 @@ netconfig-manager/
 - **コンプライアンスチェック**: 収集したコンフィグをルールベースで自動チェック
 - **バックアップ**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push
 - **パスワード管理**: HashiCorp Vault 連携
-- **DBマイグレーション**: Alembic の導入
+- **踏み台の多段化**: 2段以上の踏み台経由（現在は1段まで）

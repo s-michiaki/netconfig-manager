@@ -13,11 +13,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import git
-from netmiko import ConnectHandler, NetmikoAuthenticationException, NetmikoTimeoutException
+from netmiko import (
+    ConnectHandler,
+    NetmikoAuthenticationException,
+    NetmikoTimeoutException,
+)
 from paramiko import BadHostKeyException
 
 from app.core.config import settings
 from app.core.ssh_hostkeys import HostKeyPolicy, UnknownHostKeyError, describe_ssh_error
+from app.core.ssh_jump import JumpHostError, JumpHostInfo, connect_jump, open_tunnel
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +81,7 @@ class DeviceConnectionInfo:
     username: str
     password: str
     enable_secret: str | None
+    jump: JumpHostInfo | None = None  # 踏み台経由の場合のみ
 
 
 @dataclass
@@ -201,6 +207,16 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
     if device.enable_secret:
         params["secret"] = device.enable_secret
 
+    jump_client = None
+    if device.jump:
+        # 踏み台へ接続し、機器宛てのチャネルを Netmiko のソケットとして使う
+        jump_client = connect_jump(device.jump)
+        try:
+            params["sock"] = open_tunnel(jump_client, device.jump.name, device.hostname, device.port)
+        except Exception:
+            jump_client.close()
+            raise
+
     conn = ConnectHandler(**params)
     # Netmiko 既定の AutoAddPolicy を known_hosts 検証ポリシーに差し替えてから接続する
     conn.key_policy = HostKeyPolicy()
@@ -217,6 +233,8 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
             conn.disconnect()
         except Exception:  # noqa: BLE001 - 切断失敗は無視してよい
             pass
+        if jump_client is not None:
+            jump_client.close()
 
 
 def _host_key_error(e: BaseException) -> BaseException | None:
@@ -234,8 +252,10 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
     """同期的にコンフィグを収集する（Celeryワーカーから呼び出す）"""
     try:
         raw = fetch_config(device)
+    except JumpHostError as e:
+        return CollectResult(success=False, error=str(e), retryable=e.retryable)
     except NetmikoAuthenticationException:
-        return CollectResult(success=False, error="認証失敗")
+        return CollectResult(success=False, error="認証失敗" + ("（機器）" if device.jump else ""))
     except Exception as e:  # noqa: BLE001
         hk = _host_key_error(e)
         if hk is not None:

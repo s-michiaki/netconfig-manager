@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.device import Device
+from app.models.device import Device, JumpHost
 from app.worker import collect_all_devices, collect_device_config
 
 router = APIRouter()
@@ -35,6 +35,7 @@ class DeviceCreate(BaseModel):
     enable_secret: Secret | None = None
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool = True
+    jump_host_id: str | None = None  # 経由する踏み台（未指定なら直接接続）
 
 
 class DeviceUpdate(BaseModel):
@@ -51,6 +52,7 @@ class DeviceUpdate(BaseModel):
     clear_enable_secret: bool = False
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
+    jump_host_id: str | None = None  # null を明示すると直接接続に戻す
 
 
 class DeviceResponse(BaseModel):
@@ -65,12 +67,25 @@ class DeviceResponse(BaseModel):
     description: str | None
     is_active: bool
     has_enable_secret: bool = False
+    jump_host_id: str | None = None
+    jump_host_name: str | None = None
 
 
-def _to_response(device: Device) -> DeviceResponse:
+def _to_response(device: Device, jump_names: dict[str, str] | None = None) -> DeviceResponse:
     resp = DeviceResponse.model_validate(device)
     resp.has_enable_secret = bool(device.enable_secret)
+    if device.jump_host_id and jump_names:
+        resp.jump_host_name = jump_names.get(device.jump_host_id)
     return resp
+
+
+async def _jump_names(db: AsyncSession) -> dict[str, str]:
+    return dict((await db.execute(select(JumpHost.id, JumpHost.name))).all())
+
+
+async def _check_jump_host(db: AsyncSession, jump_host_id: str | None) -> None:
+    if jump_host_id and not await db.get(JumpHost, jump_host_id):
+        raise HTTPException(status_code=422, detail="指定された踏み台サーバが存在しません")
 
 
 async def _get_or_404(db: AsyncSession, device_id: str) -> Device:
@@ -91,7 +106,8 @@ async def _commit_or_409(db: AsyncSession) -> None:
 @router.get("/", response_model=list[DeviceResponse], dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def list_devices(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Device).order_by(Device.name))
-    return [_to_response(d) for d in result.scalars().all()]
+    names = await _jump_names(db)
+    return [_to_response(d, names) for d in result.scalars().all()]
 
 
 @router.post(
@@ -104,11 +120,13 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
     data = payload.model_dump()
     if not data.get("enable_secret"):
         data["enable_secret"] = None
+    data["jump_host_id"] = data.get("jump_host_id") or None
+    await _check_jump_host(db, data["jump_host_id"])
     device = Device(**data)
     db.add(device)
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device)
+    return _to_response(device, await _jump_names(db))
 
 
 # 注意: "/collect/all" は "/{device_id}" 系より先に定義する
@@ -121,7 +139,7 @@ async def trigger_collect_all():
 
 @router.get("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    return _to_response(await _get_or_404(db, device_id))
+    return _to_response(await _get_or_404(db, device_id), await _jump_names(db))
 
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
@@ -132,6 +150,9 @@ async def update_device(device_id: str, payload: DeviceUpdate, db: AsyncSession 
     for secret_field in ("password", "enable_secret"):
         if not data.get(secret_field):
             data.pop(secret_field, None)
+    if "jump_host_id" in data:
+        data["jump_host_id"] = data["jump_host_id"] or None
+        await _check_jump_host(db, data["jump_host_id"])
     for k, v in data.items():
         if v is None and k in ("name", "hostname", "platform", "port", "username", "is_active"):
             continue  # 必須項目に null は入れない
@@ -140,7 +161,7 @@ async def update_device(device_id: str, payload: DeviceUpdate, db: AsyncSession 
         device.enable_secret = None
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device)
+    return _to_response(device, await _jump_names(db))
 
 
 @router.delete(

@@ -5,6 +5,7 @@ import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
 import CollectPage from "./pages/CollectPage";
 import DevicesPage from "./pages/DevicesPage";
 import HistoryPage from "./pages/HistoryPage";
+import JumpHostsPage from "./pages/JumpHostsPage";
 import LoginPage from "./pages/LoginPage";
 import SchedulePage from "./pages/SchedulePage";
 import TerminalPage from "./pages/TerminalPage";
@@ -12,6 +13,7 @@ import UsersPage from "./pages/UsersPage";
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
+  { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
   { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
   { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
@@ -110,7 +112,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.2.0 · RHEL 10</span>
+          <span className="version-tag">v1.3.0 · RHEL 10</span>
         </div>
       </aside>
 
@@ -118,6 +120,7 @@ function Layout() {
         <Routes>
           <Route path="/" element={<Navigate to="/devices" replace />} />
           <Route path="/devices" element={<RequirePerm perm={PERM.DEVICE_READ}><DevicesPage /></RequirePerm>} />
+          <Route path="/jump-hosts" element={<RequirePerm perm={PERM.DEVICE_WRITE}><JumpHostsPage /></RequirePerm>} />
           <Route path="/collect" element={<RequirePerm perm={PERM.COLLECT}><CollectPage /></RequirePerm>} />
           <Route path="/history" element={<RequirePerm perm={PERM.CONFIG_READ}><HistoryPage /></RequirePerm>} />
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
