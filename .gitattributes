@@ -1,0 +1,2 @@
+# シェルスクリプトは Windows で編集・チェックアウトしても LF のまま保つ（CRLF だと Linux で動かない）
+*.sh text eol=lf
