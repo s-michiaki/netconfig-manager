@@ -39,8 +39,10 @@ class Device(Base):
     platform: Mapped[str] = mapped_column(String(64), nullable=False)  # cisco_ios, juniper_junos, etc.
     port: Mapped[int] = mapped_column(Integer, default=22)
     username: Mapped[str] = mapped_column(String(128), nullable=False)
-    # Fernet で暗号化して保存（DEVICE_ENCRYPTION_KEY）。カラム型は既存の VARCHAR(256) のまま
-    password: Mapped[str] = mapped_column(EncryptedString(256), nullable=False)
+    # 認証はパスワード・SSH秘密鍵のどちらか、または両方。Fernet で暗号化して保存（DEVICE_ENCRYPTION_KEY）
+    password: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    private_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    key_passphrase: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

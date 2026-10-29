@@ -37,4 +37,6 @@ async def load_connection_info(db: AsyncSession, device_id: str) -> DeviceConnec
         password=d.password,
         enable_secret=d.enable_secret,
         jump=jump_info(d.jump_host) if d.jump_host else None,
+        private_key=d.private_key,
+        key_passphrase=d.key_passphrase,
     )

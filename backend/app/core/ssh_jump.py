@@ -6,20 +6,19 @@
 
 踏み台自身のホスト鍵も known_hosts で検証する（ssh_hostkeys.py）。
 """
-import io
 from dataclasses import dataclass
 
 import paramiko
 
 from app.core.config import settings
 from app.core.ssh_hostkeys import describe_ssh_error, load_known_hosts
-
-MAX_PRIVATE_KEY_LENGTH = 16 * 1024
-
-_KEY_CLASSES: list[type[paramiko.PKey]] = [paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey]
-if hasattr(paramiko, "DSSKey"):  # Paramiko 4 で削除予定
-    _KEY_CLASSES.append(paramiko.DSSKey)
-
+from app.core.ssh_keys import (  # noqa: F401 - 既存の import 元との互換のため再エクスポート
+    MAX_PRIVATE_KEY_LENGTH,
+    PrivateKeyError,
+    key_summary,
+    load_private_key,
+    normalize_private_key,
+)
 
 @dataclass
 class JumpHostInfo:
@@ -38,40 +37,6 @@ class JumpHostError(Exception):
     def __init__(self, message: str, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable
-
-
-class PrivateKeyError(ValueError):
-    pass
-
-
-def normalize_private_key(text: str) -> str:
-    return text.replace("\r\n", "\n").strip() + "\n"
-
-
-def load_private_key(text: str, passphrase: str | None = None) -> paramiko.PKey:
-    """OpenSSH / PEM 形式の秘密鍵文字列を読み込む（RSA / ECDSA / Ed25519）"""
-    text = normalize_private_key(text)
-    if "PuTTY-User-Key-File" in text:
-        raise PrivateKeyError("PuTTY形式(.ppk)の鍵は使えません。PuTTYgen で OpenSSH 形式に変換してください")
-    if "PRIVATE KEY" not in text:
-        raise PrivateKeyError("秘密鍵の形式を認識できません（-----BEGIN ... PRIVATE KEY----- で始まる鍵を貼り付けてください）")
-
-    needs_passphrase = False
-    for cls in _KEY_CLASSES:
-        try:
-            return cls.from_private_key(io.StringIO(text), password=passphrase or None)
-        except paramiko.PasswordRequiredException:
-            needs_passphrase = True
-        except (paramiko.SSHException, ValueError, TypeError, IndexError):
-            continue
-    if needs_passphrase and not passphrase:
-        raise PrivateKeyError("この秘密鍵はパスフレーズで保護されています。パスフレーズを入力してください")
-    raise PrivateKeyError("秘密鍵を読み込めませんでした（形式が不正、またはパスフレーズが違います）")
-
-
-def key_summary(pkey: paramiko.PKey) -> str:
-    """画面表示用（例: ssh-ed25519 SHA256:xxxx）"""
-    return f"{pkey.get_name()} {pkey.fingerprint}" if hasattr(pkey, "fingerprint") else pkey.get_name()
 
 
 def connect_jump(jump: JumpHostInfo) -> paramiko.SSHClient:
