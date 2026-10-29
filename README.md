@@ -25,6 +25,7 @@
 - Arista EOS
 - HP Comware
 - Huawei VRP
+- Palo Alto Networks PAN-OS（設定モードの `show` を set 形式で取得）
 
 収集時、タイムスタンプなど取得のたびに変わる行（`! Last configuration change at ...` 等）は除外してから保存するため、実際に設定が変わったときだけ新しい世代が作られます。除外パターンは `backend/app/services/config_service.py` の `PLATFORMS` で調整できます。
 
@@ -103,6 +104,15 @@ docker compose -f docker-compose.prod.yml up -d --build
 - HTTPS は前段のリバースプロキシ・ロードバランサーで終端してください（ターミナルの通信に機器の操作内容が流れるため、本番では HTTPS 必須）
 
 ---
+
+## 機器への SSH 認証
+
+機器ごとにパスワード・SSH 秘密鍵のどちらか、または両方を設定できます（直接接続・踏み台経由のどちらでも使えます）。
+
+- 秘密鍵は OpenSSH 形式（`-----BEGIN OPENSSH PRIVATE KEY-----`）または PEM 形式の RSA / ECDSA / Ed25519。パスフレーズ付きの鍵も使えます
+- 両方を設定した場合は鍵 → パスワードの順に試します
+- 秘密鍵・パスフレーズは暗号化して保存し、画面・API には鍵の種類と指紋のみ表示します
+- Cisco 等で enable が必要な場合は、鍵認証でも「Enableシークレット」を設定してください
 
 ## 踏み台サーバ経由の接続
 
@@ -236,7 +246,8 @@ netconfig-manager/
 │       │   ├── permissions.py   # ロールと権限の定義（RBAC）
 │       │   ├── crypto.py        # 機器パスワード暗号化
 │       │   ├── ssh_hostkeys.py  # SSH ホスト鍵検証
-│       │   ├── ssh_jump.py      # 踏み台経由の接続・秘密鍵の読み込み
+│       │   ├── ssh_keys.py      # SSH 秘密鍵の読み込み（機器・踏み台共通）
+│       │   ├── ssh_jump.py      # 踏み台経由の接続
 │       │   └── migrate.py       # 起動時のDBマイグレーション
 │       ├── models/
 │       │   ├── __init__.py      # モデル登録

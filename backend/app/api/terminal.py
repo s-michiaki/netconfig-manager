@@ -26,6 +26,7 @@ from app.core.database import AsyncSessionLocal
 from app.core.permissions import Perm, has_permission
 from app.core.ssh_hostkeys import describe_ssh_error, load_known_hosts
 from app.core.ssh_jump import JumpHostError, connect_jump, open_tunnel
+from app.core.ssh_keys import PrivateKeyError, load_private_key
 from app.services.config_service import DeviceConnectionInfo
 from app.services.connection import load_connection_info
 
@@ -56,6 +57,8 @@ class TerminalSession:
         self.channel: paramiko.Channel | None = None
 
     def connect(self, cols: int, rows: int) -> None:
+        # 秘密鍵は接続前に読み込み、形式・パスフレーズの誤りを分かりやすいエラーにする
+        pkey = load_private_key(self.device.private_key, self.device.key_passphrase) if self.device.private_key else None
         sock = None
         if self.device.jump:
             # 踏み台へ接続し、機器宛ての direct-tcpip チャネルをソケットとして使う
@@ -67,7 +70,8 @@ class TerminalSession:
             hostname=self.device.hostname,
             port=self.device.port,
             username=self.device.username,
-            password=self.device.password,
+            password=self.device.password or None,
+            pkey=pkey,  # 鍵とパスワードの両方がある場合は鍵 → パスワードの順に試す
             timeout=settings.SSH_TIMEOUT,
             auth_timeout=settings.SSH_AUTH_TIMEOUT,
             look_for_keys=False,
@@ -140,7 +144,12 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     except Exception as e:  # noqa: BLE001
         logger.warning("SSH接続失敗 user=%s device=%s: %r", user.username, device.name, e)
         await loop.run_in_executor(None, session.close)
-        reason = str(e) if isinstance(e, JumpHostError) else describe_ssh_error(e)
+        if isinstance(e, JumpHostError):
+            reason = str(e)
+        elif isinstance(e, PrivateKeyError):
+            reason = f"機器の秘密鍵: {e}"
+        else:
+            reason = describe_ssh_error(e)
         await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
         await websocket.close()
         return

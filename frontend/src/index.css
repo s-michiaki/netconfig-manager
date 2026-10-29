@@ -317,6 +317,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
   padding: 24px;
   width: 440px;
   max-width: 95vw;
+  max-height: 92vh;   /* 項目が多いモーダルでも画面内に収め、中身をスクロールさせる */
+  overflow-y: auto;
 }
 
 .modal-title { font-size: 15px; font-weight: 600; margin-bottom: 18px; }

@@ -23,6 +23,7 @@ from paramiko import BadHostKeyException
 from app.core.config import settings
 from app.core.ssh_hostkeys import HostKeyPolicy, UnknownHostKeyError, describe_ssh_error
 from app.core.ssh_jump import JumpHostError, JumpHostInfo, connect_jump, open_tunnel
+from app.core.ssh_keys import PrivateKeyError, load_private_key
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ class PlatformSpec:
     commands: list[str]
     supports_enable: bool = False
     ignore_patterns: list[str] = field(default_factory=list)
+    # 取得前に実行する設定コマンド（出力は保存しない）
+    prep_commands: list[str] = field(default_factory=list)
+    # 設定モードに入って実行するコマンド（PAN-OS の "configure" → "show" など）
+    config_mode_commands: list[str] = field(default_factory=list)
 
 
 PLATFORMS: dict[str, PlatformSpec] = {
@@ -64,6 +69,13 @@ PLATFORMS: dict[str, PlatformSpec] = {
     "huawei": PlatformSpec(
         ["display current-configuration"], False, [r"^!Last configuration was (updated|saved) at "]
     ),
+    # Palo Alto PAN-OS: 差分を見やすくするため set 形式で出力させ、設定モードの show で全体を取得
+    "paloalto_panos": PlatformSpec(
+        commands=[],
+        prep_commands=["set cli config-output-format set"],
+        config_mode_commands=["show"],
+        ignore_patterns=[r"^\[edit\]$", r"^Entering configuration mode$"],
+    ),
 }
 
 SUPPORTED_PLATFORMS = tuple(PLATFORMS.keys())
@@ -79,9 +91,11 @@ class DeviceConnectionInfo:
     platform: str
     port: int
     username: str
-    password: str
+    password: str | None
     enable_secret: str | None
     jump: JumpHostInfo | None = None  # 踏み台経由の場合のみ
+    private_key: str | None = None  # SSH 鍵認証（パスワードと併用可）
+    key_passphrase: str | None = None
 
 
 @dataclass
@@ -197,7 +211,7 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
         "host": device.hostname,
         "port": device.port,
         "username": device.username,
-        "password": device.password,
+        "password": device.password or "",
         "timeout": settings.SSH_TIMEOUT,
         "auth_timeout": settings.SSH_AUTH_TIMEOUT,
         "alt_host_keys": True,
@@ -206,6 +220,10 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
     }
     if device.enable_secret:
         params["secret"] = device.enable_secret
+    if device.private_key:
+        # 鍵とパスワードの両方がある場合、Paramiko は鍵 → パスワードの順に試す
+        params["pkey"] = load_private_key(device.private_key, device.key_passphrase)
+        params["allow_agent"] = False
 
     jump_client = None
     if device.jump:
@@ -220,13 +238,27 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
     conn = ConnectHandler(**params)
     # Netmiko 既定の AutoAddPolicy を known_hosts 検証ポリシーに差し替えてから接続する
     conn.key_policy = HostKeyPolicy()
+    if device.private_key and device.platform.startswith("paloalto"):
+        # PAN-OS ドライバは use_keys=False だとキーボード対話認証（パスワード）専用のクライアントを使い、
+        # 鍵を無視する。生成時に use_keys=True を渡すと鍵ファイルの存在を要求されるため（秘密鍵は
+        # ディスクに書き出さない）、生成後に切り替えて標準の SSHClient（pkey を使う）にする
+        conn.use_keys = True
     try:
         conn._open()
         if device.enable_secret and spec.supports_enable:
             conn.enable()
+        for cmd in spec.prep_commands:
+            conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT)
         output = []
         for cmd in spec.commands:
             output.append(conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT))
+        if spec.config_mode_commands:
+            conn.config_mode()
+            try:
+                for cmd in spec.config_mode_commands:
+                    output.append(conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT))
+            finally:
+                conn.exit_config_mode()
         return "\n".join(output)
     finally:
         try:
@@ -254,6 +286,8 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
         raw = fetch_config(device)
     except JumpHostError as e:
         return CollectResult(success=False, error=str(e), retryable=e.retryable)
+    except PrivateKeyError as e:
+        return CollectResult(success=False, error=f"機器の秘密鍵: {e}")
     except NetmikoAuthenticationException:
         return CollectResult(success=False, error="認証失敗" + ("（機器）" if device.jump else ""))
     except Exception as e:  # noqa: BLE001

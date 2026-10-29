@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { ChangeEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
@@ -13,6 +13,9 @@ interface Device {
   description: string | null;
   is_active: boolean;
   has_enable_secret: boolean;
+  has_password: boolean;
+  has_private_key: boolean;
+  key_info: string | null;
   jump_host_id: string | null;
   jump_host_name: string | null;
 }
@@ -27,12 +30,14 @@ const PLATFORM_LABELS: Record<string, string> = {
   arista_eos: "Arista EOS",
   hp_comware: "HP Comware",
   huawei: "Huawei VRP",
+  paloalto_panos: "Palo Alto PAN-OS",
 };
 
 const EMPTY_FORM = {
   name: "", hostname: "", platform: "cisco_ios", port: 22,
   username: "", password: "", enable_secret: "", description: "", is_active: true,
   clear_enable_secret: false, jump_host_id: "",
+  private_key: "", key_passphrase: "", clear_password: false, clear_private_key: false,
 };
 
 function DeviceModal({
@@ -42,7 +47,9 @@ function DeviceModal({
   const [form, setForm] = useState(() =>
     device
       ? {
-          ...EMPTY_FORM, ...device, description: device.description ?? "", password: "", enable_secret: "",
+          ...EMPTY_FORM,
+          name: device.name, hostname: device.hostname, platform: device.platform, port: device.port,
+          username: device.username, description: device.description ?? "", is_active: device.is_active,
           jump_host_id: device.jump_host_id ?? "",
         }
       : EMPTY_FORM
@@ -67,8 +74,16 @@ function DeviceModal({
       jump_host_id: form.jump_host_id || null,
       // 編集時、空欄のパスワードは「変更しない」
       password: form.password || undefined,
+      private_key: form.private_key || undefined,
+      key_passphrase: form.key_passphrase || undefined,
       enable_secret: form.enable_secret || undefined,
-      ...(isEdit ? { clear_enable_secret: form.clear_enable_secret } : {}),
+      ...(isEdit
+        ? {
+            clear_enable_secret: form.clear_enable_secret,
+            clear_password: form.clear_password,
+            clear_private_key: form.clear_private_key,
+          }
+        : {}),
     };
     try {
       if (isEdit) await api.put(`/devices/${device.id}`, body);
@@ -98,7 +113,21 @@ function DeviceModal({
     }
   };
 
-  const canSave = form.name && form.hostname && form.username && (isEdit || form.password);
+  // 秘密鍵ファイルを読み込んでテキスト欄に入れる（ブラウザ内で読むだけで、送信は「保存」時のみ）
+  const loadKeyFile = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 16 * 1024) {
+      setError("秘密鍵ファイルが大きすぎます（16KBまで）");
+      return;
+    }
+    file.text().then((t) => set("private_key", t));
+    e.target.value = "";
+  };
+
+  const willHavePassword = (isEdit && device.has_password && !form.clear_password) || !!form.password;
+  const willHaveKey = (isEdit && device.has_private_key && !form.clear_private_key) || !!form.private_key;
+  const canSave = form.name && form.hostname && form.username && (willHavePassword || willHaveKey);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -143,17 +172,62 @@ function DeviceModal({
             </p>
           )}
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <div className="form-group">
-            <label className="form-label">ユーザー名</label>
-            <input value={form.username} onChange={(e) => set("username", e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label className="form-label">パスワード{isEdit && "（変更時のみ）"}</label>
-            <input type="password" autoComplete="new-password" value={form.password}
-              onChange={(e) => set("password", e.target.value)} />
+        <div className="form-group">
+          <label className="form-label">ユーザー名</label>
+          <input value={form.username} onChange={(e) => set("username", e.target.value)} autoComplete="off" />
+        </div>
+        <p className="section-label" style={{ marginTop: 6 }}>認証（パスワード・SSH秘密鍵のどちらか、または両方）</p>
+        <div className="form-group">
+          <label className="form-label">
+            パスワード{isEdit && device.has_password ? "（設定済み。変更時のみ入力）" : ""}
+          </label>
+          <input type="password" autoComplete="new-password" value={form.password}
+            onChange={(e) => set("password", e.target.value)} disabled={form.clear_password} />
+          {isEdit && device.has_password && (
+            <label className="form-check" style={{ marginTop: 6 }}>
+              <input type="checkbox" checked={form.clear_password} onChange={(e) => set("clear_password", e.target.checked)} />
+              パスワードを削除する（鍵認証のみにする）
+            </label>
+          )}
+        </div>
+        <div className="form-group">
+          <label className="form-label">
+            SSH秘密鍵（OpenSSH / PEM 形式）{isEdit && device.has_private_key ? `— 設定済み: ${device.key_info ?? ""}` : "（任意）"}
+          </label>
+          <textarea
+            className="mono"
+            rows={4}
+            value={form.private_key}
+            onChange={(e) => set("private_key", e.target.value)}
+            disabled={form.clear_private_key}
+            placeholder={isEdit && device.has_private_key ? "変更する場合のみ貼り付け" : "-----BEGIN OPENSSH PRIVATE KEY-----\n..."}
+            spellCheck={false}
+            style={{ fontSize: 11, resize: "vertical" }}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+            <label className="btn" style={{ padding: "2px 10px", fontSize: 11, cursor: "pointer" }}>
+              ファイルから読み込む
+              <input type="file" onChange={loadKeyFile} style={{ display: "none" }} disabled={form.clear_private_key} />
+            </label>
+            {isEdit && device.has_private_key && (
+              <label className="form-check">
+                <input type="checkbox" checked={form.clear_private_key}
+                  onChange={(e) => set("clear_private_key", e.target.checked)} />
+                秘密鍵を削除する
+              </label>
+            )}
           </div>
         </div>
+        {(form.private_key || (isEdit && device.has_private_key && !form.clear_private_key)) && (
+          <div className="form-group">
+            <label className="form-label">鍵のパスフレーズ（鍵が保護されている場合）</label>
+            <input type="password" autoComplete="new-password" value={form.key_passphrase}
+              onChange={(e) => set("key_passphrase", e.target.value)} />
+          </div>
+        )}
+        {!(willHavePassword || willHaveKey) && (
+          <p className="form-error">パスワードとSSH秘密鍵の少なくとも一方が必要です</p>
+        )}
         <div className="form-group">
           <label className="form-label">
             Enableシークレット（任意{isEdit && device.has_enable_secret ? "・設定済み。変更時のみ入力" : ""}）
@@ -281,6 +355,9 @@ export default function DevicesPage() {
               <p className="device-card-info" style={{ marginTop: 2 }}>
                 {PLATFORM_LABELS[d.platform] || d.platform} · port {d.port}
               </p>
+              {d.has_private_key && (
+                <p className="device-card-info" style={{ marginTop: 2 }}>🔑 鍵認証{d.has_password ? "＋パスワード" : ""}</p>
+              )}
               {d.jump_host_name && (
                 <p className="device-card-info" style={{ marginTop: 2 }}>↪ 踏み台経由: {d.jump_host_name}</p>
               )}
