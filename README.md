@@ -78,6 +78,20 @@ podman-compose logs backend | grep 初期管理者
 
 ログイン後、サイドバーの「パスワード変更」から管理者パスワードを変更してください。
 
+### 自動セットアップ（AlmaLinux / RHEL 10・おすすめ）
+
+Podman のインストールから `.env` の生成、ビルド・起動、自動起動設定、ファイアウォール開放、起動確認までを対話形式で行います。
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/s-michiaki/netconfig-manager/master/scripts/setup.sh   # またはリポジトリを clone 済みなら scripts/setup.sh
+bash setup.sh
+```
+
+- `[ ]` 内の値は Enter でそのまま採用されます（初期管理者のパスワードはランダム生成）
+- `.env` の秘密値（DBパスワード・JWT鍵・機器パスワード暗号化キー）は自動生成し、`/root/netconfig-manager-backup/` にも控えを保存します
+- 2回目以降の実行は「更新」として動作します（`git pull` → 再ビルド → 再起動。既存の `.env` は変更しません）
+- 導入前の環境確認だけを行う場合は `bash scripts/check_env.sh`
+
 ### 起動（本番）
 
 ```bash
