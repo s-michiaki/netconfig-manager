@@ -21,6 +21,11 @@ const PERM_LABELS: Record<string, string> = {
   "schedule:read": "スケジュール閲覧",
   "schedule:write": "スケジュール編集",
   "user:admin": "ユーザー管理",
+  "topology:read": "構成図閲覧",
+  "topology:write": "構成図編集",
+  "compliance:read": "コンプライアンス閲覧",
+  "compliance:write": "コンプライアンスのルール編集",
+  "audit:read": "監査ログ閲覧",
 };
 
 function UserModal({

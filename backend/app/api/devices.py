@@ -1,6 +1,8 @@
+import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import delete
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,7 +19,9 @@ from app.core.ssh_keys import (
     load_private_key,
     normalize_private_key,
 )
+from app.models.compliance import ComplianceResult
 from app.models.device import Device, JumpHost
+from app.services.audit import Audit, changed_fields, get_audit
 from app.worker import collect_all_devices, collect_device_config
 
 router = APIRouter()
@@ -163,7 +167,7 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require(Perm.DEVICE_WRITE))],
 )
-async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db)):
+async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     data = payload.model_dump()
     for f in ("password", "enable_secret", "key_passphrase"):
         data[f] = data.get(f) or None
@@ -173,8 +177,12 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         data["private_key"] = data["key_passphrase"] = None
     data["jump_host_id"] = data.get("jump_host_id") or None
     await _check_jump_host(db, data["jump_host_id"])
-    device = Device(**data)
+    device = Device(id=str(uuid.uuid4()), **data)
     db.add(device)
+    audit("device.create", target_type="device", target_id=device.id, target_name=device.name,
+          detail={"hostname": device.hostname, "platform": device.platform, "port": device.port,
+                  "username": device.username, "jump_host_id": device.jump_host_id,
+                  "auth": [k for k in ("password", "private_key") if data.get(k)]})
     await _commit_or_409(db)
     await db.refresh(device)
     return _to_response(device, await _jump_names(db))
@@ -192,9 +200,11 @@ async def device_defaults():
 
 
 @router.post("/collect/all", dependencies=[Depends(require(Perm.COLLECT))])
-async def trigger_collect_all():
+async def trigger_collect_all(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """全デバイスのコンフィグ収集をトリガー"""
     task = collect_all_devices.delay("manual")
+    audit("collect.run", target_type="device", target_name="全機器")
+    await db.commit()
     return {"task_id": task.id, "status": "queued"}
 
 
@@ -204,9 +214,13 @@ async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
-async def update_device(device_id: str, payload: DeviceUpdate, db: AsyncSession = Depends(get_db)):
+async def update_device(
+    device_id: str, payload: DeviceUpdate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)
+):
     device = await _get_or_404(db, device_id)
     data = payload.model_dump(exclude_unset=True)
+    audit("device.update", target_type="device", target_id=device.id, target_name=device.name,
+          detail=changed_fields(data, {"password", "private_key", "key_passphrase", "enable_secret"}))
     clear_enable = data.pop("clear_enable_secret", False)
     clear_password = data.pop("clear_password", False)
     clear_key = data.pop("clear_private_key", False)
@@ -245,16 +259,21 @@ async def update_device(device_id: str, payload: DeviceUpdate, db: AsyncSession 
 @router.delete(
     "/{device_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.DEVICE_WRITE))]
 )
-async def delete_device(device_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """デバイスを削除する（Gitの履歴ディレクトリは監査用に残す）"""
     device = await _get_or_404(db, device_id)
+    await db.execute(delete(ComplianceResult).where(ComplianceResult.device_id == device.id))
     await db.delete(device)
+    audit("device.delete", target_type="device", target_id=device.id, target_name=device.name,
+          detail={"hostname": device.hostname})
     await db.commit()
 
 
 @router.post("/{device_id}/collect", dependencies=[Depends(require(Perm.COLLECT))])
-async def trigger_collect(device_id: str, db: AsyncSession = Depends(get_db)):
+async def trigger_collect(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """単一デバイスのコンフィグ収集をトリガー"""
-    await _get_or_404(db, device_id)
+    device = await _get_or_404(db, device_id)
     task = collect_device_config.delay(device_id, "manual")
+    audit("collect.run", target_type="device", target_id=device.id, target_name=device.name)
+    await db.commit()
     return {"task_id": task.id, "status": "queued"}

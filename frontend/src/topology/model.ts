@@ -66,6 +66,8 @@ export interface DeviceStatus {
   status: CollectState;
   last_collected_at: string | null;
   last_message: string | null;
+  violations: number; // コンプライアンス違反の数
+  violation_severity: "high" | "medium" | "low" | null;
 }
 
 export interface MapSummary {

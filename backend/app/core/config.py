@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     # strict: known_hosts に無いホストへの接続を拒否
     SSH_HOST_KEY_POLICY: Literal["tofu", "strict"] = "tofu"
 
+    # --- 監査ログ ---
+    # ターミナルの画面出力の記録先（asciicast v2 形式。1セッション1ファイル）
+    TERMINAL_LOG_PATH: str = "/data/terminal-logs"
+    # 1セッションの記録の上限（バイト）。超えた分は記録しない（ディスクの圧迫を防ぐ）
+    TERMINAL_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
+    # 保持日数（0 なら削除しない）。毎日1回、古いものを削除する
+    AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
+    TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)
+
     @field_validator("ADMIN_PASSWORD", mode="before")
     @classmethod
     def _empty_to_none(cls, v):

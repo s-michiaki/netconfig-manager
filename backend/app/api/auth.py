@@ -8,7 +8,7 @@ import logging
 import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import AfterValidator, BaseModel, StringConstraints
@@ -27,6 +27,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
+from app.services.audit import client_ip, make_log, record_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,18 +76,29 @@ def user_info(user: User) -> UserInfo:
 
 
 @router.post("/token", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalar_one_or_none()
     hashed = user.hashed_password if user else DUMMY_HASH
     # bcrypt は重い処理なのでイベントループを塞がないようスレッドで実行
     ok = await run_in_threadpool(verify_password, form_data.password, hashed)
     if not user or not ok or not user.is_active:
+        reason = "ユーザーが存在しない" if not user else "無効なユーザー" if ok else "パスワード誤り"
+        await record_now(
+            db,
+            make_log(
+                "auth.login_failed", username=form_data.username[:64], ip=client_ip(request),
+                detail={"reason": reason}, success=False,
+            ),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ユーザー名またはパスワードが正しくありません",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    await record_now(db, make_log("auth.login", user=user, ip=client_ip(request)))
     return {"access_token": create_access_token(user.id, user.hashed_password), "token_type": "bearer"}
 
 
@@ -98,6 +110,7 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.post("/change-password", response_model=Token)
 async def change_password(
+    request: Request,
     payload: PasswordChange,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -105,6 +118,8 @@ async def change_password(
     if not await run_in_threadpool(verify_password, payload.current_password, user.hashed_password):
         raise HTTPException(status_code=400, detail="現在のパスワードが正しくありません")
     user.hashed_password = await run_in_threadpool(hash_password, payload.new_password)
+    db.add(make_log("auth.password_change", user=user, ip=client_ip(request), target_type="user",
+                    target_id=user.id, target_name=user.username))
     await db.commit()
     logger.info("パスワード変更 user=%s", user.username)
     # 変更前のトークンは無効になるため、新しいトークンを返す

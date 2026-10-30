@@ -24,10 +24,13 @@ class Perm(str, Enum):
     USER_ADMIN = "user:admin"  # ユーザー管理
     TOPOLOGY_READ = "topology:read"  # 構成図の閲覧
     TOPOLOGY_WRITE = "topology:write"  # 構成図の作成・編集・削除（認証情報は扱わないので operator も可）
+    COMPLIANCE_READ = "compliance:read"  # コンプライアンスチェックの結果・ルールの閲覧
+    COMPLIANCE_WRITE = "compliance:write"  # ルールの作成・編集・削除、再検査
+    AUDIT_READ = "audit:read"  # 監査ログ（操作履歴・ターミナルの記録）の閲覧。admin のみ
 
 
-_VIEWER = {Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ}
-_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE}
+_VIEWER = {Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ}
+_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE}
 _ADMIN = set(Perm)
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Perm]] = {

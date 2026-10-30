@@ -542,3 +542,64 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-point { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--color-surface); }
 .topo-point.selected { box-shadow: 0 0 0 3px var(--color-accent); }
 .react-flow__node-point .topo-handle { width: 7px; height: 7px; }
+
+/* ===== 共通: タブ・表 ===== */
+.seg-tabs {
+  display: inline-flex; padding: 3px; gap: 2px;
+  background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 7px;
+}
+.seg-tab {
+  border: none; background: transparent; color: var(--color-muted);
+  font-size: 12px; padding: 5px 14px; border-radius: 5px; cursor: pointer;
+}
+.seg-tab:hover { color: var(--color-text); }
+.seg-tab.active { background: var(--color-accent-dim); color: var(--color-text); font-weight: 600; }
+.table-scroll { overflow-x: auto; }
+.nowrap { white-space: nowrap; }
+
+/* ===== 監査ログ ===== */
+.audit-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+.audit-field { display: flex; flex-direction: column; width: 160px; }
+.audit-field-wide { width: 260px; }
+.audit-field .form-label { margin-bottom: 3px; }
+.audit-check { padding-bottom: 8px; }
+.audit-bar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.audit-pager { display: flex; align-items: center; gap: 8px; }
+.audit-table td { vertical-align: top; font-size: 12px; }
+.audit-table th, .audit-table .badge { white-space: nowrap; }
+.audit-detail { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 11.5px; word-break: break-all; }
+.audit-player { width: min(1100px, 96vw); max-width: 96vw; }
+.audit-player-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.audit-player-term { background: #0d1117; border-radius: 6px; padding: 8px; overflow: auto; max-height: 62vh; }
+.audit-player-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+
+/* ===== コンプライアンス ===== */
+.cmp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.cmp-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; }
+.cmp-card-label { font-size: 11px; color: var(--color-muted); }
+.cmp-card-value { font-size: 24px; font-weight: 700; line-height: 1.2; }
+.cmp-card-sub { font-size: 12px; font-weight: 400; color: var(--color-muted); }
+.cmp-card-sev { display: flex; gap: 12px; font-size: 16px; font-weight: 600; align-items: center; margin-top: 4px; }
+.cmp-details { font-size: 11.5px; display: flex; flex-direction: column; gap: 2px; word-break: break-all; }
+.cmp-cond { color: #a5abc8; margin-top: 3px; word-break: break-all; }
+.cmp-modal { width: 620px; }
+.cmp-platforms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
+.cmp-row3 { display: grid; grid-template-columns: 1.4fr 1fr 0.6fr; gap: 8px; }
+.cmp-sentence {
+  font-size: 12px; background: var(--color-surface2); border-radius: var(--radius-sm);
+  padding: 8px 10px; margin-bottom: 12px; color: #c9cde0; word-break: break-all;
+}
+.cmp-test { border-top: 1px solid var(--color-border); padding-top: 12px; }
+.cmp-test .btn { white-space: nowrap; flex-shrink: 0; }
+.cmp-test-result { margin-top: 8px; display: flex; gap: 8px; align-items: flex-start; font-size: 12px; }
+.cmp-templates { list-style: none; display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; margin-bottom: 8px; }
+.cmp-templates .form-check { align-items: flex-start; font-size: 13px; color: var(--color-text); }
+
+/* 構成図の機器に付ける違反バッジ */
+.topo-violation {
+  position: absolute; top: -8px; right: -8px; font-size: 10px; font-weight: 700; padding: 1px 6px;
+  border-radius: 10px; border: 1.5px solid var(--color-surface); pointer-events: none; white-space: nowrap;
+}
+.topo-violation.sev-high { background: var(--color-danger); color: #1a0606; }
+.topo-violation.sev-medium { background: var(--color-warning); color: #1f1400; }
+.topo-violation.sev-low { background: #7c82a3; color: #0f1117; }
