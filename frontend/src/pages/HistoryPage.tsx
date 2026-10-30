@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 
 interface Device { id: string; name: string; }
@@ -15,7 +16,9 @@ function parseDiff(diff: string) {
 
 export default function HistoryPage() {
   const [devices, setDevices] = useState<Device[]>([]);
-  const [selectedDevice, setSelectedDevice] = useState("");
+  const [searchParams] = useSearchParams();
+  // 構成図などから ?device=<id> 付きで開かれた場合は、その機器を選択した状態にする
+  const [selectedDevice, setSelectedDevice] = useState(searchParams.get("device") ?? "");
   const [history, setHistory] = useState<Commit[]>([]);
   const [selectedA, setSelectedA] = useState("");
   const [selectedB, setSelectedB] = useState("");

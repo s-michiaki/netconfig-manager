@@ -11,6 +11,8 @@ export const PERM = {
   SCHEDULE_READ: "schedule:read",
   SCHEDULE_WRITE: "schedule:write",
   USER_ADMIN: "user:admin",
+  TOPOLOGY_READ: "topology:read",
+  TOPOLOGY_WRITE: "topology:write",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 
