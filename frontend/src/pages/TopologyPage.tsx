@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   Background, BackgroundVariant, ConnectionMode, Controls, MiniMap, ReactFlow, ReactFlowProvider,
   applyEdgeChanges, applyNodeChanges, useReactFlow,
-  type Connection, type EdgeChange, type NodeChange,
+  type Connection, type EdgeChange, type FinalConnectionState, type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { toBlob } from "html-to-image";
@@ -13,7 +13,7 @@ import {
   DEFAULT_SIZE, DEVICE_NODE_SIZE, ICON_LABELS, PALETTE, STATE_LABELS,
   defaultIcon, formatTime, fromFlow, newId, toFlow, withParallelInfo,
   type AreaNode, type CloudNode, type DeviceIcon, type DeviceNode, type DeviceStatus, type FontSize,
-  type LineStyle, type LinkEdge, type MapDetail, type MapSummary, type TextNode, type TopoNode,
+  type LineStyle, type LinkEdge, type MapDetail, type MapSummary, type TextNode, type TopoNode, type UnmanagedNode,
 } from "../topology/model";
 import { DeviceIconSvg, TopologyContext, nodeTypes } from "../topology/nodes";
 import { edgeTypes } from "../topology/LinkEdge";
@@ -306,6 +306,22 @@ function Editor(props: EditorProps) {
     setDirty(true);
   }, [setDirty]);
 
+  // 線をつなげられるノード（テキスト・グループ枠は不可）
+  const CONNECTABLE = useMemo(() => new Set(["device", "unmanaged", "cloud"]), []);
+
+  // React Flow は相手の接続点 ● の近くで離したときだけ線をつなぐ。
+  // 相手の箱の上ならどこで離してもつながるように、離した位置のノードを探して接続する
+  const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+    if (state.isValid || !state.fromNode) return;
+    const pt = "changedTouches" in event ? event.changedTouches[0] : event;
+    if (!pt) return;
+    const el = document.elementFromPoint(pt.clientX, pt.clientY)?.closest(".react-flow__node");
+    const targetId = el?.getAttribute("data-id");
+    if (!targetId || targetId === state.fromNode.id) return;
+    if (!CONNECTABLE.has(rf.getNode(targetId)?.type ?? "")) return;
+    onConnect({ source: state.fromNode.id, target: targetId, sourceHandle: null, targetHandle: null });
+  }, [CONNECTABLE, onConnect, rf]);
+
   const updateNode = useCallback((id: string, patch: Record<string, unknown>) => {
     setNodes((nds) => nds.map((n) => (n.id === id ? ({ ...n, data: { ...n.data, ...patch } } as TopoNode) : n)));
     setDirty(true);
@@ -334,9 +350,15 @@ function Editor(props: EditorProps) {
     setDirty(true);
   };
 
-  const addDecoration = (kind: "cloud" | "text" | "area") => {
+  const addDecoration = (kind: AddKind) => {
     const c = viewCenter();
-    if (kind === "cloud") {
+    if (kind === "unmanaged") {
+      addNode({
+        id: newId("u"), type: "unmanaged",
+        position: { x: c.x - DEVICE_NODE_SIZE.w / 2, y: c.y - DEVICE_NODE_SIZE.h / 2 },
+        data: { label: "非管理機器", note: "", icon: null },
+      } as UnmanagedNode);
+    } else if (kind === "cloud") {
       const { w, h } = DEFAULT_SIZE.cloud;
       addNode({ id: newId("c"), type: "cloud", position: { x: c.x - w / 2, y: c.y - h / 2 }, width: w, height: h, data: { label: "Internet" } } as CloudNode);
     } else if (kind === "text") {
@@ -547,6 +569,7 @@ function Editor(props: EditorProps) {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onConnectEnd={onConnectEnd}
               isValidConnection={(c) => c.source !== c.target}
               connectionMode={ConnectionMode.Loose}
               connectionRadius={30}
@@ -570,7 +593,8 @@ function Editor(props: EditorProps) {
               <Controls showInteractive={false} />
               <MiniMap
                 pannable zoomable
-                nodeColor={(n) => (n.type === "area" ? "transparent" : n.type === "device" ? "#4f8ef7" : "#3a4060")}
+                nodeColor={(n) => (n.type === "area" ? "transparent" : n.type === "device" ? "#4f8ef7"
+                  : n.type === "unmanaged" ? "#5b6390" : "#3a4060")}
                 nodeStrokeColor={(n) => (n.type === "area" ? "#4a5178" : "transparent")}
                 maskColor="rgba(15,17,23,0.7)"
                 style={{ background: "#1a1d27", width: 160, height: 110 }}
@@ -595,6 +619,8 @@ function Editor(props: EditorProps) {
                 onIcon={(icon) => updateNode(selNodes[0].id, { icon })} onRemove={removeSelected}
                 onCollected={() => window.setTimeout(refreshStatus, 15_000)} notify={setNotice}
               />
+            ) : selNodes[0].type === "unmanaged" ? (
+              <UnmanagedPanel node={selNodes[0]} editing={editing} onChange={(p) => updateNode(selNodes[0].id, p)} onRemove={removeSelected} />
             ) : (
               <DecorationPanel node={selNodes[0]} editing={editing} onChange={(p) => updateNode(selNodes[0].id, p)} onRemove={removeSelected} />
             )
@@ -759,7 +785,56 @@ function ColorPicker({ value, onChange, label }: { value?: string | null; onChan
   );
 }
 
-const DECOR_TITLE = { cloud: "雲", text: "テキスト", area: "グループ枠" } as const;
+const DECOR_TITLE = { unmanaged: "非管理機器", cloud: "雲", text: "テキスト", area: "グループ枠" } as const;
+
+type AddKind = "unmanaged" | "cloud" | "text" | "area";
+
+function UnmanagedPanel({
+  node, editing, onChange, onRemove,
+}: { node: UnmanagedNode; editing: boolean; onChange: (p: Record<string, unknown>) => void; onRemove: () => void }) {
+  const icon = node.data.icon ?? "other";
+  const head = (
+    <div className="topo-dev-head">
+      <span className="topo-dev-icon"><DeviceIconSvg icon={icon} size={22} /></span>
+      <div>
+        <div className="topo-map-name">{node.data.label || "非管理機器"}</div>
+        <div className="topo-muted topo-small">{node.data.note || "補足なし"}</div>
+      </div>
+    </div>
+  );
+  if (!editing) {
+    return (
+      <Section title="選択中: 非管理機器">
+        {head}
+        <p className="topo-muted topo-small" style={{ marginTop: 10 }}>
+          この構成図にだけ描いている機器です（デバイス管理には登録されていないため、収集・ターミナルの対象外）。
+        </p>
+      </Section>
+    );
+  }
+  return (
+    <Section title="選択中: 非管理機器">
+      <div className="form-group">
+        <label className="form-label" htmlFor="um-name">名前</label>
+        <input id="um-name" value={node.data.label} maxLength={500} placeholder="例: ISPルーター / 2F ハブ"
+          onChange={(e) => onChange({ label: e.target.value })} />
+      </div>
+      <div className="form-group">
+        <label className="form-label" htmlFor="um-note">補足（任意）</label>
+        <input id="um-note" value={node.data.note ?? ""} maxLength={200} placeholder="例: 192.168.1.1 / 型番 / 管理会社"
+          onChange={(e) => onChange({ note: e.target.value })} />
+      </div>
+      <div className="form-group">
+        <label className="form-label" htmlFor="um-icon">アイコン</label>
+        <select id="um-icon" value={icon} onChange={(e) => onChange({ icon: e.target.value as DeviceIcon })}>
+          {Object.entries(ICON_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </div>
+      <p className="topo-muted topo-small">縁の ● から他の機器へドラッグすると線を引けます。</p>
+      <button className="btn btn-danger" onClick={onRemove} style={{ marginTop: 8 }}>削除</button>
+    </Section>
+  );
+}
 
 function DecorationPanel({
   node, editing, onChange, onRemove,
@@ -864,7 +939,7 @@ function Palette({
   devices, placed, onAddDevice, onAddDecoration,
 }: {
   devices: DeviceItem[]; placed: Set<string>;
-  onAddDevice: (id: string) => void; onAddDecoration: (k: "cloud" | "text" | "area") => void;
+  onAddDevice: (id: string) => void; onAddDecoration: (k: AddKind) => void;
 }) {
   const [q, setQ] = useState("");
   const rest = devices
@@ -872,8 +947,9 @@ function Palette({
     .filter((d) => !q || `${d.name} ${d.hostname}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
-      <Section title="装飾を追加">
+      <Section title="追加">
         <div className="topo-decor-buttons">
+          <button className="btn topo-add-unmanaged" onClick={() => onAddDecoration("unmanaged")}>＋ 非管理機器</button>
           <button className="btn" onClick={() => onAddDecoration("cloud")}>雲</button>
           <button className="btn" onClick={() => onAddDecoration("text")}>テキスト</button>
           <button className="btn" onClick={() => onAddDecoration("area")}>グループ枠</button>

@@ -39,6 +39,7 @@ def sample(devs):
             {"id": "n1", "type": "device", "x": 0, "y": 0, "device_id": devs[0], "icon": "l3switch"},
             {"id": "n2", "type": "device", "x": 200, "y": 0, "device_id": devs[1]},
             {"id": "c1", "type": "cloud", "x": 100, "y": -150, "w": 140, "h": 70, "label": "Internet"},
+            {"id": "u1", "type": "unmanaged", "x": 400, "y": 0, "label": "ISPルーター", "note": "203.0.113.1", "icon": "router"},
             {"id": "t1", "type": "text", "x": 0, "y": 200, "label": "本社 2F", "font_size": "l", "color": "#e4e6f0"},
             {"id": "g1", "type": "group", "x": -40, "y": -40, "w": 400, "h": 200, "label": "DMZ", "color": "#4f8ef7"},
         ],
@@ -46,6 +47,7 @@ def sample(devs):
             {"id": "e1", "source": "n1", "target": "n2", "source_port": "Gi1/0/1", "target_port": "Gi0/1",
              "label": "Po1", "line_style": "solid"},
             {"id": "e2", "source": "c1", "target": "n1", "line_style": "dashed"},
+            {"id": "e3", "source": "n2", "target": "u1", "source_port": "Gi0/2", "target_port": "LAN1"},
         ],
         "viewport": {"x": 10, "y": 20, "zoom": 1.2},
     }
@@ -66,7 +68,9 @@ def test_crud_and_roles(ctx):
     assert r.status_code == 200, r.text
     m2 = r.json()
     assert m2["version"] == 2
-    assert len(m2["data"]["nodes"]) == 5 and len(m2["data"]["edges"]) == 2
+    assert len(m2["data"]["nodes"]) == 6 and len(m2["data"]["edges"]) == 3
+    u = next(n for n in m2["data"]["nodes"] if n["id"] == "u1")
+    assert u["type"] == "unmanaged" and u["note"] == "203.0.113.1" and u["icon"] == "router"
     assert m2["data"]["edges"][0]["source_port"] == "Gi1/0/1"
     assert m2["data"]["viewport"]["zoom"] == 1.2
     assert m2["data"]["nodes"][0]["icon"] == "l3switch" and m2["data"]["nodes"][1]["icon"] is None
@@ -78,18 +82,18 @@ def test_crud_and_roles(ctx):
     assert r.status_code == 409 and "topo-op" in r.json()["detail"]
     # 名前だけ変更（data は変わらない）
     r = c.put(url, json={"version": 2, "name": "本社"}, headers=admin)
-    assert r.json()["name"] == "本社" and len(r.json()["data"]["nodes"]) == 5
+    assert r.json()["name"] == "本社" and len(r.json()["data"]["nodes"]) == 6
 
     # viewer は読めるが書けない
     assert c.get(url, headers=view).status_code == 200
     assert c.put(url, json={"version": 3, "name": "x"}, headers=view).status_code == 403
     lst = c.get("/api/topology/maps", headers=view).json()
     s = next(x for x in lst if x["id"] == m["id"])
-    assert s["node_count"] == 5 and s["device_count"] == 2
+    assert s["node_count"] == 6 and s["device_count"] == 2  # 非管理機器は登録機器数に含めない
 
     # 複製
     r = c.post("/api/topology/maps", json={"name": "本社（コピー）", "copy_from": m["id"]}, headers=op)
-    assert r.status_code == 201 and len(r.json()["data"]["nodes"]) == 5
+    assert r.status_code == 201 and len(r.json()["data"]["nodes"]) == 6
 
     # 削除
     assert c.delete(url, headers=view).status_code == 403
@@ -106,6 +110,8 @@ def test_crud_and_roles(ctx):
     (lambda d: d["edges"].append({"id": "e9", "source": "n1", "target": "n1"}), "同じノード"),
     (lambda d: d["nodes"][2].update(color="red; background:url(x)"), None),
     (lambda d: d["nodes"][0].update(id="<script>"), None),
+    (lambda d: d["nodes"][3].update(note="x" * 201), None),
+    (lambda d: d["nodes"][3].update(icon="toaster"), None),
 ])
 def test_validation(ctx, mutate, msg):
     c, op, devs = ctx["c"], ctx["op"], ctx["devs"]

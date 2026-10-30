@@ -1,20 +1,23 @@
 /** 構成図: API の保存形式と React Flow のノード・エッジの相互変換 */
 import type { Edge, Node } from "@xyflow/react";
 
-export type DeviceIcon = "switch" | "l3switch" | "router" | "firewall" | "server" | "wireless";
+export type DeviceIcon =
+  | "switch" | "l3switch" | "router" | "firewall" | "server" | "wireless"
+  | "pc" | "printer" | "phone" | "camera" | "storage" | "other";
 export type FontSize = "s" | "m" | "l" | "xl";
 export type LineStyle = "solid" | "dashed";
 
 // ---- API の形式（backend/app/api/topology.py）
 export interface ApiNode {
   id: string;
-  type: "device" | "cloud" | "text" | "group";
+  type: "device" | "unmanaged" | "cloud" | "text" | "group";
   x: number;
   y: number;
   w?: number | null;
   h?: number | null;
   device_id?: string | null;
   label?: string | null;
+  note?: string | null;
   color?: string | null;
   font_size?: FontSize | null;
   icon?: DeviceIcon | null;
@@ -69,15 +72,18 @@ export interface MapDetail extends Omit<MapSummary, "node_count" | "device_count
 
 // ---- React Flow 側のデータ
 export type DeviceNodeData = { deviceId: string; icon?: DeviceIcon | null };
+/** 非管理機器（登録していない機器）。名前・補足は自由入力 */
+export type UnmanagedNodeData = { label: string; note?: string | null; icon?: DeviceIcon | null };
 export type CloudNodeData = { label: string; color?: string | null };
 export type TextNodeData = { label: string; color?: string | null; fontSize?: FontSize | null };
 export type AreaNodeData = { label: string; color?: string | null };
 
 export type DeviceNode = Node<DeviceNodeData, "device">;
+export type UnmanagedNode = Node<UnmanagedNodeData, "unmanaged">;
 export type CloudNode = Node<CloudNodeData, "cloud">;
 export type TextNode = Node<TextNodeData, "text">;
 export type AreaNode = Node<AreaNodeData, "area">; // React Flow 組み込みの "group" と名前が衝突しないよう area とする
-export type TopoNode = DeviceNode | CloudNode | TextNode | AreaNode;
+export type TopoNode = DeviceNode | UnmanagedNode | CloudNode | TextNode | AreaNode;
 
 export type LinkEdgeData = {
   sourcePort?: string | null;
@@ -104,6 +110,12 @@ export const ICON_LABELS: Record<DeviceIcon, string> = {
   firewall: "ファイアウォール",
   server: "サーバー",
   wireless: "無線AP",
+  pc: "PC",
+  printer: "プリンター",
+  phone: "電話機",
+  camera: "カメラ",
+  storage: "ストレージ",
+  other: "その他",
 };
 
 export function defaultIcon(platform: string | undefined): DeviceIcon {
@@ -121,6 +133,8 @@ export function toFlow(data: TopologyData): { nodes: TopoNode[]; edges: LinkEdge
     switch (n.type) {
       case "device":
         return { id: n.id, type: "device", position, data: { deviceId: n.device_id!, icon: n.icon ?? null } };
+      case "unmanaged":
+        return { id: n.id, type: "unmanaged", position, data: { label: n.label ?? "", note: n.note, icon: n.icon ?? null } };
       case "cloud":
         return {
           id: n.id, type: "cloud", position,
@@ -162,6 +176,8 @@ export function fromFlow(
       switch (n.type) {
         case "device":
           return { ...base, type: "device", device_id: n.data.deviceId, icon: n.data.icon ?? null };
+        case "unmanaged":
+          return { ...base, type: "unmanaged", label: n.data.label, note: nz(n.data.note), icon: n.data.icon ?? null };
         case "cloud":
           return { ...base, type: "cloud", ...size(n, DEFAULT_SIZE.cloud), label: n.data.label, color: n.data.color ?? null };
         case "text":

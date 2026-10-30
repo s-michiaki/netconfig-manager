@@ -3,7 +3,7 @@ import { createContext, memo, useContext } from "react";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import {
   STATE_LABELS, defaultIcon, formatTime,
-  type AreaNode, type CloudNode, type DeviceIcon, type DeviceNode, type DeviceStatus, type TextNode,
+  type AreaNode, type CloudNode, type DeviceIcon, type DeviceNode, type DeviceStatus, type TextNode, type UnmanagedNode,
 } from "./model";
 
 export interface TopologyContextValue {
@@ -21,6 +21,12 @@ const ICON_STYLE: Record<DeviceIcon, { bg: string; fg: string }> = {
   firewall: { bg: "#3b1f14", fg: "#fb923c" },
   server: { bg: "#2a2140", fg: "#c4b5fd" },
   wireless: { bg: "#123326", fg: "#6ee7b7" },
+  pc: { bg: "#22263a", fg: "#a5abc8" },
+  printer: { bg: "#22263a", fg: "#a5abc8" },
+  phone: { bg: "#22263a", fg: "#a5abc8" },
+  camera: { bg: "#22263a", fg: "#a5abc8" },
+  storage: { bg: "#2a2140", fg: "#c4b5fd" },
+  other: { bg: "#22263a", fg: "#a5abc8" },
 };
 
 export function DeviceIconSvg({ icon, size = 20 }: { icon: DeviceIcon; size?: number }) {
@@ -39,6 +45,18 @@ export function DeviceIconSvg({ icon, size = 20 }: { icon: DeviceIcon; size?: nu
       return <svg {...common}><rect x="5" y="3" width="14" height="8" rx="1.5" /><rect x="5" y="13" width="14" height="8" rx="1.5" /><path d="M9 7h.01M9 17h.01" /></svg>;
     case "wireless":
       return <svg {...common}><path d="M5 10a10 10 0 0 1 14 0M8 13.5a5.5 5.5 0 0 1 8 0" /><circle cx="12" cy="17" r="1.2" /><path d="M12 18v3" /></svg>;
+    case "pc":
+      return <svg {...common}><rect x="3" y="4" width="18" height="12" rx="1.5" /><path d="M9 20h6M12 16v4" /></svg>;
+    case "printer":
+      return <svg {...common}><path d="M7 9V3h10v6" /><rect x="3" y="9" width="18" height="8" rx="1.5" /><path d="M7 14h10v7H7z" /></svg>;
+    case "phone":
+      return <svg {...common}><rect x="6" y="2" width="12" height="20" rx="2" /><path d="M10 18h4" /></svg>;
+    case "camera":
+      return <svg {...common}><path d="M3 7h4l2-3h6l2 3h4v12H3z" /><circle cx="12" cy="13" r="3.5" /></svg>;
+    case "storage":
+      return <svg {...common}><ellipse cx="12" cy="5.5" rx="8" ry="2.5" /><path d="M4 5.5v13c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5v-13M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5" /></svg>;
+    case "other":
+      return <svg {...common}><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M4 7.5l8 4.5 8-4.5M12 12v9" /></svg>;
     default:
       return <svg {...common}><rect x="3" y="8" width="18" height="8" rx="2" /><path d="M7 12h1M10 12h1M13 12h1M16 12h1" /></svg>;
   }
@@ -82,6 +100,24 @@ export const DeviceNodeView = memo(function DeviceNodeView({ data, selected }: N
           {st?.last_collected_at && state !== "never" ? ` ${formatTime(st.last_collected_at)}` : ""}
           {st && !st.is_active ? "（無効）" : ""}
         </div>
+      </div>
+    </div>
+  );
+});
+
+/** 非管理機器: 登録していない機器（ISPルーター・ハブ・PC など）。収集状態は持たない */
+export const UnmanagedNodeView = memo(function UnmanagedNodeView({ data, selected }: NodeProps<UnmanagedNode>) {
+  const icon = data.icon ?? "other";
+  return (
+    <div className={`topo-device topo-unmanaged${selected ? " selected" : ""}`}>
+      <Handles />
+      <div className="topo-device-icon topo-unmanaged-icon">
+        <DeviceIconSvg icon={icon} />
+      </div>
+      <div className="topo-device-body">
+        <div className="topo-device-name">{data.label || "非管理機器"}</div>
+        <div className="topo-device-host">{data.note ?? ""}</div>
+        <div className="topo-device-state topo-unmanaged-tag">非管理</div>
       </div>
     </div>
   );
@@ -135,6 +171,7 @@ export const AreaNodeView = memo(function AreaNodeView({ data, selected }: NodeP
 
 export const nodeTypes = {
   device: DeviceNodeView,
+  unmanaged: UnmanagedNodeView,
   cloud: CloudNodeView,
   text: TextNodeView,
   area: AreaNodeView,
