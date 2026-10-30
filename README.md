@@ -108,6 +108,16 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ---
 
+## 機器のグループ
+
+デバイス管理画面で、機器をグループ（拠点・用途など）ごとにまとめて表示できます。
+
+- 「グループの管理」でグループを作成・名前変更・削除できます（複数作成可。色と説明も設定可）
+- 機器は1つのグループにだけ所属します（どこにも属さない機器は「未分類」）。所属は機器の「編集」か、「選択してグループへ移動」で複数台まとめて変更します
+- 表示は「グループ別」（グループごとに見出しを付けて表示・折りたたみ可）と「一覧」を切り替えられます。グループでの絞り込みと名前・IP での検索も可能（表示の設定はブラウザに保存）
+- グループを削除しても機器は削除されず、未分類に戻ります
+- グループの作成・変更と所属の変更は、機器の登録と同じく管理者の権限が必要です
+
 ## 機器への SSH 認証
 
 機器ごとにパスワード・SSH 秘密鍵のどちらか、または両方を設定できます（直接接続・踏み台経由のどちらでも使えます）。
@@ -316,7 +326,7 @@ netconfig-manager/
 │       ├── models/
 │       │   ├── __init__.py      # モデル登録
 │       │   ├── base.py
-│       │   ├── device.py        # Device / JumpHost / ConfigSnapshot / CollectLog / Schedule
+│       │   ├── device.py        # Device / DeviceGroup / JumpHost / ConfigSnapshot / CollectLog / Schedule
 │       │   ├── topology.py      # TopologyMap（構成図）
 │       │   ├── compliance.py    # ComplianceRule / ComplianceResult
 │       │   ├── audit.py         # AuditLog（操作履歴）/ TerminalSession（ターミナルの記録）
@@ -325,6 +335,7 @@ netconfig-manager/
 │       │   ├── deps.py          # 認証・権限チェック（require）
 │       │   ├── auth.py          # ログイン・パスワード変更
 │       │   ├── devices.py       # デバイス CRUD + 収集トリガー
+│       │   ├── device_groups.py # 機器のグループ CRUD・所属の一括変更
 │       │   ├── jump_hosts.py    # 踏み台サーバ CRUD + 接続テスト
 │       │   ├── configs.py       # 履歴・差分 API
 │       │   ├── tasks.py         # 収集タスクの状態確認

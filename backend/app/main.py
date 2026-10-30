@@ -6,7 +6,20 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 
-from app.api import audit, auth, compliance, configs, devices, jump_hosts, schedules, tasks, terminal, topology, users
+from app.api import (
+    audit,
+    auth,
+    compliance,
+    configs,
+    device_groups,
+    devices,
+    jump_hosts,
+    schedules,
+    tasks,
+    terminal,
+    topology,
+    users,
+)
 from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
@@ -81,6 +94,9 @@ protected = [Depends(get_current_user)]
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(devices.router, prefix="/api/devices", tags=["devices"], dependencies=protected)
+app.include_router(
+    device_groups.router, prefix="/api/device-groups", tags=["device-groups"], dependencies=protected
+)
 app.include_router(jump_hosts.router, prefix="/api/jump-hosts", tags=["jump-hosts"], dependencies=protected)
 app.include_router(configs.router, prefix="/api/configs", tags=["configs"], dependencies=protected)
 app.include_router(schedules.router, prefix="/api/schedules", tags=["schedules"], dependencies=protected)

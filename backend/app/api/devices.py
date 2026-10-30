@@ -20,7 +20,7 @@ from app.core.ssh_keys import (
     normalize_private_key,
 )
 from app.models.compliance import ComplianceResult
-from app.models.device import Device, JumpHost
+from app.models.device import Device, DeviceGroup, JumpHost
 from app.services.audit import Audit, changed_fields, get_audit
 from app.worker import collect_all_devices, collect_device_config
 
@@ -56,6 +56,7 @@ class DeviceCreate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool = True
     jump_host_id: str | None = None  # 経由する踏み台（未指定なら直接接続）
+    group_id: str | None = None  # 所属グループ（未指定なら未分類）
     read_timeout: ReadTimeoutSec | None = None  # 応答待ち時間（未指定なら既定値）
 
     @model_validator(mode="after")
@@ -84,6 +85,7 @@ class DeviceUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
     jump_host_id: str | None = None  # null を明示すると直接接続に戻す
+    group_id: str | None = None  # null を明示すると未分類に戻す
     read_timeout: ReadTimeoutSec | None = None  # null を明示すると既定値に戻す
 
 
@@ -105,9 +107,12 @@ class DeviceResponse(BaseModel):
     jump_host_id: str | None = None
     jump_host_name: str | None = None
     read_timeout: int | None = None
+    group_id: str | None = None
+    group_name: str | None = None
 
 
-def _to_response(device: Device, jump_names: dict[str, str] | None = None) -> DeviceResponse:
+def _to_response(device: Device, names: dict[str, str] | None = None) -> DeviceResponse:
+    """names は踏み台・グループの id → 名前（_ref_names）"""
     resp = DeviceResponse.model_validate(device)
     resp.has_enable_secret = bool(device.enable_secret)
     resp.has_password = bool(device.password)
@@ -117,13 +122,18 @@ def _to_response(device: Device, jump_names: dict[str, str] | None = None) -> De
             resp.key_info = key_summary(load_private_key(device.private_key, device.key_passphrase))
         except PrivateKeyError:
             resp.key_info = "読み込めない鍵"
-    if device.jump_host_id and jump_names:
-        resp.jump_host_name = jump_names.get(device.jump_host_id)
+    if device.jump_host_id and names:
+        resp.jump_host_name = names.get(device.jump_host_id)
+    if device.group_id and names:
+        resp.group_name = names.get(device.group_id)
     return resp
 
 
-async def _jump_names(db: AsyncSession) -> dict[str, str]:
-    return dict((await db.execute(select(JumpHost.id, JumpHost.name))).all())
+async def _ref_names(db: AsyncSession) -> dict[str, str]:
+    """踏み台とグループの id → 名前（どちらも UUID なので1つの辞書にまとめる）"""
+    names = dict((await db.execute(select(JumpHost.id, JumpHost.name))).all())
+    names.update(dict((await db.execute(select(DeviceGroup.id, DeviceGroup.name))).all()))
+    return names
 
 
 def _validated_key(private_key: str, passphrase: str | None) -> str:
@@ -137,6 +147,11 @@ def _validated_key(private_key: str, passphrase: str | None) -> str:
 async def _check_jump_host(db: AsyncSession, jump_host_id: str | None) -> None:
     if jump_host_id and not await db.get(JumpHost, jump_host_id):
         raise HTTPException(status_code=422, detail="指定された踏み台サーバが存在しません")
+
+
+async def _check_group(db: AsyncSession, group_id: str | None) -> None:
+    if group_id and not await db.get(DeviceGroup, group_id):
+        raise HTTPException(status_code=422, detail="指定されたグループが存在しません")
 
 
 async def _get_or_404(db: AsyncSession, device_id: str) -> Device:
@@ -157,7 +172,7 @@ async def _commit_or_409(db: AsyncSession) -> None:
 @router.get("/", response_model=list[DeviceResponse], dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def list_devices(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Device).order_by(Device.name))
-    names = await _jump_names(db)
+    names = await _ref_names(db)
     return [_to_response(d, names) for d in result.scalars().all()]
 
 
@@ -177,15 +192,17 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
         data["private_key"] = data["key_passphrase"] = None
     data["jump_host_id"] = data.get("jump_host_id") or None
     await _check_jump_host(db, data["jump_host_id"])
+    data["group_id"] = data.get("group_id") or None
+    await _check_group(db, data["group_id"])
     device = Device(id=str(uuid.uuid4()), **data)
     db.add(device)
     audit("device.create", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname, "platform": device.platform, "port": device.port,
-                  "username": device.username, "jump_host_id": device.jump_host_id,
+                  "username": device.username, "jump_host_id": device.jump_host_id, "group_id": device.group_id,
                   "auth": [k for k in ("password", "private_key") if data.get(k)]})
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device, await _jump_names(db))
+    return _to_response(device, await _ref_names(db))
 
 
 class DeviceDefaults(BaseModel):
@@ -210,7 +227,7 @@ async def trigger_collect_all(db: AsyncSession = Depends(get_db), audit: Audit =
 
 @router.get("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    return _to_response(await _get_or_404(db, device_id), await _jump_names(db))
+    return _to_response(await _get_or_404(db, device_id), await _ref_names(db))
 
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
@@ -232,6 +249,9 @@ async def update_device(
     if "jump_host_id" in data:
         data["jump_host_id"] = data["jump_host_id"] or None
         await _check_jump_host(db, data["jump_host_id"])
+    if "group_id" in data:
+        data["group_id"] = data["group_id"] or None
+        await _check_group(db, data["group_id"])
     for k, v in data.items():
         if v is None and k in ("name", "hostname", "platform", "port", "username", "is_active"):
             continue  # 必須項目に null は入れない
@@ -253,7 +273,7 @@ async def update_device(
         raise HTTPException(status_code=422, detail="パスワードとSSH秘密鍵の両方を削除することはできません")
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device, await _jump_names(db))
+    return _to_response(device, await _ref_names(db))
 
 
 @router.delete(
