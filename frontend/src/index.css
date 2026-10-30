@@ -603,3 +603,33 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-violation.sev-high { background: var(--color-danger); color: #1a0606; }
 .topo-violation.sev-medium { background: var(--color-warning); color: #1f1400; }
 .topo-violation.sev-low { background: #7c82a3; color: #0f1117; }
+
+/* ===== デバイス管理: グループ ===== */
+.dev-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+.dev-filter { width: 220px; }
+.dev-search { width: 220px; }
+.dev-selectbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; padding: 8px 12px;
+  background: var(--color-accent-dim); border: 1px solid var(--color-accent); border-radius: var(--radius); font-size: 12px;
+}
+.dev-group { margin-bottom: 8px; }
+.dev-group-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; border: none; border-bottom: 1px solid var(--color-border);
+  color: var(--color-text); padding: 8px 2px; margin-bottom: 12px; cursor: pointer; font-size: 13px;
+}
+.dev-group-head:hover { border-bottom-color: var(--color-accent); }
+.dev-group-caret { color: var(--color-muted); width: 12px; }
+.dev-group-name { font-weight: 600; }
+.dev-group-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-group-empty { margin: -4px 0 16px 22px; }
+.grp-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.device-card.selected { border-color: var(--color-accent); background: var(--color-accent-dim); }
+.device-check { width: auto; }
+.device-card-group { display: flex; align-items: center; gap: 6px; }
+.grp-modal { width: 520px; }
+.grp-list { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; max-height: 45vh; overflow-y: auto; }
+.grp-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--color-surface2); border-radius: var(--radius-sm); }
+.grp-row-body { flex: 1; min-width: 0; }
+.grp-row-name { font-weight: 600; font-size: 13px; }
+.grp-edit { border-top: 1px solid var(--color-border); padding-top: 12px; }

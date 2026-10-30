@@ -30,6 +30,19 @@ class JumpHost(Base):
     devices: Mapped[list["Device"]] = relationship("Device", back_populates="jump_host")
 
 
+class DeviceGroup(Base):
+    """機器のグループ（拠点・用途など）。機器は1つのグループにだけ所属できる（未所属も可）"""
+
+    __tablename__ = "device_groups"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    color: Mapped[str | None] = mapped_column(String(7), nullable=True)  # 画面の見出しの色（#rrggbb）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Device(Base):
     __tablename__ = "devices"
 
@@ -51,6 +64,10 @@ class Device(Base):
     # 経由する踏み台（NULL なら直接接続）
     jump_host_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("jump_hosts.id", name="fk_devices_jump_host_id"), nullable=True
+    )
+    # 所属グループ（NULL なら未分類）。グループを削除すると未分類に戻る
+    group_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("device_groups.id", name="fk_devices_group_id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
