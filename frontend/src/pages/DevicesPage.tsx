@@ -18,6 +18,7 @@ interface Device {
   key_info: string | null;
   jump_host_id: string | null;
   jump_host_name: string | null;
+  read_timeout: number | null;
 }
 
 interface JumpHostOption { id: string; name: string; hostname: string; }
@@ -38,6 +39,7 @@ const EMPTY_FORM = {
   username: "", password: "", enable_secret: "", description: "", is_active: true,
   clear_enable_secret: false, jump_host_id: "",
   private_key: "", key_passphrase: "", clear_password: false, clear_private_key: false,
+  read_timeout: "", // 空欄 = 既定値
 };
 
 function DeviceModal({
@@ -51,6 +53,7 @@ function DeviceModal({
           name: device.name, hostname: device.hostname, platform: device.platform, port: device.port,
           username: device.username, description: device.description ?? "", is_active: device.is_active,
           jump_host_id: device.jump_host_id ?? "",
+          read_timeout: device.read_timeout != null ? String(device.read_timeout) : "",
         }
       : EMPTY_FORM
   );
@@ -58,6 +61,10 @@ function DeviceModal({
   const [saving, setSaving] = useState(false);
   const [reach, setReach] = useState<{ ok: boolean; message: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  const [defaultTimeout, setDefaultTimeout] = useState<number | null>(null);
+  useEffect(() => {
+    api.get("/devices/defaults").then((r) => setDefaultTimeout(r.data.read_timeout)).catch(() => {});
+  }, []);
   const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) => setForm((f) => ({ ...f, [k]: v }));
 
   const handleSubmit = async () => {
@@ -72,6 +79,7 @@ function DeviceModal({
       description: form.description || null,
       is_active: form.is_active,
       jump_host_id: form.jump_host_id || null,
+      read_timeout: form.read_timeout.trim() ? Number(form.read_timeout) : null,
       // 編集時、空欄のパスワードは「変更しない」
       password: form.password || undefined,
       private_key: form.private_key || undefined,
@@ -127,7 +135,9 @@ function DeviceModal({
 
   const willHavePassword = (isEdit && device.has_password && !form.clear_password) || !!form.password;
   const willHaveKey = (isEdit && device.has_private_key && !form.clear_private_key) || !!form.private_key;
-  const canSave = form.name && form.hostname && form.username && (willHavePassword || willHaveKey);
+  const timeoutValid = !form.read_timeout.trim() || (/^\d+$/.test(form.read_timeout.trim())
+    && Number(form.read_timeout) >= 10 && Number(form.read_timeout) <= 600);
+  const canSave = form.name && form.hostname && form.username && (willHavePassword || willHaveKey) && timeoutValid;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -241,6 +251,17 @@ function DeviceModal({
               Enableシークレットを削除する
             </label>
           )}
+        </div>
+        <div className="form-group">
+          <label className="form-label">応答待ち時間（秒・任意）</label>
+          <input type="number" min={10} max={600} value={form.read_timeout}
+            placeholder={`空欄で既定値${defaultTimeout ? `（${defaultTimeout}秒）` : ""}`}
+            onChange={(e) => set("read_timeout", e.target.value)} />
+          <p style={{ fontSize: 11, marginTop: 4, color: timeoutValid ? "var(--color-muted)" : "var(--color-danger)" }}>
+            {timeoutValid
+              ? "ログイン後のプロンプトやコマンド結果を待つ上限（10〜600秒）。応答の遅い機器でタイムアウトする場合に延ばしてください"
+              : "10〜600 の整数で入力してください"}
+          </p>
         </div>
         <div className="form-group">
           <label className="form-label">説明（任意）</label>

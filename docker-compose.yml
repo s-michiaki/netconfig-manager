@@ -10,6 +10,7 @@ x-backend-env: &backend-env
   ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
   SSH_HOST_KEY_POLICY: ${SSH_HOST_KEY_POLICY:-tofu}
+  SSH_READ_TIMEOUT: ${SSH_READ_TIMEOUT:-120}
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
 
 x-backend-depends: &backend-depends

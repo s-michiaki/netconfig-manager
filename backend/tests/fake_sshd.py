@@ -5,6 +5,7 @@ start(pubkey=..., password=..., mode="cisco"|"panos") で起動
 """
 import socket
 import threading
+import time
 
 import paramiko
 
@@ -88,8 +89,10 @@ def _cisco(ch):
         ch.send(line + "\r\n" + (out + "\r\n" if out else "") + "R1#")
 
 
-def _panos(ch, state):
+def _panos(ch, state, login_delay=0.0):
     op, conf = "admin@PA-VM> ", "admin@PA-VM# "
+    if login_delay:
+        time.sleep(login_delay)  # ログイン後プロンプトが出るまで時間のかかる機器を再現
     ch.send("Last login: Thu Oct 29 10:00:00 2026\r\n\r\n" + op)
     in_conf = False
     for line in _lines(ch):
@@ -138,16 +141,16 @@ def handle(sock, key, state, cfg=None):
     state["auth_method"] = srv.auth_method
     try:
         if cfg["mode"] == "panos":
-            _panos(ch, state)
+            _panos(ch, state, cfg.get("login_delay", 0.0))
         else:
             _cisco(ch)
     except Exception:  # noqa: BLE001
         pass
 
 
-def start(key=None, password="pw", pubkey=None, mode="cisco"):
+def start(key=None, password="pw", pubkey=None, mode="cisco", login_delay=0.0):
     key = key or paramiko.RSAKey.generate(2048)
-    cfg = {"password": password, "pubkey": pubkey, "mode": mode}
+    cfg = {"password": password, "pubkey": pubkey, "mode": mode, "login_delay": login_delay}
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", 0))

@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _WEAK_SECRETS = {"change-me-in-production", "changeme", "secret", "your_jwt_secret_key_here"}
@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     # --- SSH ---
     SSH_TIMEOUT: int = 30
     SSH_AUTH_TIMEOUT: int = 20
-    SSH_READ_TIMEOUT: int = 120
+    # 機器の応答待ち時間（秒）の既定値。ログイン後のプロンプト待ち・コマンド実行の待ちに使う。
+    # 機器ごとに上書き可能（デバイス設定の「応答待ち時間」）
+    SSH_READ_TIMEOUT: int = Field(default=120, ge=10, le=600)
     SSH_KNOWN_HOSTS: str = "/data/ssh/known_hosts"
     # tofu  : 初回接続時にホスト鍵を記録し、以後は一致を検証（鍵が変わったら接続拒否）
     # strict: known_hosts に無いホストへの接続を拒否

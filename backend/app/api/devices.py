@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.core.ssh_keys import (
@@ -33,6 +34,8 @@ Username = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 Secret = Annotated[str, StringConstraints(max_length=100)]
 Port = Annotated[int, Field(ge=1, le=65535)]
 PrivateKey = Annotated[str, StringConstraints(max_length=MAX_PRIVATE_KEY_LENGTH)]
+# 応答待ち時間（秒）。収集ロックの保持時間（15分）に収まる範囲
+ReadTimeoutSec = Annotated[int, Field(ge=10, le=600)]
 
 
 class DeviceCreate(BaseModel):
@@ -49,6 +52,7 @@ class DeviceCreate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool = True
     jump_host_id: str | None = None  # 経由する踏み台（未指定なら直接接続）
+    read_timeout: ReadTimeoutSec | None = None  # 応答待ち時間（未指定なら既定値）
 
     @model_validator(mode="after")
     def _need_auth(self):
@@ -76,6 +80,7 @@ class DeviceUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
     jump_host_id: str | None = None  # null を明示すると直接接続に戻す
+    read_timeout: ReadTimeoutSec | None = None  # null を明示すると既定値に戻す
 
 
 class DeviceResponse(BaseModel):
@@ -95,6 +100,7 @@ class DeviceResponse(BaseModel):
     key_info: str | None = None  # 例: "ssh-ed25519 SHA256:..."（秘密鍵そのものは返さない）
     jump_host_id: str | None = None
     jump_host_name: str | None = None
+    read_timeout: int | None = None
 
 
 def _to_response(device: Device, jump_names: dict[str, str] | None = None) -> DeviceResponse:
@@ -174,7 +180,17 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
     return _to_response(device, await _jump_names(db))
 
 
-# 注意: "/collect/all" は "/{device_id}" 系より先に定義する
+class DeviceDefaults(BaseModel):
+    read_timeout: int
+
+
+# 注意: "/defaults" "/collect/all" は "/{device_id}" 系より先に定義する
+@router.get("/defaults", response_model=DeviceDefaults, dependencies=[Depends(require(Perm.DEVICE_READ))])
+async def device_defaults():
+    """画面表示用の既定値（応答待ち時間など）"""
+    return DeviceDefaults(read_timeout=settings.SSH_READ_TIMEOUT)
+
+
 @router.post("/collect/all", dependencies=[Depends(require(Perm.COLLECT))])
 async def trigger_collect_all():
     """全デバイスのコンフィグ収集をトリガー"""
