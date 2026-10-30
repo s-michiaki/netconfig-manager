@@ -9,7 +9,7 @@ from enum import Enum
 
 class Role(str, Enum):
     ADMIN = "admin"  # すべての操作（ユーザー・機器・スケジュールの管理を含む）
-    OPERATOR = "operator"  # 閲覧 + コンフィグ収集 + SSHターミナル
+    OPERATOR = "operator"  # 閲覧 + コンフィグ収集 + SSHターミナル + 構成図の編集
     VIEWER = "viewer"  # 閲覧のみ
 
 
@@ -22,10 +22,12 @@ class Perm(str, Enum):
     SCHEDULE_READ = "schedule:read"
     SCHEDULE_WRITE = "schedule:write"
     USER_ADMIN = "user:admin"  # ユーザー管理
+    TOPOLOGY_READ = "topology:read"  # 構成図の閲覧
+    TOPOLOGY_WRITE = "topology:write"  # 構成図の作成・編集・削除（認証情報は扱わないので operator も可）
 
 
-_VIEWER = {Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ}
-_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL}
+_VIEWER = {Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ}
+_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE}
 _ADMIN = set(Perm)
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Perm]] = {

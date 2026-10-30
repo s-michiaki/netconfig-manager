@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 
-from app.api import auth, configs, devices, jump_hosts, schedules, tasks, terminal, users
+from app.api import auth, configs, devices, jump_hosts, schedules, tasks, terminal, topology, users
 from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -85,6 +85,7 @@ app.include_router(jump_hosts.router, prefix="/api/jump-hosts", tags=["jump-host
 app.include_router(configs.router, prefix="/api/configs", tags=["configs"], dependencies=protected)
 app.include_router(schedules.router, prefix="/api/schedules", tags=["schedules"], dependencies=protected)
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependencies=protected)
+app.include_router(topology.router, prefix="/api/topology", tags=["topology"], dependencies=protected)
 app.include_router(users.router, prefix="/api/users", tags=["users"], dependencies=[Depends(require(Perm.USER_ADMIN))])
 # WebSocket は接続後の最初のメッセージでトークンを検証する（terminal.py 参照）
 app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])

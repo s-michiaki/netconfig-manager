@@ -373,3 +373,116 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
   color: var(--color-accent);
   vertical-align: 1px;
 }
+
+/* ===== 構成図 ===== */
+.topo-header { gap: 12px; flex-wrap: wrap; }
+.topo-header-left, .topo-header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.topo-map-select { width: auto; min-width: 180px; max-width: 320px; }
+.topo-dirty { font-size: 12px; color: var(--color-warning); }
+.topo-notice { font-size: 12px; color: var(--color-success); }
+.topo-error {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 20px; font-size: 12px;
+  background: var(--color-danger-dim); color: #fecaca; border-bottom: 1px solid var(--color-danger);
+}
+.topo-main { flex: 1; display: flex; min-height: 0; }
+.topo-canvas { flex: 1; position: relative; min-width: 0; background: #12141c; }
+.topo-canvas-hint {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--color-muted); font-size: 13px; pointer-events: none;
+}
+.topo-panel {
+  width: 300px; flex-shrink: 0; overflow-y: auto;
+  background: var(--color-surface); border-left: 1px solid var(--color-border);
+  padding: 16px; display: flex; flex-direction: column; gap: 18px;
+}
+.topo-section .btn { justify-content: center; }
+.topo-map-name { font-size: 14px; font-weight: 600; word-break: break-all; }
+.topo-muted { color: var(--color-muted); }
+.topo-small { font-size: 11px; }
+.topo-empty { max-width: 520px; margin: 60px auto; text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.topo-legend { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.topo-legend li { display: flex; align-items: center; gap: 8px; }
+.topo-legend .badge { min-width: 64px; justify-content: center; }
+.topo-help { padding-left: 16px; font-size: 12px; color: var(--color-muted); display: flex; flex-direction: column; gap: 3px; }
+.topo-kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 10px; font-size: 12px; margin: 12px 0; }
+.topo-kv dt { color: var(--color-muted); }
+.topo-kv dd { word-break: break-all; }
+.topo-err-msg { color: var(--color-danger); }
+.topo-dev-head { display: flex; align-items: center; gap: 10px; }
+.topo-dev-icon {
+  width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  background: var(--color-surface2); color: #a5abc8; flex-shrink: 0;
+}
+.topo-actions { display: flex; flex-direction: column; gap: 6px; }
+.topo-actions .btn { padding: 8px 12px; }
+.topo-actions-row { display: flex; gap: 6px; }
+.topo-actions-row .btn { flex: 1; }
+.topo-decor-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.topo-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.topo-swatch {
+  width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+  border: 2px solid var(--color-surface); box-shadow: 0 0 0 1px var(--color-border);
+}
+.topo-swatch.active { box-shadow: 0 0 0 2px var(--color-accent); }
+.topo-device-list { list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; }
+.topo-device-item {
+  width: 100%; display: flex; align-items: center; gap: 8px; text-align: left;
+  background: var(--color-surface2); color: var(--color-text);
+  border: 1px dashed #4a5178; border-radius: var(--radius-sm); padding: 7px 10px; font-size: 12px; cursor: grab;
+}
+.topo-device-item:hover { border-color: var(--color-accent); }
+.topo-device-item-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-grip { color: var(--color-muted); letter-spacing: -2px; }
+
+/* --- ノード --- */
+.topo-device {
+  width: 168px; height: 64px; display: flex; align-items: center; gap: 9px; padding: 0 10px;
+  background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 10px;
+  font-size: 11px; line-height: 1.35; color: var(--color-text);
+}
+.topo-device.selected { border: 2px solid var(--color-accent); padding: 0 9px; box-shadow: 0 0 0 4px var(--color-accent-dim); }
+.topo-device.failed { border-color: var(--color-danger-dim); }
+.topo-device.failed.selected { border-color: var(--color-accent); }
+.topo-device.inactive { opacity: 0.55; }
+.topo-device-icon { width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.topo-device-body { min-width: 0; flex: 1; }
+.topo-device-name { font-weight: 700; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-device-host { color: var(--color-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-device-state { display: flex; align-items: center; gap: 4px; font-size: 10px; white-space: nowrap; }
+.topo-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+
+.topo-cloud { width: 100%; height: 100%; position: relative; display: flex; align-items: center; justify-content: center; }
+.topo-cloud-shape { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+/* 文字は自動で折り返さない（改行は入力どおり）。PNG 出力時にフォント幅の差で折り返しが変わるのを防ぐ */
+.topo-cloud-label { position: relative; font-size: 12px; font-weight: 600; text-align: center; padding-top: 10%; white-space: pre; }
+
+.topo-text { padding: 2px 4px; white-space: pre; line-height: 1.3; font-weight: 600; border: 1px dashed transparent; border-radius: 4px; }
+.topo-text.selected { border-color: var(--color-accent); }
+
+.topo-area { width: 100%; height: 100%; border: 1.5px dashed; border-radius: 12px; position: relative; }
+.topo-area-label {
+  position: absolute; left: 10px; top: 6px; font-size: 12px; font-weight: 700;
+  pointer-events: all; cursor: pointer; white-space: pre; padding: 2px 4px;
+}
+.topo-canvas.editing .topo-area-label { cursor: move; }
+/* グループ枠は枠内の空白をクリックしても選択されない（中の機器の操作・範囲選択を邪魔しない）。ラベルで選択・移動する */
+.react-flow__node-area { pointer-events: none !important; }
+.react-flow__node-area .react-flow__resize-control { pointer-events: all; }
+
+/* --- 接続点・ラベル --- */
+.topo-handle { width: 9px; height: 9px; background: var(--color-accent); border: 2px solid var(--color-surface); opacity: 0; transition: opacity 0.15s; }
+.react-flow__node:hover .topo-handle, .react-flow__node.selected .topo-handle { opacity: 1; }
+.topo-handle-hidden { visibility: hidden; }
+.react-flow__handle.connectingto, .react-flow__handle.valid { opacity: 1; background: var(--color-success); }
+.topo-port {
+  position: absolute; pointer-events: none; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 9.5px; color: #a5abc8; background: rgba(18,20,28,0.85); padding: 0 3px; border-radius: 3px; white-space: nowrap;
+}
+.topo-edge-label {
+  position: absolute; pointer-events: none; font-size: 10.5px; font-weight: 600; color: #c9cde0;
+  background: var(--color-surface); border: 1px solid var(--color-border); padding: 1px 6px; border-radius: 10px; white-space: nowrap;
+}
+.topo-edge-label.selected { border-color: var(--color-accent); color: var(--color-text); }
+.react-flow__controls-button { background: var(--color-surface); border-color: var(--color-border); fill: var(--color-text); }
+.react-flow__controls-button:hover { background: var(--color-surface2); }
