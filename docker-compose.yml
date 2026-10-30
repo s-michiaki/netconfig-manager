@@ -14,6 +14,8 @@ x-backend-env: &backend-env
   TERMINAL_LOG_PATH: /data/terminal-logs
   AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-365}
   TERMINAL_LOG_RETENTION_DAYS: ${TERMINAL_LOG_RETENTION_DAYS:-180}
+  PING_TIMEOUT: ${PING_TIMEOUT:-1}
+  PING_MAX_TARGETS: ${PING_MAX_TARGETS:-300}
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
 
 x-backend-depends: &backend-depends
@@ -52,6 +54,11 @@ services:
       context: ./backend
     ports:
       - "8000:8000"
+    # Ping監視: サーバーから ICMP を送るための権限（特権ソケット / 非特権ソケットのどちらでも送れるようにする）
+    cap_add:
+      - NET_RAW
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
     environment: *backend-env
     volumes:
       - ./backend:/app

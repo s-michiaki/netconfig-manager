@@ -9,6 +9,7 @@ import DevicesPage from "./pages/DevicesPage";
 import HistoryPage from "./pages/HistoryPage";
 import JumpHostsPage from "./pages/JumpHostsPage";
 import LoginPage from "./pages/LoginPage";
+import PingPage from "./pages/PingPage";
 import SchedulePage from "./pages/SchedulePage";
 import TerminalPage from "./pages/TerminalPage";
 import TopologyPage from "./pages/TopologyPage";
@@ -19,6 +20,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
   { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
   { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
   { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
+  { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
   { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
@@ -118,7 +120,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.5.0 · RHEL 10</span>
+          <span className="version-tag">v1.6.0 · RHEL 10</span>
         </div>
       </aside>
 
@@ -133,6 +135,7 @@ function Layout() {
           <Route path="/history" element={<RequirePerm perm={PERM.CONFIG_READ}><HistoryPage /></RequirePerm>} />
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
+          <Route path="/ping" element={<RequirePerm perm={PERM.PING_USE}><PingPage /></RequirePerm>} />
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
           <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />
           <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />

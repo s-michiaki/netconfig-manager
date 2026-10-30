@@ -27,10 +27,14 @@ class Perm(str, Enum):
     COMPLIANCE_READ = "compliance:read"  # コンプライアンスチェックの結果・ルールの閲覧
     COMPLIANCE_WRITE = "compliance:write"  # ルールの作成・編集・削除、再検査
     AUDIT_READ = "audit:read"  # 監査ログ（操作履歴・ターミナルの記録）の閲覧。admin のみ
+    PING_USE = "ping:use"  # Ping監視の利用（登録済みの機器・追加済みのIPへの PING）
+    PING_WRITE = "ping:write"  # Ping監視の対象IPの追加・変更・削除
 
 
-_VIEWER = {Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ}
-_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE}
+_VIEWER = {
+    Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ, Perm.PING_USE,
+}
+_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE}
 _ADMIN = set(Perm)
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Perm]] = {

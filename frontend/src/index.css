@@ -633,3 +633,33 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .grp-row-body { flex: 1; min-width: 0; }
 .grp-row-name { font-weight: 600; font-size: 13px; }
 .grp-edit { border-top: 1px solid var(--color-border); padding-top: 12px; }
+
+/* ===== Ping監視 ===== */
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.ping-alert { background: var(--color-danger-dim); border: 1px solid var(--color-danger); color: var(--color-danger); padding: 10px 12px; border-radius: var(--radius); margin-bottom: 12px; font-size: 13px; }
+.ping-summary { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 14px; font-size: 13px; }
+.ping-summary span { display: inline-flex; align-items: center; gap: 6px; }
+.ping-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--color-muted); flex-shrink: 0; }
+.ping-dot.ok { background: var(--color-success); }
+.ping-dot.warn { background: var(--color-warning); }
+.ping-dot.down { background: var(--color-danger); box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.25); animation: ping-blink 1s steps(2, start) infinite; }
+.ping-dot.error { background: var(--color-danger); }
+@keyframes ping-blink { to { opacity: 0.35; } }
+.ping-dot-group { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+.ping-section { margin-bottom: 18px; }
+.ping-section-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.ping-table { table-layout: fixed; width: 100%; min-width: 1020px; }
+.ping-table td, .ping-table th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ping-table th { text-transform: none; }
+.ping-summary input[type=checkbox], .ping-sel-head input, .ping-sel-item input { width: auto; flex-shrink: 0; }
+.ping-table td.ping-state { text-overflow: clip; padding-right: 0; }
+.ping-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.ping-row.down td { background: rgba(127, 29, 29, 0.28); }
+.ping-row.down:hover td { background: rgba(127, 29, 29, 0.4); }
+.ping-hist { display: flex; align-items: flex-end; gap: 1px; height: 20px; width: 240px; }
+.ping-bar { flex: 1; min-width: 2px; background: var(--color-success); border-radius: 1px 1px 0 0; opacity: 0.85; }
+.ping-bar.lost { background: var(--color-danger); opacity: 1; }
+.ping-bar.empty { height: 2px; background: var(--color-surface2); }
+.ping-sel-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--color-surface2); font-weight: 600; font-size: 13px; cursor: pointer; position: sticky; top: 0; }
+.ping-sel-item { display: flex; align-items: center; gap: 10px; padding: 5px 10px 5px 28px; font-size: 13px; cursor: pointer; }
+.ping-sel-item:hover { background: var(--color-surface2); }

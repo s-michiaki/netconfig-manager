@@ -16,6 +16,7 @@ from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import Device, DeviceGroup
+from app.models.ping import PingTarget
 from app.services.audit import Audit, get_audit
 
 router = APIRouter()
@@ -107,9 +108,10 @@ async def update_group(
     "/{group_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.DEVICE_WRITE))]
 )
 async def delete_group(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
-    """グループを削除する。所属していた機器は削除せず未分類に戻す"""
+    """グループを削除する。所属していた機器・Ping監視の追加IPは削除せず未分類に戻す"""
     g = await _get_or_404(db, group_id)
     r = await db.execute(update(Device).where(Device.group_id == g.id).values(group_id=None))
+    await db.execute(update(PingTarget).where(PingTarget.group_id == g.id).values(group_id=None))
     await db.delete(g)
     audit("device_group.delete", target_type="device_group", target_id=g.id, target_name=g.name,
           detail={"moved_to_ungrouped": r.rowcount or 0})
