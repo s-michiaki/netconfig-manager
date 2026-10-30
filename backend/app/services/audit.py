@@ -53,6 +53,9 @@ ACTIONS = {
     "compliance.rule_update": "ルール変更",
     "compliance.rule_delete": "ルール削除",
     "compliance.run": "再検査",
+    "ping.target_create": "Ping対象の追加",
+    "ping.target_update": "Ping対象の変更",
+    "ping.target_delete": "Ping対象の削除",
     "audit.view_recording": "ターミナル記録の閲覧",
 }
 

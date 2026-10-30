@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
     TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)
 
+    # --- Ping監視 ---
+    PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）
+    PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数
+
     @field_validator("ADMIN_PASSWORD", mode="before")
     @classmethod
     def _empty_to_none(cls, v):

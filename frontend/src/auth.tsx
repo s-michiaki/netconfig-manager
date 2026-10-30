@@ -16,6 +16,8 @@ export const PERM = {
   COMPLIANCE_READ: "compliance:read",
   COMPLIANCE_WRITE: "compliance:write",
   AUDIT_READ: "audit:read",
+  PING_USE: "ping:use",
+  PING_WRITE: "ping:write",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 

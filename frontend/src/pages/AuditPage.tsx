@@ -50,6 +50,7 @@ const CATEGORIES: [string, string][] = [
   ["terminal.", "ターミナル"],
   ["topology.", "構成図"],
   ["compliance.", "コンプライアンス"],
+  ["ping.", "Ping監視"],
   ["audit.", "監査ログの閲覧"],
 ];
 
@@ -62,7 +63,7 @@ const FIELD_LABELS: Record<string, string> = {
   session_id: "セッション", seconds: "接続時間（秒）", via: "踏み台", cron: "cron", target: "対象",
   copy_from: "複製元", version: "版", name: "名前", severity: "重要度", pattern: "パターン", platforms: "対象機種",
   match_type: "一致方法", expect: "期待", scope: "範囲", section_pattern: "セクション", enabled: "有効",
-  devices: "機器数", rules: "ルール数", checked: "検査件数",
+  devices: "機器数", rules: "ルール数", checked: "検査件数", address: "アドレス",
   group_id: "グループ", group: "グループ", color: "色", old_name: "変更前の名前", moved_to_ungrouped: "未分類に戻した台数",
 };
 

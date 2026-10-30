@@ -54,7 +54,8 @@ export function errorMessage(err: unknown, fallback = "エラーが発生しま�
     if (typeof detail === "string") return detail;
     if (Array.isArray(detail)) {
       return detail
-        .map((d: { loc?: unknown[]; msg?: string }) => `${(d.loc ?? []).slice(1).join(".")}: ${d.msg}`)
+        // 入力チェック（field_validator）のメッセージに付く "Value error, " は表示しない
+        .map((d: { loc?: unknown[]; msg?: string }) => `${(d.loc ?? []).slice(1).join(".")}: ${(d.msg ?? "").replace(/^Value error, /, "")}`)
         .join(" / ");
     }
     if (err.message) return err.message;
