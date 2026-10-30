@@ -46,6 +46,8 @@ class Device(Base):
     enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 応答待ち時間（秒）。NULL なら既定値（SSH_READ_TIMEOUT）。応答の遅い機器向け
+    read_timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 経由する踏み台（NULL なら直接接続）
     jump_host_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("jump_hosts.id", name="fk_devices_jump_host_id"), nullable=True

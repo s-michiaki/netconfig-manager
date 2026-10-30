@@ -74,6 +74,7 @@ class TerminalSession:
             pkey=pkey,  # 鍵とパスワードの両方がある場合は鍵 → パスワードの順に試す
             timeout=settings.SSH_TIMEOUT,
             auth_timeout=settings.SSH_AUTH_TIMEOUT,
+            banner_timeout=settings.SSH_TIMEOUT,
             look_for_keys=False,
             allow_agent=False,
             sock=sock,

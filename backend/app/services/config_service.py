@@ -17,6 +17,7 @@ from netmiko import (
     ConnectHandler,
     NetmikoAuthenticationException,
     NetmikoTimeoutException,
+    ReadTimeout,
 )
 from paramiko import BadHostKeyException
 
@@ -51,6 +52,8 @@ class PlatformSpec:
     prep_commands: list[str] = field(default_factory=list)
     # 設定モードに入って実行するコマンド（PAN-OS の "configure" → "show" など）
     config_mode_commands: list[str] = field(default_factory=list)
+    # 応答の遅い機器。True ならログイン後のプロンプト待ちなどにも応答待ち時間を適用する
+    slow_device: bool = False
 
 
 PLATFORMS: dict[str, PlatformSpec] = {
@@ -75,6 +78,8 @@ PLATFORMS: dict[str, PlatformSpec] = {
         prep_commands=["set cli config-output-format set"],
         config_mode_commands=["show"],
         ignore_patterns=[r"^\[edit\]$", r"^Entering configuration mode$"],
+        # ログイン後プロンプトが出るまで数十秒かかることがある（Netmiko 既定の待ちは 20 秒固定）
+        slow_device=True,
     ),
 }
 
@@ -96,6 +101,11 @@ class DeviceConnectionInfo:
     jump: JumpHostInfo | None = None  # 踏み台経由の場合のみ
     private_key: str | None = None  # SSH 鍵認証（パスワードと併用可）
     key_passphrase: str | None = None
+    read_timeout: int | None = None  # 応答待ち時間（秒）。None なら既定値
+
+
+def effective_read_timeout(device: DeviceConnectionInfo) -> int:
+    return device.read_timeout or settings.SSH_READ_TIMEOUT
 
 
 @dataclass
@@ -206,18 +216,26 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
     if spec is None:
         raise ValueError(f"未対応のプラットフォームです: {device.platform}")
 
+    read_timeout = effective_read_timeout(device)
     params = {
         "device_type": device.platform,
         "host": device.hostname,
         "port": device.port,
         "username": device.username,
         "password": device.password or "",
-        "timeout": settings.SSH_TIMEOUT,
+        "conn_timeout": settings.SSH_TIMEOUT,  # TCP 接続
+        "banner_timeout": settings.SSH_TIMEOUT,  # SSH バナー受信
         "auth_timeout": settings.SSH_AUTH_TIMEOUT,
         "alt_host_keys": True,
         "alt_key_file": settings.SSH_KNOWN_HOSTS,
         "auto_connect": False,
     }
+    if spec.slow_device or device.read_timeout:
+        # Netmiko はログイン直後のプロンプト待ちなどを 10〜20 秒固定で待つため、応答の遅い機器では
+        # タイムアウトする。すべての読み取り待ちを応答待ち時間で上書きし、高速モードも無効にする
+        # （待ち時間は上限であり、応答が来ればすぐ次へ進む）
+        params["read_timeout_override"] = read_timeout
+        params["fast_cli"] = False
     if device.enable_secret:
         params["secret"] = device.enable_secret
     if device.private_key:
@@ -248,15 +266,15 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
         if device.enable_secret and spec.supports_enable:
             conn.enable()
         for cmd in spec.prep_commands:
-            conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT)
+            conn.send_command(cmd, read_timeout=read_timeout)
         output = []
         for cmd in spec.commands:
-            output.append(conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT))
+            output.append(conn.send_command(cmd, read_timeout=read_timeout))
         if spec.config_mode_commands:
             conn.config_mode()
             try:
                 for cmd in spec.config_mode_commands:
-                    output.append(conn.send_command(cmd, read_timeout=settings.SSH_READ_TIMEOUT))
+                    output.append(conn.send_command(cmd, read_timeout=read_timeout))
             finally:
                 conn.exit_config_mode()
         return "\n".join(output)
@@ -295,6 +313,14 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
         if hk is not None:
             # 鍵不一致・未登録はリトライしても解決しない
             return CollectResult(success=False, error=describe_ssh_error(hk))
+        if isinstance(e, ReadTimeout):
+            spec = PLATFORMS.get(device.platform)
+            if device.read_timeout or (spec and spec.slow_device):
+                msg = f"機器の応答待ちがタイムアウトしました（{effective_read_timeout(device)}秒）。" \
+                    "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を延ばしてください"
+            else:
+                msg = "機器の応答待ちがタイムアウトしました。応答が遅い機器の場合はデバイス設定の「応答待ち時間」を指定してください"
+            return CollectResult(success=False, error=msg, retryable=True)
         if isinstance(e, NetmikoTimeoutException):
             return CollectResult(success=False, error="タイムアウトまたは接続不可", retryable=True)
         if isinstance(e, ValueError):
