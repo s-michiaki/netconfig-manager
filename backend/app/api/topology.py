@@ -1,9 +1,12 @@
 """構成図（トポロジー）API
 
-構成図は複数作成できる。1つの構成図の配置・接続線は TopologyData として丸ごと保存する。
+構成図は複数作成できる。1つの構成図は「物理構成」（data）と「論理構成」（logical）の2枚のキャンバスを持ち、
+それぞれの配置・接続線を TopologyData として丸ごと保存する。
 - 機器ノード: 登録済みデバイスを参照（device_id）。収集状態を色で表示するため、状態も返す
 - 非管理機器ノード（unmanaged）: 登録していない機器（ISPルーター・ハブ・PC など）。名前・補足は自由入力
 - 装飾ノード: 雲（cloud）・テキスト（text）・グループ枠（group）
+- 作図ノード（主に論理構成用）: 図形（shape: 四角・角丸・楕円・ひし形）・セグメント（segment: サブネット等の線）・
+  中継点（point: 線の折り曲げ・分岐用）
 - 保存は楽観ロック（version）。他の人が先に保存していたら 409 を返す
 """
 import json
@@ -39,15 +42,19 @@ MapName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, 
 
 class TopologyNode(BaseModel):
     id: ElementId
-    type: Literal["device", "unmanaged", "cloud", "text", "group"]
+    type: Literal["device", "unmanaged", "cloud", "text", "group", "shape", "segment", "point"]
     x: Coord
     y: Coord
-    w: Size | None = None  # 雲・テキスト・グループ枠の大きさ（機器ノードは固定）
+    w: Size | None = None  # 雲・グループ枠・図形・セグメントの大きさ（機器ノードは固定）
     h: Size | None = None
     device_id: str | None = None  # type=device のときのみ
     label: Label | None = None  # 非管理機器の名前・装飾ノードの文字（機器ノードは登録済みの機器名を表示）
-    note: Annotated[str, StringConstraints(max_length=200)] | None = None  # 非管理機器の補足（IP・型番など）
-    color: Color | None = None
+    # 機器・非管理機器の補足（IP・役割など。論理構成で「Lo0 10.0.0.1」等を書く用途）
+    note: Annotated[str, StringConstraints(max_length=200)] | None = None
+    color: Color | None = None  # 枠線・文字の色
+    fill: Color | None = None  # 図形の塗り（半透明で描画）
+    shape: Literal["rect", "rounded", "ellipse", "diamond"] | None = None  # 図形の形
+    border_style: Literal["solid", "dashed", "dotted"] | None = None  # 図形の枠線
     font_size: Literal["s", "m", "l", "xl"] | None = None  # テキスト用
     # 機器アイコン（未指定なら、機器ノードはプラットフォームから自動: PAN-OS → firewall, JunOS → router,
     # 他 → switch。非管理機器ノードは other）
@@ -65,7 +72,10 @@ class TopologyEdge(BaseModel):
     target_port: Port | None = None
     label: Label | None = None
     color: Color | None = None
-    line_style: Literal["solid", "dashed"] | None = None
+    line_style: Literal["solid", "dashed", "dotted"] | None = None
+    arrow: Literal["none", "end", "start", "both"] | None = None  # 矢印
+    routing: Literal["straight", "step", "curve"] | None = None  # 直線 / カギ線 / 曲線
+    width: Literal["thin", "normal", "thick"] | None = None
 
 
 class Viewport(BaseModel):
@@ -119,8 +129,9 @@ class MapSummary(BaseModel):
     name: str
     description: str | None
     version: int
-    node_count: int
-    device_count: int
+    node_count: int  # 物理構成の要素数
+    logical_node_count: int  # 論理構成の要素数
+    device_count: int  # 配置済みの登録機器の数（物理・論理の合計、重複なし）
     updated_at: datetime | None
     updated_by: str | None
 
@@ -132,7 +143,8 @@ class MapDetail(BaseModel):
     version: int
     updated_at: datetime | None
     updated_by: str | None
-    data: TopologyData
+    data: TopologyData  # 物理構成
+    logical: TopologyData  # 論理構成
     devices: dict[str, DeviceStatus]  # device_id → 状態（この構成図に置かれた機器のみ）
 
 
@@ -146,17 +158,30 @@ class MapUpdate(BaseModel):
     version: int  # 読み込んだときの version（楽観ロック）
     name: MapName | None = None
     description: Annotated[str, StringConstraints(max_length=1000)] | None = None
-    data: TopologyData | None = None
+    data: TopologyData | None = None  # 物理構成（指定したときだけ更新）
+    logical: TopologyData | None = None  # 論理構成（指定したときだけ更新）
 
 
 # ---------------------------------------------------------------- helpers
 
 
-def _load_data(m: TopologyMap) -> TopologyData:
+def _parse(raw: str | None) -> TopologyData:
     try:
-        return TopologyData.model_validate(json.loads(m.data or EMPTY_TOPOLOGY))
+        return TopologyData.model_validate(json.loads(raw or EMPTY_TOPOLOGY))
     except (ValueError, TypeError):
         return TopologyData()
+
+
+def _load_data(m: TopologyMap) -> TopologyData:
+    return _parse(m.data)
+
+
+def _load_logical(m: TopologyMap) -> TopologyData:
+    return _parse(m.logical_data)
+
+
+def _device_ids(*docs: TopologyData) -> set[str]:
+    return {n.device_id for d in docs for n in d.nodes if n.type == "device" and n.device_id}
 
 
 def _prune(data: TopologyData, existing_device_ids: set[str]) -> TopologyData:
@@ -232,9 +257,10 @@ async def device_statuses(db: AsyncSession, ids: set[str]) -> dict[str, DeviceSt
 
 async def _detail(db: AsyncSession, m: TopologyMap) -> MapDetail:
     data = _load_data(m)
-    ids = {n.device_id for n in data.nodes if n.device_id}
-    statuses = await device_statuses(db, ids)
+    logical = _load_logical(m)
+    statuses = await device_statuses(db, _device_ids(data, logical))
     data = _prune(data, set(statuses))
+    logical = _prune(logical, set(statuses))
     return MapDetail(
         id=m.id,
         name=m.name,
@@ -243,6 +269,7 @@ async def _detail(db: AsyncSession, m: TopologyMap) -> MapDetail:
         updated_at=m.updated_at,
         updated_by=m.updated_by,
         data=data,
+        logical=logical,
         devices=statuses,
     )
 
@@ -271,6 +298,7 @@ async def list_maps(db: AsyncSession = Depends(get_db)):
     result = []
     for m in maps:
         data = _load_data(m)
+        logical = _load_logical(m)
         result.append(
             MapSummary(
                 id=m.id,
@@ -278,7 +306,8 @@ async def list_maps(db: AsyncSession = Depends(get_db)):
                 description=m.description,
                 version=m.version,
                 node_count=len(data.nodes),
-                device_count=sum(1 for n in data.nodes if n.type == "device"),
+                logical_node_count=len(logical.nodes),
+                device_count=len(_device_ids(data, logical)),
                 updated_at=m.updated_at,
                 updated_by=m.updated_by,
             )
@@ -292,10 +321,14 @@ async def create_map(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require(Perm.TOPOLOGY_WRITE)),
 ):
-    data = EMPTY_TOPOLOGY
+    data = logical = EMPTY_TOPOLOGY
     if payload.copy_from:
-        data = (await _get_or_404(db, payload.copy_from)).data
-    m = TopologyMap(name=payload.name, description=payload.description or None, data=data, updated_by=user.username)
+        src = await _get_or_404(db, payload.copy_from)
+        data, logical = src.data, src.logical_data
+    m = TopologyMap(
+        name=payload.name, description=payload.description or None, data=data, logical_data=logical,
+        updated_by=user.username,
+    )
     db.add(m)
     await _commit_or_409(db)
     await db.refresh(m)
@@ -314,8 +347,8 @@ async def get_map(map_id: str, db: AsyncSession = Depends(get_db)):
 )
 async def get_map_status(map_id: str, db: AsyncSession = Depends(get_db)):
     """配置済み機器の収集状態だけを返す（編集中の画面を上書きせずに状態を更新するため）"""
-    data = _load_data(await _get_or_404(db, map_id))
-    return await device_statuses(db, {n.device_id for n in data.nodes if n.device_id})
+    m = await _get_or_404(db, map_id)
+    return await device_statuses(db, _device_ids(_load_data(m), _load_logical(m)))
 
 
 @router.post(
@@ -347,11 +380,15 @@ async def update_map(
         m.name = payload.name
     if "description" in fields:
         m.description = payload.description or None
+    # 編集中に削除された機器は落とす
     if payload.data is not None:
-        data = payload.data
-        ids = {n.device_id for n in data.nodes if n.device_id}
-        data = _prune(data, await _existing_devices(db, ids))  # 編集中に削除された機器は落とす
-        m.data = data.model_dump_json(exclude_none=True)
+        m.data = _prune(payload.data, await _existing_devices(db, _device_ids(payload.data))).model_dump_json(
+            exclude_none=True
+        )
+    if payload.logical is not None:
+        m.logical_data = _prune(
+            payload.logical, await _existing_devices(db, _device_ids(payload.logical))
+        ).model_dump_json(exclude_none=True)
     m.version += 1
     m.updated_by = user.username
     await _commit_or_409(db)

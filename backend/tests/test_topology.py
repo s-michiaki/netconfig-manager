@@ -168,3 +168,46 @@ def test_device_status_and_deleted_device(ctx):
     # 削除済み機器を含む古い画面から保存しても落とされる
     r = c.put(url, json={"version": got["version"], "data": data}, headers=op)
     assert r.status_code == 200 and len(r.json()["data"]["nodes"]) == 3
+
+
+def test_logical_view(ctx):
+    c, op, view, devs = ctx["c"], ctx["op"], ctx["view"], ctx["devs"]
+    m = c.post("/api/topology/maps", json={"name": f"l-{uuid.uuid4().hex[:6]}"}, headers=op).json()
+    assert m["logical"] == {"nodes": [], "edges": [], "viewport": None}
+    url = f"/api/topology/maps/{m['id']}"
+    # 物理構成を保存
+    phys = {"nodes": [{"id": "n1", "type": "device", "x": 0, "y": 0, "device_id": devs[0]}], "edges": []}
+    m = c.put(url, json={"version": 1, "data": phys}, headers=op).json()
+    # 論理構成だけを保存（物理構成は変わらない）。同じ機器を論理構成にも置ける
+    logical = {
+        "nodes": [
+            {"id": "r1", "type": "device", "x": 0, "y": 0, "device_id": devs[0], "note": "Lo0 10.255.0.1"},
+            {"id": "r2", "type": "device", "x": 300, "y": 0, "device_id": devs[1]},
+            {"id": "s1", "type": "segment", "x": -50, "y": 200, "w": 500, "h": 20, "label": "VLAN10 192.168.10.0/24",
+             "color": "#34d399"},
+            {"id": "o1", "type": "shape", "shape": "ellipse", "x": -80, "y": -60, "w": 520, "h": 200,
+             "label": "OSPF Area 0", "fill": "#4f8ef7", "border_style": "dotted"},
+            {"id": "p1", "type": "point", "x": 150, "y": 120},
+        ],
+        "edges": [
+            {"id": "e1", "source": "r1", "target": "s1", "target_port": ".1", "routing": "step"},
+            {"id": "e2", "source": "r2", "target": "p1", "arrow": "end", "width": "thick", "line_style": "dotted"},
+            {"id": "e3", "source": "p1", "target": "s1", "routing": "curve", "arrow": "both"},
+        ],
+    }
+    r = c.put(url, json={"version": m["version"], "logical": logical}, headers=op)
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert [n["id"] for n in got["data"]["nodes"]] == ["n1"]
+    assert len(got["logical"]["nodes"]) == 5 and got["logical"]["nodes"][0]["note"] == "Lo0 10.255.0.1"
+    assert got["logical"]["nodes"][3]["shape"] == "ellipse" and got["logical"]["edges"][1]["arrow"] == "end"
+    assert set(got["devices"]) == {devs[0], devs[1]}  # 論理構成だけに置いた機器の状態も返す
+    assert set(c.get(f"{url}/status", headers=view).json()) == {devs[0], devs[1]}
+    s = next(x for x in c.get("/api/topology/maps", headers=view).json() if x["id"] == m["id"])
+    assert s["node_count"] == 1 and s["logical_node_count"] == 5 and s["device_count"] == 2
+    # 複製すると論理構成も複製される
+    r = c.post("/api/topology/maps", json={"name": f"lc-{uuid.uuid4().hex[:6]}", "copy_from": m["id"]}, headers=op)
+    assert len(r.json()["logical"]["nodes"]) == 5
+    # 不正な値
+    bad = {**logical, "nodes": [*logical["nodes"][:4], {"id": "x", "type": "shape", "shape": "star", "x": 0, "y": 0}]}
+    assert c.put(url, json={"version": got["version"], "logical": bad}, headers=op).status_code == 422
