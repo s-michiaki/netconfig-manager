@@ -85,6 +85,31 @@ PLATFORMS: dict[str, PlatformSpec] = {
 
 SUPPORTED_PLATFORMS = tuple(PLATFORMS.keys())
 
+# ページャー表示（ページング無効化に失敗したときに出る）
+#   Cisco / Arista / NX-OS: --More--   Huawei / Comware: ---- More ----   JunOS: ---(more 45%)---
+#   PAN-OS（less）: lines 1-40
+PAGER_RE = re.compile(r"(?im)(?:^|\s)-{2,}\s*\(?\s*more(?:\s+\d+%)?\s*\)?\s*-{2,}|^lines \d+-\d+")
+
+
+class PagingNotDisabledError(Exception):
+    """ページング（--More--）が無効化されておらず、出力が途中で止まった"""
+
+    def __init__(self, command: str):
+        self.command = command
+        super().__init__(command)
+
+
+def _send(conn, command: str, read_timeout: int) -> str:
+    """プロンプトに加えてページャー表示も待ち、ページャーが出たら応答待ちを待たずに即エラーにする
+    （そのままだとプロンプトが出ないまま応答待ち時間いっぱい待ってタイムアウトする）"""
+    prompt = conn.find_prompt()
+    # send_command はフラグを渡せないため、ページャー部分はスコープ付きフラグ (?im:...) で埋め込む
+    pattern = rf"{re.escape(prompt.strip())}|(?im:{PAGER_RE.pattern.removeprefix('(?im)')})"
+    output = conn.send_command(command, expect_string=pattern, read_timeout=read_timeout)
+    if PAGER_RE.search(output):
+        raise PagingNotDisabledError(command)
+    return output
+
 
 @dataclass
 class DeviceConnectionInfo:
@@ -266,15 +291,15 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
         if device.enable_secret and spec.supports_enable:
             conn.enable()
         for cmd in spec.prep_commands:
-            conn.send_command(cmd, read_timeout=read_timeout)
+            _send(conn, cmd, read_timeout)
         output = []
         for cmd in spec.commands:
-            output.append(conn.send_command(cmd, read_timeout=read_timeout))
+            output.append(_send(conn, cmd, read_timeout))
         if spec.config_mode_commands:
             conn.config_mode()
             try:
                 for cmd in spec.config_mode_commands:
-                    output.append(conn.send_command(cmd, read_timeout=read_timeout))
+                    output.append(_send(conn, cmd, read_timeout))
             finally:
                 conn.exit_config_mode()
         return "\n".join(output)
@@ -306,6 +331,13 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
         return CollectResult(success=False, error=str(e), retryable=e.retryable)
     except PrivateKeyError as e:
         return CollectResult(success=False, error=f"機器の秘密鍵: {e}")
+    except PagingNotDisabledError as e:
+        # 権限不足などでページング無効化コマンドが効いていない。リトライしても解決しない
+        return CollectResult(
+            success=False,
+            error=f"「{e.command}」の出力が --More-- 等で止まりました。ページングを無効化できていません"
+            "（ログインユーザーの権限で terminal length 0 / screen-length 等が実行できるか確認してください）",
+        )
     except NetmikoAuthenticationException:
         return CollectResult(success=False, error="認証失敗" + ("（機器）" if device.jump else ""))
     except Exception as e:  # noqa: BLE001

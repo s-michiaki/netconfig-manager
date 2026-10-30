@@ -74,10 +74,14 @@ def _lines(ch):
             yield line
 
 
-def _cisco(ch):
+def _cisco(ch, pager=None):
     ch.send("R1#")
     for line in _lines(ch):
         out = ""
+        if line.strip() == "show running-config" and pager:
+            # ページングが無効化されていない機器: 途中でページャーが出て止まる
+            ch.send(line + "\r\n" + "\r\n".join(CONFIG.split("\r\n")[:4]) + "\r\n" + pager)
+            continue
         if line.strip() == "show running-config":
             out = CONFIG
         elif line.strip() == "exit":
@@ -143,14 +147,14 @@ def handle(sock, key, state, cfg=None):
         if cfg["mode"] == "panos":
             _panos(ch, state, cfg.get("login_delay", 0.0))
         else:
-            _cisco(ch)
+            _cisco(ch, cfg.get("pager"))
     except Exception:  # noqa: BLE001
         pass
 
 
-def start(key=None, password="pw", pubkey=None, mode="cisco", login_delay=0.0):
+def start(key=None, password="pw", pubkey=None, mode="cisco", login_delay=0.0, pager=None):
     key = key or paramiko.RSAKey.generate(2048)
-    cfg = {"password": password, "pubkey": pubkey, "mode": mode, "login_delay": login_delay}
+    cfg = {"password": password, "pubkey": pubkey, "mode": mode, "login_delay": login_delay, "pager": pager}
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", 0))
