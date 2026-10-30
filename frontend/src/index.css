@@ -495,3 +495,50 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-edge-label.selected { border-color: var(--color-accent); color: var(--color-text); }
 .react-flow__controls-button { background: var(--color-surface); border-color: var(--color-border); fill: var(--color-text); }
 .react-flow__controls-button:hover { background: var(--color-surface2); }
+
+/* --- 物理構成 / 論理構成の切り替え --- */
+.topo-view-tabs {
+  display: inline-flex; padding: 3px; gap: 2px;
+  background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 7px;
+}
+.topo-view-tab {
+  border: none; background: transparent; color: var(--color-muted);
+  font-size: 12px; padding: 5px 12px; border-radius: 5px; cursor: pointer;
+}
+.topo-view-tab:hover { color: var(--color-text); }
+.topo-view-tab.active { background: var(--color-accent-dim); color: var(--color-text); font-weight: 600; }
+
+.topo-form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.topo-shape-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.topo-shape-btn svg { flex-shrink: 0; }
+.topo-swatch-none {
+  background: linear-gradient(135deg, transparent 45%, var(--color-danger) 45%, var(--color-danger) 55%, transparent 55%), var(--color-surface2) !important;
+}
+
+/* --- 機器の補足（機器の下に表示。線の位置計算に影響しないよう枠の外に出す） --- */
+.topo-device { position: relative; }
+.topo-node-note {
+  position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%);
+  font-size: 10px; color: #a5abc8; white-space: pre; pointer-events: none;
+  background: rgba(15,17,23,0.8); padding: 0 4px; border-radius: 3px;
+}
+
+/* --- 図形 --- */
+.topo-shape { width: 100%; height: 100%; position: relative; display: flex; align-items: center; justify-content: center; }
+.topo-shape-svg { position: absolute; inset: 0; overflow: visible; }
+.topo-shape-label { position: relative; font-weight: 600; text-align: center; white-space: pre; line-height: 1.3; padding: 4px; }
+
+/* --- セグメント --- */
+.topo-segment { width: 100%; height: 100%; position: relative; display: flex; align-items: center; }
+.topo-segment-bar { width: 100%; height: 5px; border-radius: 3px; }
+.topo-segment.vertical { justify-content: center; }
+.topo-segment.vertical .topo-segment-bar { width: 5px; height: 100%; }
+.topo-segment-label {
+  position: absolute; left: 2px; bottom: calc(50% + 6px); font-size: 11px; font-weight: 700; white-space: pre;
+}
+.topo-segment.vertical .topo-segment-label { left: calc(50% + 8px); bottom: auto; top: 0; }
+
+/* --- 中継点 --- */
+.topo-point { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--color-surface); }
+.topo-point.selected { box-shadow: 0 0 0 3px var(--color-accent); }
+.react-flow__node-point .topo-handle { width: 7px; height: 7px; }

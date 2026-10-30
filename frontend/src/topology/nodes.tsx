@@ -1,9 +1,10 @@
-/** 構成図のノード（機器・雲・テキスト・グループ枠） */
+/** 構成図のノード（機器・非管理機器・雲・テキスト・グループ枠・図形・セグメント・中継点） */
 import { createContext, memo, useContext } from "react";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import {
   STATE_LABELS, defaultIcon, formatTime,
-  type AreaNode, type CloudNode, type DeviceIcon, type DeviceNode, type DeviceStatus, type TextNode, type UnmanagedNode,
+  type AreaNode, type CloudNode, type DeviceIcon, type DeviceNode, type DeviceStatus, type LineStyle, type PointNode,
+  type SegmentNode, type ShapeNode, type TextNode, type UnmanagedNode,
 } from "./model";
 
 export interface TopologyContextValue {
@@ -101,6 +102,7 @@ export const DeviceNodeView = memo(function DeviceNodeView({ data, selected }: N
           {st && !st.is_active ? "（無効）" : ""}
         </div>
       </div>
+      {data.note && <div className="topo-node-note">{data.note}</div>}
     </div>
   );
 });
@@ -169,10 +171,74 @@ export const AreaNodeView = memo(function AreaNodeView({ data, selected }: NodeP
   );
 });
 
+const DASH: Record<LineStyle, string | undefined> = { solid: undefined, dashed: "8 5", dotted: "1.5 4.5" };
+
+/** 図形: 四角・角丸・楕円・ひし形。実際の大きさで描くので角丸や線の太さが歪まない */
+export const ShapeNodeView = memo(function ShapeNodeView({ data, selected, width, height }: NodeProps<ShapeNode>) {
+  const { editing } = useContext(TopologyContext);
+  const w = width ?? 200;
+  const h = height ?? 110;
+  const color = selected ? "#4f8ef7" : data.color ?? "#7c82a3";
+  const fill = data.fill ? `${data.fill}26` : "transparent";
+  const common = {
+    fill, stroke: color, strokeWidth: selected ? 2.5 : 1.8,
+    strokeDasharray: DASH[data.borderStyle ?? "solid"], strokeLinecap: "round" as const,
+  };
+  const i = 1.5; // 線が切れないよう内側に描く
+  let el;
+  switch (data.shape) {
+    case "ellipse":
+      el = <ellipse cx={w / 2} cy={h / 2} rx={w / 2 - i} ry={h / 2 - i} {...common} />;
+      break;
+    case "diamond":
+      el = <polygon points={`${w / 2},${i} ${w - i},${h / 2} ${w / 2},${h - i} ${i},${h / 2}`} {...common} />;
+      break;
+    default:
+      el = <rect x={i} y={i} width={w - i * 2} height={h - i * 2} rx={data.shape === "rounded" ? 14 : 2} {...common} />;
+  }
+  return (
+    <div className="topo-shape">
+      <NodeResizer isVisible={editing && selected} minWidth={30} minHeight={20} color="#4f8ef7" />
+      <Handles />
+      <svg width={w} height={h} className="topo-shape-svg" aria-hidden="true">{el}</svg>
+      <div className="topo-shape-label" style={{ color: data.color ?? "#e4e6f0", fontSize: FONT_PX[data.fontSize ?? "m"] }}>
+        {data.label}
+      </div>
+    </div>
+  );
+});
+
+/** セグメント: サブネット・VLAN などを表す太い線。長い方向に線を引き、つないだ線は線上に垂直に落ちる */
+export const SegmentNodeView = memo(function SegmentNodeView({ data, selected, width, height }: NodeProps<SegmentNode>) {
+  const { editing } = useContext(TopologyContext);
+  const vertical = (height ?? 0) > (width ?? 0);
+  const color = data.color ?? "#4f8ef7";
+  return (
+    <div className={`topo-segment${vertical ? " vertical" : ""}`}>
+      <NodeResizer isVisible={editing && selected} minWidth={20} minHeight={20} color="#4f8ef7" />
+      <Handles />
+      <div className="topo-segment-bar" style={{ background: color, boxShadow: selected ? "0 0 0 3px #1e3a6e" : undefined }} />
+      {data.label && <div className="topo-segment-label" style={{ color }}>{data.label}</div>}
+    </div>
+  );
+});
+
+/** 中継点: 線を折り曲げたり分岐させたりするための小さな点 */
+export const PointNodeView = memo(function PointNodeView({ data, selected }: NodeProps<PointNode>) {
+  return (
+    <div className={`topo-point${selected ? " selected" : ""}`} style={{ background: data.color ?? "#5b6390" }}>
+      <Handles />
+    </div>
+  );
+});
+
 export const nodeTypes = {
   device: DeviceNodeView,
   unmanaged: UnmanagedNodeView,
   cloud: CloudNodeView,
   text: TextNodeView,
   area: AreaNodeView,
+  shape: ShapeNodeView,
+  segment: SegmentNodeView,
+  point: PointNodeView,
 };

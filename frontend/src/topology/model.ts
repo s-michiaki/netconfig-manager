@@ -1,16 +1,24 @@
 /** 構成図: API の保存形式と React Flow のノード・エッジの相互変換 */
-import type { Edge, Node } from "@xyflow/react";
+import { MarkerType, type Edge, type EdgeMarker, type Node } from "@xyflow/react";
 
 export type DeviceIcon =
   | "switch" | "l3switch" | "router" | "firewall" | "server" | "wireless"
   | "pc" | "printer" | "phone" | "camera" | "storage" | "other";
 export type FontSize = "s" | "m" | "l" | "xl";
-export type LineStyle = "solid" | "dashed";
+export type LineStyle = "solid" | "dashed" | "dotted";
+export type Arrow = "none" | "end" | "start" | "both";
+export type Routing = "straight" | "step" | "curve";
+export type LineWidth = "thin" | "normal" | "thick";
+export type ShapeKind = "rect" | "rounded" | "ellipse" | "diamond";
+
+/** 1つの構成図が持つ2枚のキャンバス */
+export type ViewKind = "physical" | "logical";
+export const VIEW_LABELS: Record<ViewKind, string> = { physical: "物理構成", logical: "論理構成" };
 
 // ---- API の形式（backend/app/api/topology.py）
 export interface ApiNode {
   id: string;
-  type: "device" | "unmanaged" | "cloud" | "text" | "group";
+  type: "device" | "unmanaged" | "cloud" | "text" | "group" | "shape" | "segment" | "point";
   x: number;
   y: number;
   w?: number | null;
@@ -19,6 +27,9 @@ export interface ApiNode {
   label?: string | null;
   note?: string | null;
   color?: string | null;
+  fill?: string | null;
+  shape?: ShapeKind | null;
+  border_style?: LineStyle | null;
   font_size?: FontSize | null;
   icon?: DeviceIcon | null;
 }
@@ -32,6 +43,9 @@ export interface ApiEdge {
   label?: string | null;
   color?: string | null;
   line_style?: LineStyle | null;
+  arrow?: Arrow | null;
+  routing?: Routing | null;
+  width?: LineWidth | null;
 }
 
 export interface TopologyData {
@@ -60,30 +74,45 @@ export interface MapSummary {
   description: string | null;
   version: number;
   node_count: number;
+  logical_node_count: number;
   device_count: number;
   updated_at: string | null;
   updated_by: string | null;
 }
 
-export interface MapDetail extends Omit<MapSummary, "node_count" | "device_count"> {
-  data: TopologyData;
+export interface MapDetail extends Omit<MapSummary, "node_count" | "logical_node_count" | "device_count"> {
+  data: TopologyData; // 物理構成
+  logical: TopologyData; // 論理構成
   devices: Record<string, DeviceStatus>;
 }
 
 // ---- React Flow 側のデータ
-export type DeviceNodeData = { deviceId: string; icon?: DeviceIcon | null };
+export type DeviceNodeData = { deviceId: string; icon?: DeviceIcon | null; note?: string | null };
 /** 非管理機器（登録していない機器）。名前・補足は自由入力 */
 export type UnmanagedNodeData = { label: string; note?: string | null; icon?: DeviceIcon | null };
 export type CloudNodeData = { label: string; color?: string | null };
 export type TextNodeData = { label: string; color?: string | null; fontSize?: FontSize | null };
 export type AreaNodeData = { label: string; color?: string | null };
+/** 図形（四角・角丸・楕円・ひし形）。中に文字を書ける */
+export type ShapeNodeData = {
+  label: string; shape: ShapeKind; color?: string | null; fill?: string | null;
+  borderStyle?: LineStyle | null; fontSize?: FontSize | null;
+};
+/** セグメント（サブネット・VLAN などを表す線）。つないだ線は線上に垂直に落ちる */
+export type SegmentNodeData = { label: string; color?: string | null };
+/** 中継点（線の折り曲げ・分岐用の小さな点） */
+export type PointNodeData = { color?: string | null };
 
 export type DeviceNode = Node<DeviceNodeData, "device">;
 export type UnmanagedNode = Node<UnmanagedNodeData, "unmanaged">;
 export type CloudNode = Node<CloudNodeData, "cloud">;
 export type TextNode = Node<TextNodeData, "text">;
 export type AreaNode = Node<AreaNodeData, "area">; // React Flow 組み込みの "group" と名前が衝突しないよう area とする
-export type TopoNode = DeviceNode | UnmanagedNode | CloudNode | TextNode | AreaNode;
+export type ShapeNode = Node<ShapeNodeData, "shape">;
+export type SegmentNode = Node<SegmentNodeData, "segment">;
+export type PointNode = Node<PointNodeData, "point">;
+export type TopoNode =
+  | DeviceNode | UnmanagedNode | CloudNode | TextNode | AreaNode | ShapeNode | SegmentNode | PointNode;
 
 export type LinkEdgeData = {
   sourcePort?: string | null;
@@ -91,6 +120,9 @@ export type LinkEdgeData = {
   label?: string | null;
   color?: string | null;
   lineStyle?: LineStyle | null;
+  arrow?: Arrow | null;
+  routing?: Routing | null;
+  width?: LineWidth | null;
   // 同じ2台の間に複数の線があるとき、重ならないよう少しずらす（描画用・保存しない）
   parallelIndex?: number;
   parallelCount?: number;
@@ -98,10 +130,20 @@ export type LinkEdgeData = {
 export type LinkEdge = Edge<LinkEdgeData, "link">;
 
 export const DEVICE_NODE_SIZE = { w: 168, h: 64 };
-export const DEFAULT_SIZE = { cloud: { w: 160, h: 90 }, area: { w: 360, h: 220 } };
+export const DEFAULT_SIZE = {
+  cloud: { w: 160, h: 90 },
+  area: { w: 360, h: 220 },
+  shape: { w: 200, h: 110 },
+  segment: { w: 420, h: 24 },
+};
+export const POINT_SIZE = 14;
+
+// 重なり順: グループ枠 < 図形 < 線 < 機器など
+const Z = { area: -2, shape: -1 };
 
 /** 装飾・線に使える色（ダーク背景で読める明るさに揃えている） */
 export const PALETTE = ["#e4e6f0", "#7c82a3", "#4f8ef7", "#34d399", "#fbbf24", "#fb923c", "#f87171", "#c084fc"];
+export const DEFAULT_EDGE_COLOR = "#5b6390";
 
 export const ICON_LABELS: Record<DeviceIcon, string> = {
   switch: "スイッチ",
@@ -118,6 +160,8 @@ export const ICON_LABELS: Record<DeviceIcon, string> = {
   other: "その他",
 };
 
+export const SHAPE_LABELS: Record<ShapeKind, string> = { rect: "四角", rounded: "角丸", ellipse: "楕円", diamond: "ひし形" };
+
 export function defaultIcon(platform: string | undefined): DeviceIcon {
   if (!platform) return "switch";
   if (platform.startsWith("paloalto")) return "firewall";
@@ -128,11 +172,11 @@ export function defaultIcon(platform: string | undefined): DeviceIcon {
 const round = (v: number) => Math.round(v * 10) / 10;
 
 export function toFlow(data: TopologyData): { nodes: TopoNode[]; edges: LinkEdge[] } {
-  const nodes: TopoNode[] = data.nodes.map((n) => {
+  const nodes: TopoNode[] = data.nodes.map((n): TopoNode => {
     const position = { x: n.x, y: n.y };
     switch (n.type) {
       case "device":
-        return { id: n.id, type: "device", position, data: { deviceId: n.device_id!, icon: n.icon ?? null } };
+        return { id: n.id, type: "device", position, data: { deviceId: n.device_id!, icon: n.icon ?? null, note: n.note } };
       case "unmanaged":
         return { id: n.id, type: "unmanaged", position, data: { label: n.label ?? "", note: n.note, icon: n.icon ?? null } };
       case "cloud":
@@ -145,17 +189,34 @@ export function toFlow(data: TopologyData): { nodes: TopoNode[]; edges: LinkEdge
         return { id: n.id, type: "text", position, data: { label: n.label ?? "", color: n.color, fontSize: n.font_size } };
       case "group":
         return {
-          id: n.id, type: "area", position, zIndex: -1,
+          id: n.id, type: "area", position, zIndex: Z.area,
           width: n.w ?? DEFAULT_SIZE.area.w, height: n.h ?? DEFAULT_SIZE.area.h,
           data: { label: n.label ?? "", color: n.color },
         };
+      case "shape":
+        return {
+          id: n.id, type: "shape", position, zIndex: Z.shape,
+          width: n.w ?? DEFAULT_SIZE.shape.w, height: n.h ?? DEFAULT_SIZE.shape.h,
+          data: {
+            label: n.label ?? "", shape: n.shape ?? "rounded", color: n.color, fill: n.fill,
+            borderStyle: n.border_style, fontSize: n.font_size,
+          },
+        };
+      case "segment":
+        return {
+          id: n.id, type: "segment", position,
+          width: n.w ?? DEFAULT_SIZE.segment.w, height: n.h ?? DEFAULT_SIZE.segment.h,
+          data: { label: n.label ?? "", color: n.color },
+        };
+      case "point":
+        return { id: n.id, type: "point", position, data: { color: n.color } };
     }
   });
   const edges: LinkEdge[] = data.edges.map((e) => ({
     id: e.id, source: e.source, target: e.target, type: "link",
     data: {
       sourcePort: e.source_port, targetPort: e.target_port, label: e.label,
-      color: e.color, lineStyle: e.line_style,
+      color: e.color, lineStyle: e.line_style, arrow: e.arrow, routing: e.routing, width: e.width,
     },
   }));
   return { nodes, edges };
@@ -175,7 +236,7 @@ export function fromFlow(
       const base = { id: n.id, x: round(n.position.x), y: round(n.position.y) };
       switch (n.type) {
         case "device":
-          return { ...base, type: "device", device_id: n.data.deviceId, icon: n.data.icon ?? null };
+          return { ...base, type: "device", device_id: n.data.deviceId, icon: n.data.icon ?? null, note: nz(n.data.note) };
         case "unmanaged":
           return { ...base, type: "unmanaged", label: n.data.label, note: nz(n.data.note), icon: n.data.icon ?? null };
         case "cloud":
@@ -184,19 +245,32 @@ export function fromFlow(
           return { ...base, type: "text", label: n.data.label, color: n.data.color ?? null, font_size: n.data.fontSize ?? null };
         case "area":
           return { ...base, type: "group", ...size(n, DEFAULT_SIZE.area), label: n.data.label, color: n.data.color ?? null };
+        case "shape":
+          return {
+            ...base, type: "shape", ...size(n, DEFAULT_SIZE.shape), label: n.data.label, shape: n.data.shape,
+            color: n.data.color ?? null, fill: n.data.fill ?? null, border_style: n.data.borderStyle ?? null,
+            font_size: n.data.fontSize ?? null,
+          };
+        case "segment":
+          return { ...base, type: "segment", ...size(n, DEFAULT_SIZE.segment), label: n.data.label, color: n.data.color ?? null };
+        case "point":
+          return { ...base, type: "point", color: n.data.color ?? null };
       }
     }),
     edges: edges.map((e) => ({
       id: e.id, source: e.source, target: e.target,
       source_port: nz(e.data?.sourcePort), target_port: nz(e.data?.targetPort), label: nz(e.data?.label),
       color: e.data?.color ?? null, line_style: e.data?.lineStyle ?? null,
+      arrow: e.data?.arrow && e.data.arrow !== "none" ? e.data.arrow : null,
+      routing: e.data?.routing && e.data.routing !== "straight" ? e.data.routing : null,
+      width: e.data?.width && e.data.width !== "normal" ? e.data.width : null,
     })),
     viewport: { x: round(viewport.x), y: round(viewport.y), zoom: Math.round(viewport.zoom * 1000) / 1000 },
   };
 }
 
-/** 同じ2ノード間の線に、ずらし量の計算用の番号を振る */
-export function withParallelInfo(edges: LinkEdge[]): LinkEdge[] {
+/** 描画用の付加情報: 同じ2ノード間の線の番号（平行にずらす）と矢印 */
+export function forRender(edges: LinkEdge[]): LinkEdge[] {
   const groups = new Map<string, string[]>();
   for (const e of edges) {
     const key = [e.source, e.target].sort().join("|");
@@ -204,8 +278,15 @@ export function withParallelInfo(edges: LinkEdge[]): LinkEdge[] {
   }
   return edges.map((e) => {
     const ids = groups.get([e.source, e.target].sort().join("|"))!;
-    if (ids.length === 1 && !e.data?.parallelCount) return e;
-    return { ...e, data: { ...e.data, parallelIndex: ids.indexOf(e.id), parallelCount: ids.length } };
+    const arrow = e.data?.arrow ?? "none";
+    const color = e.selected ? "#4f8ef7" : e.data?.color ?? DEFAULT_EDGE_COLOR;
+    const marker: EdgeMarker = { type: MarkerType.ArrowClosed, color, width: 16, height: 16 };
+    return {
+      ...e,
+      markerEnd: arrow === "end" || arrow === "both" ? marker : undefined,
+      markerStart: arrow === "start" || arrow === "both" ? { ...marker, orient: "auto-start-reverse" } : undefined,
+      data: { ...e.data, parallelIndex: ids.indexOf(e.id), parallelCount: ids.length },
+    };
   });
 }
 
