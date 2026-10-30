@@ -2,7 +2,9 @@ import { useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
+import AuditPage from "./pages/AuditPage";
 import CollectPage from "./pages/CollectPage";
+import CompliancePage from "./pages/CompliancePage";
 import DevicesPage from "./pages/DevicesPage";
 import HistoryPage from "./pages/HistoryPage";
 import JumpHostsPage from "./pages/JumpHostsPage";
@@ -20,6 +22,8 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
   { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
+  { path: "/compliance", label: "コンプライアンス", icon: "✔", perm: PERM.COMPLIANCE_READ },
+  { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
   { path: "/users", label: "ユーザー管理", icon: "👥", perm: PERM.USER_ADMIN },
 ];
 
@@ -114,7 +118,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.4.0 · RHEL 10</span>
+          <span className="version-tag">v1.5.0 · RHEL 10</span>
         </div>
       </aside>
 
@@ -130,6 +134,8 @@ function Layout() {
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
+          <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />
+          <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
           <Route path="*" element={<Navigate to="/devices" replace />} />
         </Routes>

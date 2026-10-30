@@ -803,6 +803,18 @@ function DevicePanel({
         {status.status === "failed" && status.last_message && (<><dt>エラー</dt><dd className="topo-err-msg">{status.last_message}</dd></>)}
         <dt>接続経路</dt><dd>{status.jump_host_name ? `踏み台経由（${status.jump_host_name}）` : "直接接続"}</dd>
         {!editing && node.data.note && (<><dt>補足</dt><dd>{node.data.note}</dd></>)}
+        {can(PERM.COMPLIANCE_READ) && (
+          <>
+            <dt>コンプライアンス</dt>
+            <dd>
+              {status.violations > 0 ? (
+                <button className="link-btn topo-err-msg" onClick={() => navigate(`/compliance?device=${status.id}`)}>
+                  違反 {status.violations}件（最も重いもの: {{ high: "高", medium: "中", low: "低" }[status.violation_severity ?? "low"]}）
+                </button>
+              ) : "違反なし"}
+            </dd>
+          </>
+        )}
         {!status.is_active && (<><dt>状態</dt><dd>無効（一括・スケジュール収集の対象外）</dd></>)}
       </dl>
       <div className="topo-actions">

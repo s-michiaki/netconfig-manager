@@ -10,6 +10,7 @@
 - 保存は楽観ロック（version）。他の人が先に保存していたら 409 を返す
 """
 import json
+import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -19,12 +20,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.compliance import violation_counts
 from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import CollectLog, ConfigSnapshot, Device, JumpHost
 from app.models.topology import EMPTY_TOPOLOGY, TopologyMap
 from app.models.user import User
+from app.services.audit import Audit, get_audit
 
 router = APIRouter()
 
@@ -122,6 +125,8 @@ class DeviceStatus(BaseModel):
     status: Literal["ok", "changed", "failed", "never"]
     last_collected_at: datetime | None = None
     last_message: str | None = None
+    violations: int = 0  # コンプライアンス違反の数
+    violation_severity: Literal["high", "medium", "low"] | None = None  # 違反の中で最も重いもの
 
 
 class MapSummary(BaseModel):
@@ -230,6 +235,7 @@ async def device_statuses(db: AsyncSession, ids: set[str]) -> dict[str, DeviceSt
         ).all()
     )
 
+    violations = await violation_counts(db, ids)
     result: dict[str, DeviceStatus] = {}
     for d in devices:
         log = last_log.get(d.id)
@@ -251,6 +257,8 @@ async def device_statuses(db: AsyncSession, ids: set[str]) -> dict[str, DeviceSt
             status=state,
             last_collected_at=(log.finished_at or log.started_at) if log else None,
             last_message=log.message if log else None,
+            violations=violations.get(d.id, (0, None))[0],
+            violation_severity=violations.get(d.id, (0, None))[1],
         )
     return result
 
@@ -320,16 +328,19 @@ async def create_map(
     payload: MapCreate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require(Perm.TOPOLOGY_WRITE)),
+    audit: Audit = Depends(get_audit),
 ):
     data = logical = EMPTY_TOPOLOGY
     if payload.copy_from:
         src = await _get_or_404(db, payload.copy_from)
         data, logical = src.data, src.logical_data
     m = TopologyMap(
-        name=payload.name, description=payload.description or None, data=data, logical_data=logical,
-        updated_by=user.username,
+        id=str(uuid.uuid4()), name=payload.name, description=payload.description or None, data=data,
+        logical_data=logical, updated_by=user.username,
     )
     db.add(m)
+    audit("topology.create", target_type="topology", target_id=m.id, target_name=m.name,
+          detail={"copy_from": payload.copy_from} if payload.copy_from else None)
     await _commit_or_409(db)
     await db.refresh(m)
     return await _detail(db, m)
@@ -367,6 +378,7 @@ async def update_map(
     payload: MapUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require(Perm.TOPOLOGY_WRITE)),
+    audit: Audit = Depends(get_audit),
 ):
     m = await _get_or_404(db, map_id)
     if payload.version != m.version:
@@ -389,6 +401,10 @@ async def update_map(
         m.logical_data = _prune(
             payload.logical, await _existing_devices(db, _device_ids(payload.logical))
         ).model_dump_json(exclude_none=True)
+    changed = [k for k in ("name", "description") if k in fields]
+    changed += [label for key, label in (("data", "物理構成"), ("logical", "論理構成")) if getattr(payload, key) is not None]
+    audit("topology.update", target_type="topology", target_id=m.id, target_name=m.name,
+          detail={"changed": changed, "version": m.version + 1})
     m.version += 1
     m.updated_by = user.username
     await _commit_or_409(db)
@@ -399,6 +415,8 @@ async def update_map(
 @router.delete(
     "/maps/{map_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.TOPOLOGY_WRITE))]
 )
-async def delete_map(map_id: str, db: AsyncSession = Depends(get_db)):
-    await db.delete(await _get_or_404(db, map_id))
+async def delete_map(map_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    m = await _get_or_404(db, map_id)
+    await db.delete(m)
+    audit("topology.delete", target_type="topology", target_id=m.id, target_name=m.name)
     await db.commit()

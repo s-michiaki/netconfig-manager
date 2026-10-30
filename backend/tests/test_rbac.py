@@ -96,7 +96,7 @@ def test_terminal_requires_permission(client, users):
     msg, code = _ws(client, users["viewer"], users["device_id"])
     assert code == 4403 and "権限がありません" in msg
     # operator は権限チェックを通過して SSH 接続へ進む（接続先が無いので失敗メッセージ）
-    with mock.patch("app.api.terminal.TerminalSession.connect", side_effect=TimeoutError("timed out")):
+    with mock.patch("app.api.terminal.SSHTerminal.connect", side_effect=TimeoutError("timed out")):
         msg, code = _ws(client, users["operator"], users["device_id"])
     assert "SSH接続に失敗" in msg
 

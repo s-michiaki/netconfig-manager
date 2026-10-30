@@ -95,7 +95,7 @@ def test_ws_auth(client, auth):
         assert e.value.code == 4401
     # 正しいトークン + SSH接続失敗（存在しないホスト）→ エラーメッセージ
     token = auth["Authorization"].split()[1]
-    with mock.patch("app.api.terminal.TerminalSession.connect", side_effect=TimeoutError("timed out")):
+    with mock.patch("app.api.terminal.SSHTerminal.connect", side_effect=TimeoutError("timed out")):
         with client.websocket_connect(f"/api/terminal/ws/{pytest.device_id}") as ws:
             ws.send_text(f'{{"type":"auth","token":"{token}"}}')
             assert "タイムアウト" in ws.receive_text()

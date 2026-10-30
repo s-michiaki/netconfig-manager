@@ -4,6 +4,7 @@
 - 登録・編集・削除・接続テストは機器の編集権限（DEVICE_WRITE）が必要
 """
 import logging
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -27,6 +28,7 @@ from app.core.ssh_jump import (
 from app.core.ssh_jump import test_jump_host as run_jump_test
 from app.models.device import Device, JumpHost
 from app.models.user import User
+from app.services.audit import Audit, changed_fields, get_audit
 from app.services.connection import jump_info
 
 logger = logging.getLogger(__name__)
@@ -168,7 +170,10 @@ async def list_jump_hosts(db: AsyncSession = Depends(get_db)):
     dependencies=[Depends(require(Perm.DEVICE_WRITE))],
 )
 async def create_jump_host(
-    payload: JumpHostCreate, db: AsyncSession = Depends(get_db), me: User = Depends(get_current_user)
+    payload: JumpHostCreate,
+    db: AsyncSession = Depends(get_db),
+    me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
 ):
     data = payload.model_dump()
     if data["private_key"]:
@@ -178,8 +183,11 @@ async def create_jump_host(
         data["key_passphrase"] = None
     data["password"] = data["password"] or None
     data["key_passphrase"] = data["key_passphrase"] or None
-    j = JumpHost(**data)
+    j = JumpHost(id=str(uuid.uuid4()), **data)
     db.add(j)
+    audit("jump_host.create", target_type="jump_host", target_id=j.id, target_name=j.name,
+          detail={"hostname": j.hostname, "port": j.port, "username": j.username,
+                  "auth": [k for k in ("password", "private_key") if data.get(k)]})
     await _commit_or_409(db)
     await db.refresh(j)
     logger.info("踏み台登録 by=%s name=%s", me.username, j.name)
@@ -192,9 +200,12 @@ async def update_jump_host(
     payload: JumpHostUpdate,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
 ):
     j = await _get_or_404(db, jump_id)
     data = payload.model_dump(exclude_unset=True)
+    audit("jump_host.update", target_type="jump_host", target_id=j.id, target_name=j.name,
+          detail=changed_fields(data, {"password", "private_key", "key_passphrase"}))
     clear_password = data.pop("clear_password", False)
     clear_key = data.pop("clear_private_key", False)
 
@@ -234,7 +245,12 @@ async def update_jump_host(
 @router.delete(
     "/{jump_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.DEVICE_WRITE))]
 )
-async def delete_jump_host(jump_id: str, db: AsyncSession = Depends(get_db), me: User = Depends(get_current_user)):
+async def delete_jump_host(
+    jump_id: str,
+    db: AsyncSession = Depends(get_db),
+    me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
+):
     j = await _get_or_404(db, jump_id)
     in_use = (await _device_counts(db)).get(j.id, 0)
     if in_use:
@@ -242,6 +258,7 @@ async def delete_jump_host(jump_id: str, db: AsyncSession = Depends(get_db), me:
             status_code=409, detail=f"{in_use}台のデバイスがこの踏み台を使用しているため削除できません"
         )
     await db.delete(j)
+    audit("jump_host.delete", target_type="jump_host", target_id=j.id, target_name=j.name)
     await db.commit()
     logger.info("踏み台削除 by=%s name=%s", me.username, j.name)
 

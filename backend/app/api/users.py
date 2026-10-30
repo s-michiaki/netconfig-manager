@@ -1,6 +1,7 @@
 """ユーザー管理（管理者のみ）"""
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -17,6 +18,7 @@ from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Role
 from app.core.security import hash_password
 from app.models.user import User
+from app.services.audit import Audit, get_audit
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,14 +102,18 @@ async def create_user(
     payload: UserCreate,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
 ):
     user = User(
+        id=str(uuid.uuid4()),
         username=payload.username,
         hashed_password=await run_in_threadpool(hash_password, payload.password),
         role=payload.role.value,
         is_active=payload.is_active,
     )
     db.add(user)
+    audit("user.create", target_type="user", target_id=user.id, target_name=user.username,
+          detail={"role": user.role, "is_active": user.is_active})
     try:
         await db.commit()
     except IntegrityError as e:
@@ -124,6 +130,7 @@ async def update_user(
     payload: UserUpdate,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
 ):
     user = await _get_or_404(db, user_id)
     is_self = user.id == me.id
@@ -147,6 +154,9 @@ async def update_user(
             raise HTTPException(status_code=400, detail="自分のパスワードは「パスワード変更」から変更してください")
         user.hashed_password = await run_in_threadpool(hash_password, payload.password)
         changes.append("password reset")
+    if changes:
+        audit("user.update", target_type="user", target_id=user.id, target_name=user.username,
+              detail={"changes": changes})
     await db.commit()
     await db.refresh(user)
     if changes:
@@ -159,6 +169,7 @@ async def delete_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
 ):
     user = await _get_or_404(db, user_id)
     if user.id == me.id:
@@ -166,5 +177,6 @@ async def delete_user(
     if user.role == Role.ADMIN.value and user.is_active and not await _other_active_admins(db, user.id):
         raise HTTPException(status_code=400, detail="有効な管理者が1人もいなくなるため削除できません")
     await db.delete(user)
+    audit("user.delete", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()
     logger.info("ユーザー削除 by=%s user=%s", me.username, user.username)

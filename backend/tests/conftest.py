@@ -18,6 +18,7 @@ os.environ.update(
     DATABASE_URL=f"sqlite+aiosqlite:///{TMP}/t.db",
     GIT_REPO_PATH=f"{TMP}/configs",
     SSH_KNOWN_HOSTS=f"{TMP}/ssh/known_hosts",
+    TERMINAL_LOG_PATH=f"{TMP}/terminal-logs",
     ADMIN_USERNAME="admin",
     ADMIN_PASSWORD="initial-pass-123",
     ALLOWED_ORIGINS="",

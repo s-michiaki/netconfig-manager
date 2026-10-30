@@ -13,6 +13,9 @@ export const PERM = {
   USER_ADMIN: "user:admin",
   TOPOLOGY_READ: "topology:read",
   TOPOLOGY_WRITE: "topology:write",
+  COMPLIANCE_READ: "compliance:read",
+  COMPLIANCE_WRITE: "compliance:write",
+  AUDIT_READ: "audit:read",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 

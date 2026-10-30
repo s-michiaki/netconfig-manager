@@ -103,6 +103,11 @@ export const DeviceNodeView = memo(function DeviceNodeView({ data, selected }: N
         </div>
       </div>
       {data.note && <div className="topo-node-note">{data.note}</div>}
+      {st && st.violations > 0 && (
+        <div className={`topo-violation sev-${st.violation_severity ?? "low"}`} title={`コンプライアンス違反 ${st.violations}件`}>
+          ⚠ {st.violations}
+        </div>
+      )}
     </div>
   );
 });

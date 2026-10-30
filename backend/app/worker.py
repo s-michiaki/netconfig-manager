@@ -3,6 +3,8 @@ Celeryワーカー定義
 - collect_device_config: 単一デバイスのコンフィグ収集タスク
 - collect_all_devices: 全デバイスの一括収集タスク
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
+- purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
+収集に成功したら、その機器のコンプライアンスチェックも行う
 """
 import asyncio
 import logging
@@ -25,6 +27,8 @@ from app.services.config_service import (
     DeviceConnectionInfo,
     collect_config_sync,
 )
+from app.services.audit import purge_old
+from app.services.compliance import run_checks
 from app.services.connection import load_connection_info
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,10 @@ celery_app.conf.update(
         "dispatch-due-schedules": {
             "task": "app.worker.dispatch_due_schedules",
             "schedule": 60.0,
+        },
+        "purge-audit-logs": {
+            "task": "app.worker.purge_audit_logs",
+            "schedule": 24 * 3600.0,
         },
     },
 )
@@ -119,6 +127,11 @@ def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
 
         result = collect_config_sync(device, triggered_by)
         _run_async(_save_result(device_id, result, started_at, triggered_by))
+        if result.success:
+            try:
+                _run_async(_check_compliance(device_id))
+            except Exception:  # noqa: BLE001 - 検査の失敗で収集を失敗扱いにしない
+                logger.exception("コンプライアンスチェックに失敗しました device=%s", device_id)
     finally:
         try:
             lock.release()
@@ -130,6 +143,26 @@ def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
         raise self.retry(exc=RuntimeError(result.error))
 
     return result.as_dict()
+
+
+async def _check_compliance(device_id: str) -> None:
+    async with _sessionmaker()() as db:
+        await run_checks(db, device_ids=[device_id])
+        await db.commit()
+
+
+async def _purge() -> dict:
+    async with _sessionmaker()() as db:
+        return await purge_old(db)
+
+
+@celery_app.task
+def purge_audit_logs():
+    """保持期間（AUDIT_LOG_RETENTION_DAYS / TERMINAL_LOG_RETENTION_DAYS）を過ぎた記録を削除する"""
+    result = _run_async(_purge())
+    if result["audit_logs"] or result["terminal_sessions"]:
+        logger.info("古い監査ログを削除しました: %s", result)
+    return result
 
 
 async def _active_device_ids() -> list[str]:

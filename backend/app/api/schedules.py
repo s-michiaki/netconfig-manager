@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
+from app.services.audit import Audit, get_audit
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
@@ -70,11 +72,15 @@ async def list_schedules(db: AsyncSession = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require(Perm.SCHEDULE_WRITE))],
 )
-async def create_schedule(payload: ScheduleCreate, db: AsyncSession = Depends(get_db)):
+async def create_schedule(
+    payload: ScheduleCreate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)
+):
     if payload.target != "all" and not await db.get(Device, payload.target):
         raise HTTPException(status_code=422, detail="対象には all または登録済みデバイスのIDを指定してください")
-    schedule = Schedule(**payload.model_dump())
+    schedule = Schedule(id=str(uuid.uuid4()), **payload.model_dump())
     db.add(schedule)
+    audit("schedule.create", target_type="schedule", target_id=schedule.id, target_name=schedule.name,
+          detail={"cron": schedule.cron_expression, "target": schedule.target})
     await db.commit()
     await db.refresh(schedule)
     return _to_response(schedule)
@@ -83,22 +89,25 @@ async def create_schedule(payload: ScheduleCreate, db: AsyncSession = Depends(ge
 @router.delete(
     "/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.SCHEDULE_WRITE))]
 )
-async def delete_schedule(schedule_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_schedule(schedule_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     schedule = await db.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     await db.delete(schedule)
+    audit("schedule.delete", target_type="schedule", target_id=schedule.id, target_name=schedule.name)
     await db.commit()
 
 
 @router.patch(
     "/{schedule_id}/toggle", response_model=ScheduleResponse, dependencies=[Depends(require(Perm.SCHEDULE_WRITE))]
 )
-async def toggle_schedule(schedule_id: str, db: AsyncSession = Depends(get_db)):
+async def toggle_schedule(schedule_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     schedule = await db.get(Schedule, schedule_id)
     if not schedule:
         raise HTTPException(status_code=404, detail="Schedule not found")
     schedule.is_active = not schedule.is_active
+    audit("schedule.update", target_type="schedule", target_id=schedule.id, target_name=schedule.name,
+          detail={"is_active": schedule.is_active})
     await db.commit()
     await db.refresh(schedule)
     return _to_response(schedule)

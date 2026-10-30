@@ -15,8 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# コンフィグ世代管理用リポジトリと SSH known_hosts の置き場所（ボリュームをマウントする）
-RUN mkdir -p /app/configs /data/ssh
+# コンフィグ世代管理用リポジトリ・SSH known_hosts・ターミナルの記録の置き場所（ボリュームをマウントする）
+RUN mkdir -p /app/configs /data/ssh /data/terminal-logs
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

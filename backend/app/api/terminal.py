@@ -9,6 +9,8 @@ WebSocket SSHターミナル
     {"type": "input", "data": "show version\r"}
     {"type": "resize", "cols": 120, "rows": 40}
   サーバー -> クライアント : 端末に表示するテキスト（そのまま xterm に write する）
+
+監査: 接続・切断を操作履歴に残し、画面出力を asciicast v2 形式で記録する（app/services/audit.py）
 """
 import asyncio
 import codecs
@@ -16,6 +18,7 @@ import json
 import logging
 import socket
 import threading
+import uuid
 
 import paramiko
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -27,6 +30,9 @@ from app.core.permissions import Perm, has_permission
 from app.core.ssh_hostkeys import describe_ssh_error, load_known_hosts
 from app.core.ssh_jump import JumpHostError, connect_jump, open_tunnel
 from app.core.ssh_keys import PrivateKeyError, load_private_key
+from app.core.timeutil import utcnow
+from app.models.audit import TerminalSession
+from app.services.audit import TerminalRecorder, make_log
 from app.services.config_service import DeviceConnectionInfo
 from app.services.connection import load_connection_info
 
@@ -39,6 +45,9 @@ WS_CLOSE_FORBIDDEN = 4403
 WS_CLOSE_NOT_FOUND = 4404
 MIN_SIZE, MAX_SIZE = 1, 1000
 
+# 切断後の後片付けタスク（途中で破棄されないよう参照を保持する）
+_cleanup_tasks: set[asyncio.Task] = set()
+
 
 def _clamp_size(value, default: int) -> int:
     try:
@@ -47,7 +56,7 @@ def _clamp_size(value, default: int) -> int:
         return default
 
 
-class TerminalSession:
+class SSHTerminal:
     """SSHターミナルセッション（ブロッキング処理はすべてスレッド側で呼ぶ）"""
 
     def __init__(self, device: DeviceConnectionInfo):
@@ -109,6 +118,17 @@ async def _load_device(device_id: str) -> DeviceConnectionInfo | None:
         return await load_connection_info(db, device_id)
 
 
+async def _save(*objs) -> None:
+    """監査用の記録を保存する（失敗してもターミナル自体は止めない）"""
+    try:
+        async with AsyncSessionLocal() as db:
+            for o in objs:
+                await db.merge(o)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("ターミナルの監査ログを保存できませんでした")
+
+
 @router.websocket("/ws/{device_id}")
 async def terminal_ws(websocket: WebSocket, device_id: str):
     await websocket.accept()
@@ -139,7 +159,10 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
 
     # --- 3. SSH接続（ブロッキングなのでスレッドで実行し、イベントループを止めない）
     loop = asyncio.get_running_loop()
-    session = TerminalSession(device)
+    ip = websocket.client.host if websocket.client else None
+    via = device.jump.name if device.jump else None
+    target = {"target_type": "device", "target_id": device.id, "target_name": device.name}
+    session = SSHTerminal(device)
     try:
         await loop.run_in_executor(None, session.connect, cols, rows)
     except Exception as e:  # noqa: BLE001
@@ -151,9 +174,23 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
             reason = f"機器の秘密鍵: {e}"
         else:
             reason = describe_ssh_error(e)
+        await _save(make_log("terminal.open", user=user, ip=ip, success=False,
+                             detail={"error": reason, "via": via}, **target))
         await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
         await websocket.close()
         return
+
+    # --- 監査: セッションを登録し、画面出力の記録を開始する
+    started = utcnow()
+    record = TerminalSession(
+        id=str(uuid.uuid4()), user_id=user.id, username=user.username, device_id=device.id,
+        device_name=device.name, device_host=device.hostname, via=via, ip=ip, started_at=started,
+        cols=cols, rows=rows, bytes_out=0, truncated=False,
+    )
+    recorder = TerminalRecorder(record.id, started, cols, rows, f"{user.username}@{device.name}")
+    record.log_file = recorder.rel_path if recorder.available else None
+    await _save(record, make_log("terminal.open", user=user, ip=ip,
+                                 detail={"session_id": record.id, "via": via}, **target))
     logger.info(
         "ターミナル開始 user=%s device=%s(%s)%s",
         user.username,
@@ -163,6 +200,7 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     )
 
     stop = threading.Event()
+    remote_closed = threading.Event()
 
     def read_from_ssh() -> None:
         """SSH出力をWebSocketに転送するスレッド"""
@@ -174,10 +212,13 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
                     data = session.channel.recv(4096)
                 except socket.timeout:
                     continue
-                if not data:  # リモート側がシェルを閉じた
+                if not data:  # リモート側がシェルを閉じた（こちらから閉じた場合は stop が立っている）
+                    if not stop.is_set():
+                        remote_closed.set()
                     break
                 text = decoder.decode(data)
                 if text:
+                    recorder.output(text)
                     # 送信完了を待つことで順序保証とバックプレッシャーを得る
                     asyncio.run_coroutine_threadsafe(websocket.send_text(text), loop).result(timeout=30)
         except Exception:  # noqa: BLE001 - WebSocket切断等
@@ -203,15 +244,36 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
             if kind == "input" and isinstance(msg.get("data"), str):
                 await loop.run_in_executor(None, session.send, msg["data"])
             elif kind == "resize":
-                await loop.run_in_executor(
-                    None, session.resize, _clamp_size(msg.get("cols"), cols), _clamp_size(msg.get("rows"), rows)
-                )
+                c, r = _clamp_size(msg.get("cols"), cols), _clamp_size(msg.get("rows"), rows)
+                recorder.resize(c, r)
+                await loop.run_in_executor(None, session.resize, c, r)
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
         stop.set()
-        await loop.run_in_executor(None, session.close)
-        logger.info("ターミナル終了 user=%s device=%s", user.username, device.name)
+
+        async def finish() -> None:
+            await loop.run_in_executor(None, session.close)
+            await loop.run_in_executor(None, reader.join, 2)  # 出力の書き込みが終わるのを待つ
+            recorder.close()
+            ended = utcnow()
+            record.ended_at = ended
+            record.end_reason = "機器側で終了" if remote_closed.is_set() else "利用者が切断"
+            record.bytes_out = recorder.bytes
+            record.truncated = recorder.truncated
+            await _save(record, make_log(
+                "terminal.close", user=user, ip=ip,
+                detail={"session_id": record.id, "seconds": int((ended - started).total_seconds()),
+                        "reason": record.end_reason},
+                **target,
+            ))
+            logger.info("ターミナル終了 user=%s device=%s", user.username, device.name)
+
+        # 接続が切れたときにこの処理自体がキャンセルされても、SSH の切断と記録の保存は最後まで行う
+        task = asyncio.ensure_future(finish())
+        _cleanup_tasks.add(task)
+        task.add_done_callback(_cleanup_tasks.discard)
+        await asyncio.shield(task)
 
 
 async def _close_ws(websocket: WebSocket) -> None:
