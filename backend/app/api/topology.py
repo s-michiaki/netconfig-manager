@@ -2,6 +2,7 @@
 
 構成図は複数作成できる。1つの構成図の配置・接続線は TopologyData として丸ごと保存する。
 - 機器ノード: 登録済みデバイスを参照（device_id）。収集状態を色で表示するため、状態も返す
+- 非管理機器ノード（unmanaged）: 登録していない機器（ISPルーター・ハブ・PC など）。名前・補足は自由入力
 - 装飾ノード: 雲（cloud）・テキスト（text）・グループ枠（group）
 - 保存は楽観ロック（version）。他の人が先に保存していたら 409 を返す
 """
@@ -38,17 +39,22 @@ MapName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, 
 
 class TopologyNode(BaseModel):
     id: ElementId
-    type: Literal["device", "cloud", "text", "group"]
+    type: Literal["device", "unmanaged", "cloud", "text", "group"]
     x: Coord
     y: Coord
     w: Size | None = None  # 雲・テキスト・グループ枠の大きさ（機器ノードは固定）
     h: Size | None = None
     device_id: str | None = None  # type=device のときのみ
-    label: Label | None = None  # 装飾ノードの文字（機器ノードは機器名を表示）
+    label: Label | None = None  # 非管理機器の名前・装飾ノードの文字（機器ノードは登録済みの機器名を表示）
+    note: Annotated[str, StringConstraints(max_length=200)] | None = None  # 非管理機器の補足（IP・型番など）
     color: Color | None = None
     font_size: Literal["s", "m", "l", "xl"] | None = None  # テキスト用
-    # 機器アイコン（未指定ならプラットフォームから自動: PAN-OS → firewall, JunOS → router, 他 → switch）
-    icon: Literal["switch", "l3switch", "router", "firewall", "server", "wireless"] | None = None
+    # 機器アイコン（未指定なら、機器ノードはプラットフォームから自動: PAN-OS → firewall, JunOS → router,
+    # 他 → switch。非管理機器ノードは other）
+    icon: Literal[
+        "switch", "l3switch", "router", "firewall", "server", "wireless",
+        "pc", "printer", "phone", "camera", "storage", "other",
+    ] | None = None
 
 
 class TopologyEdge(BaseModel):

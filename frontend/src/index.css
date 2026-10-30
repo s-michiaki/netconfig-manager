@@ -418,7 +418,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-actions .btn { padding: 8px 12px; }
 .topo-actions-row { display: flex; gap: 6px; }
 .topo-actions-row .btn { flex: 1; }
-.topo-decor-buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.topo-decor-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.topo-decor-buttons .topo-add-unmanaged { grid-column: 1 / -1; }
 .topo-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
 .topo-swatch {
   width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
@@ -445,6 +446,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-device.failed { border-color: var(--color-danger-dim); }
 .topo-device.failed.selected { border-color: var(--color-accent); }
 .topo-device.inactive { opacity: 0.55; }
+/* 非管理機器: 破線の枠で登録済み機器と区別する */
+.topo-unmanaged { border-style: dashed; border-color: #4a5178; background: #161924; }
+.topo-unmanaged.selected { border-style: solid; }
+.topo-unmanaged-icon { background: #1f2231; color: #8b91b0; }
+.topo-unmanaged-tag { color: var(--color-muted); }
+.topo-unmanaged-tag::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; border: 1px solid var(--color-muted); flex-shrink: 0;
+}
 .topo-device-icon { width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .topo-device-body { min-width: 0; flex: 1; }
 .topo-device-name { font-weight: 700; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
