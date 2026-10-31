@@ -17,6 +17,10 @@ RUN npm run build
 
 # ---- 本番用（docker-compose.prod.yml）: nginx で静的配信 + /api を backend へ中継 ----
 FROM docker.io/library/nginx:1.27-alpine AS prod
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# HTTP / HTTPS の設定。起動時に 40-netconfig-tls.sh が証明書の有無でどちらを使うか選ぶ
+COPY nginx/ /etc/nginx/netconfig/
+RUN cp /etc/nginx/netconfig/http.conf /etc/nginx/conf.d/default.conf \
+ && mv /etc/nginx/netconfig/40-netconfig-tls.sh /docker-entrypoint.d/ \
+ && chmod 755 /docker-entrypoint.d/40-netconfig-tls.sh
 COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+EXPOSE 80 443

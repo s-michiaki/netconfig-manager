@@ -2,8 +2,8 @@
 #   docker compose -f docker-compose.prod.yml up -d --build
 # - ソースのマウント・--reload なし
 # - フロントはビルド済み静的ファイルを nginx で配信し、/api を backend に中継
-# - 外部に公開するのは nginx の HTTP ポートのみ（backend / DB / Redis は内部ネットワークのみ）
-# - HTTPS は前段のロードバランサー / リバースプロキシで終端すること
+# - 外部に公開するのは nginx の HTTP / HTTPS ポートのみ（backend / DB / Redis は内部ネットワークのみ）
+# - HTTPS は certs/ に証明書を置くと有効になる（scripts/import_cert.sh。無ければ HTTP のみ）
 x-backend-env: &backend-env
   DATABASE_URL: postgresql+asyncpg://netconfig:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD を .env に設定してください}@db:5432/netconfig
   REDIS_URL: redis://redis:6379/0
@@ -97,8 +97,16 @@ services:
       context: ./frontend
       target: prod
     restart: unless-stopped
+    environment:
+      # HTTP から HTTPS へ転送するときのポート（外から見たポート番号）
+      HTTPS_PORT: ${HTTPS_PORT:-443}
     ports:
       - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      # HTTPS の証明書（scripts/import_cert.sh で server.crt / server.key / ca.crt を配置）。
+      # 無ければ HTTP だけで起動する。:Z は SELinux のラベル付け
+      - ./certs:/etc/nginx/certs:ro,Z
     depends_on:
       - backend
 

@@ -11,7 +11,7 @@
 #   -d HOST[:PORT]     収集・ターミナルの対象機器（複数指定可。PORT 省略時は 22）
 #   -j HOST[:PORT]     踏み台サーバ（複数指定可）
 #   -f FILE            機器を1行1台で列挙したファイル（"HOST[:PORT]"、# 以降はコメント）
-#   -m prod|dev        構成（prod: 80番を使用 / dev: 3000・8000番を使用。既定 prod）
+#   -m prod|dev        構成（prod: 80・443番を使用 / dev: 3000・8000番を使用。既定 prod）
 #   -r                 hello-world コンテナを実際に起動して確認する（イメージを取得します）
 #   -h                 このヘルプ
 #
@@ -198,7 +198,7 @@ check_url "GitHub"       "https://github.com/"
 # =============================================================================
 section "5. 使用ポート"
 # =============================================================================
-if [ "$MODE" = "prod" ]; then PORTS=(80); else PORTS=(3000 8000); fi
+if [ "$MODE" = "prod" ]; then PORTS=(80 443); else PORTS=(3000 8000); fi
 if have ss; then
   for p in "${PORTS[@]}"; do
     if ss -Hltn "sport = :$p" 2>/dev/null | grep -q .; then
@@ -220,7 +220,7 @@ fi
 if [ "$MODE" = "prod" ] && [ "$RUNTIME" = "podman" ] && [ "$(id -u)" -ne 0 ]; then
   START="$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)"
   if [ "$START" -gt 80 ]; then
-    warn "rootless Podman は既定で 80番を開けません（HTTP_PORT=8080 等に変更するか、sysctl net.ipv4.ip_unprivileged_port_start=80）"
+    warn "rootless Podman は既定で 80・443番を開けません（HTTP_PORT=8080・HTTPS_PORT=8443 等に変更するか、sysctl net.ipv4.ip_unprivileged_port_start=80）"
   fi
 fi
 
@@ -241,7 +241,8 @@ fi
 if have firewall-cmd && $SUDO firewall-cmd --state >/dev/null 2>&1; then
   ZONE_LIST="$($SUDO firewall-cmd --list-all 2>/dev/null)"
   for p in "${PORTS[@]}"; do
-    if echo "$ZONE_LIST" | grep -qE "(ports:.*\b$p/tcp\b)" || { [ "$p" = 80 ] && echo "$ZONE_LIST" | grep -qE 'services:.*\bhttp\b'; }; then
+    if echo "$ZONE_LIST" | grep -qE "(ports:.*\b$p/tcp\b)" || { [ "$p" = 80 ] && echo "$ZONE_LIST" | grep -qE 'services:.*\bhttp\b'; } \
+       || { [ "$p" = 443 ] && echo "$ZONE_LIST" | grep -qE 'services:.*\bhttps\b'; }; then
       ok "firewalld: $p/tcp は許可済み"
     else
       warn "firewalld: $p/tcp が未許可（sudo firewall-cmd --permanent --add-port=$p/tcp && sudo firewall-cmd --reload）"

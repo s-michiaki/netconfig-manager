@@ -103,9 +103,35 @@ docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 - フロントエンドはビルド済みファイルを nginx で配信し、`/api`（WebSocket含む）を backend へ中継します
-- 外部公開されるのは `HTTP_PORT`（既定 80）のみです。backend / DB / Redis はコンテナ内部ネットワークのみ
-- HTTPS は前段のリバースプロキシ・ロードバランサーで終端してください（ターミナルの通信に機器の操作内容が流れるため、本番では HTTPS 必須）
+- 外部公開されるのは `HTTP_PORT`（既定 80）と `HTTPS_PORT`（既定 443）のみです。backend / DB / Redis はコンテナ内部ネットワークのみ
+- HTTPS は下記「HTTPS 化」の手順で有効にしてください（ターミナルの通信に機器の操作内容が流れるため、本番では HTTPS 必須）
 - Podman（podman-compose）で手動更新する場合は、イメージ再ビルド後に `podman-compose -f docker-compose.prod.yml up -d --force-recreate` でコンテナを作り直してください（podman-compose は compose ファイルが変わらないと既存コンテナを再作成しません。`setup.sh` は自動で行います）
+
+### HTTPS 化（step-ca などで発行した証明書の取り込み）
+
+発行済みのサーバー証明書・秘密鍵を `scripts/import_cert.sh` で取り込むと、nginx が HTTPS で配信し、HTTP は HTTPS へ転送するようになります。証明書が無いあいだは HTTP のみで動きます。
+
+```bash
+bash /opt/netconfig-manager/scripts/import_cert.sh
+```
+
+- 既定値は `setup_step-ca.sh` の出力に合わせています（Enter でそのまま採用）
+  - 証明書: `~/certs/<COMMON_NAME>.crt`（中間 CA を含むチェーン。短期の `server.crt` は除外）
+  - 秘密鍵: 証明書と同じ名前の `.key`
+  - ルート CA: `/etc/step-ca/certs/root_ca.crt`（無ければ `~/.step/certs/root_ca.crt`。`-` で指定なし）
+- 取り込む前に、証明書と秘密鍵の組み合わせ・有効期限（期限切れは中止、30日以内は警告）・SAN にサーバーの IP が含まれるか・ルート CA で検証できるかを確認します
+- `certs/`（Git 管理外）に `server.crt`・`server.key`（600）・`ca.crt` として配置し、`.env` の `HTTPS_PORT` と firewalld を設定して nginx を再起動します。差し替え前の証明書は `/root/netconfig-manager-backup/certs-<日時>/` に退避します
+- HTTPS 対応前の構成で動いている場合は、コンテナを作り直します（`setup.sh` と同じ。DB・コンフィグ履歴は保持）
+- 証明書を再発行したときも、同じスクリプトをもう一度実行してください
+- 証明書が読み込めない状態で起動した場合は、画面に入れなくならないよう HTTP で起動します（nginx のログに理由を出力）
+- HTTP に戻す場合は `certs/server.crt`・`certs/server.key` を削除して frontend コンテナを再起動
+
+**利用者の PC にルート CA を登録**（初回のみ。登録しないとブラウザが証明書の警告を出します）
+
+1. `http://<サーバー>/ca.crt` からルート CA をダウンロード（取り込み時に `ca.crt` を指定した場合のみ配布）
+2. スクリプトが表示した SHA256 指紋と一致するか確認
+3. Windows: 管理者の PowerShell で `Import-Certificate -FilePath .\netconfig-root-ca.crt -CertStoreLocation Cert:\LocalMachine\Root`（またはファイルをダブルクリック →「証明書のインストール」→ ローカルコンピューター →「信頼されたルート証明機関」）
+4. ホスト名（例: `www.sameshima.test`）で開く場合は、DNS か hosts ファイルにサーバーの IP を登録
 
 ---
 
@@ -307,8 +333,9 @@ sudo systemctl enable --now netconfig-manager
 ### firewalld ポート開放
 
 ```bash
-# 本番構成（nginx）は HTTP ポートのみ開放
+# 本番構成（nginx）は HTTP / HTTPS ポートのみ開放（setup.sh・import_cert.sh が自動で行う）
 sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
 sudo firewall-cmd --reload
 ```
 
@@ -321,6 +348,11 @@ netconfig-manager/
 ├── docker-compose.yml           # 開発用
 ├── docker-compose.prod.yml      # 本番用（nginx 配信）
 ├── .env.example
+├── certs/                       # HTTPS の証明書（import_cert.sh で配置。Git 管理外）
+├── scripts/
+│   ├── setup.sh                 # 自動セットアップ・更新
+│   ├── check_env.sh             # 導入前チェック
+│   └── import_cert.sh           # HTTPS 化（証明書の取り込み）
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -373,7 +405,7 @@ netconfig-manager/
 │           └── connection.py    # 接続情報（踏み台含む）の読み出し
 └── frontend/
     ├── Dockerfile               # dev / prod マルチステージ
-    ├── nginx.conf               # 本番用
+    ├── nginx/                   # 本番用 nginx 設定（HTTP / HTTPS を起動時に自動選択）
     ├── package.json
     ├── package-lock.json
     ├── tsconfig.json
