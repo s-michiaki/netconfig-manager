@@ -11,7 +11,7 @@
 #   bash scripts/import_cert.sh        # [ ] 内は Enter でそのまま採用
 #
 # 既定値は setup_step-ca.sh の出力に合わせている:
-#   証明書   ~/certs/<COMMON_NAME>.crt（中間 CA を含むチェーン）
+#   証明書   ~/certs/<COMMON_NAME>.crt（中間 CA を含むチェーン。~ は実行ユーザー＝root のホーム）
 #   秘密鍵   ~/certs/<COMMON_NAME>.key
 #   ルート CA /etc/step-ca/certs/root_ca.crt
 # 証明書を更新（再発行）したときも、このスクリプトをもう一度実行すればよい。
@@ -42,17 +42,26 @@ else
   INSTALL_DIR="/opt/netconfig-manager"
 fi
 COMPOSE_FILE="docker-compose.prod.yml"
+# 証明書を探す場所: 実行しているユーザー（root）のホーム → ログインした元のユーザーのホーム（su した場合）
 LOGIN_USER="$(logname 2>/dev/null || id -un)"
-USER_HOME=$(eval echo ~"$LOGIN_USER")
+SEARCH_HOMES=("$HOME")
+LOGIN_HOME=$(eval echo ~"$LOGIN_USER")
+[ "$LOGIN_HOME" != "$HOME" ] && SEARCH_HOMES+=("$LOGIN_HOME")
 ENV_BACKUP_DIR="/root/netconfig-manager-backup"
 TS=$(date +%Y%m%d-%H%M%S)
 
 # 証明書: ~/certs の .crt のうち一番新しいもの（setup_step-ca.sh が作る短期の server.crt は除く）
-CERT_FILE=$(ls -t "$USER_HOME"/certs/*.crt 2>/dev/null | grep -v '/server\.crt$' | head -1 || true)
-CERT_FILE="${CERT_FILE:-$USER_HOME/certs/server.crt}"
+CERT_FILE=""
+for h in "${SEARCH_HOMES[@]}"; do
+  CERT_FILE=$(ls -t "$h"/certs/*.crt 2>/dev/null | grep -v '/server\.crt$' | head -1 || true)
+  [ -n "$CERT_FILE" ] && break
+done
+CERT_FILE="${CERT_FILE:-$HOME/certs/server.crt}"
 # ルート CA: step-ca の CA ディレクトリ → step CLI の bootstrap 先 の順に探す
 CA_FILE="-"
-for f in /etc/step-ca/certs/root_ca.crt "$USER_HOME/.step/certs/root_ca.crt"; do
+STEP_ROOTS=(/etc/step-ca/certs/root_ca.crt)
+for h in "${SEARCH_HOMES[@]}"; do STEP_ROOTS+=("$h/.step/certs/root_ca.crt"); done
+for f in "${STEP_ROOTS[@]}"; do
   if sudo test -f "$f"; then CA_FILE="$f"; break; fi
 done
 
