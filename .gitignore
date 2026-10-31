@@ -5,3 +5,6 @@ __pycache__/
 node_modules/
 dist/
 celerybeat-schedule*
+# HTTPS の証明書・秘密鍵（scripts/import_cert.sh で配置。リポジトリには入れない）
+certs/*
+!certs/README.md

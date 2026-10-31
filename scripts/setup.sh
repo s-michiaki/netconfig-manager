@@ -49,6 +49,7 @@ fi
 REPO_URL="https://github.com/s-michiaki/netconfig-manager.git"
 BRANCH="master"
 HTTP_PORT="80"
+HTTPS_PORT="443"
 ADMIN_USERNAME="admin"
 SSH_HOST_KEY_POLICY="tofu"
 COMPOSE_FILE="docker-compose.prod.yml"
@@ -70,10 +71,23 @@ fi
 read -r -p "IP Address Please Enter [${IPADD}]: " Red_IPADD
 if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
 
+# 2回目以降は .env の値を既定にする（Enter だけで今のポートを維持）
+if [ -f "$INSTALL_DIR/.env" ]; then
+  v=$(sudo sed -n 's/^HTTP_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTP_PORT="$v"
+  v=$(sudo sed -n 's/^HTTPS_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTPS_PORT="$v"
+fi
+
 read -r -p "HTTP_PORT Please Enter [${HTTP_PORT}]: " Red_HTTP_PORT
 if [ -n "${Red_HTTP_PORT}" ]; then HTTP_PORT="${Red_HTTP_PORT}" ; fi
 [[ "$HTTP_PORT" =~ ^[0-9]+$ ]] && [ "$HTTP_PORT" -ge 1 ] && [ "$HTTP_PORT" -le 65535 ] \
   || { echo "HTTP_PORT が不正です: $HTTP_PORT"; exit 1; }
+
+# HTTPS は certs/ に証明書を置いたときだけ有効（scripts/import_cert.sh）。ポートは先に決めておく
+read -r -p "HTTPS_PORT Please Enter [${HTTPS_PORT}]: " Red_HTTPS_PORT
+if [ -n "${Red_HTTPS_PORT}" ]; then HTTPS_PORT="${Red_HTTPS_PORT}" ; fi
+[[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && [ "$HTTPS_PORT" -ge 1 ] && [ "$HTTPS_PORT" -le 65535 ] \
+  || { echo "HTTPS_PORT が不正です: $HTTPS_PORT"; exit 1; }
+[ "$HTTPS_PORT" != "$HTTP_PORT" ] || { echo "HTTPS_PORT と HTTP_PORT が同じです"; exit 1; }
 
 FIRST_INSTALL=1
 [ -f "$INSTALL_DIR/.env" ] && FIRST_INSTALL=0
@@ -190,16 +204,20 @@ ADMIN_PASSWORD=${ADMIN_PASSWORD}
 SSH_HOST_KEY_POLICY=${SSH_HOST_KEY_POLICY}
 ALLOWED_ORIGINS=
 HTTP_PORT=${HTTP_PORT}
+HTTPS_PORT=${HTTPS_PORT}
 EOF
   sudo install -m 600 -o root -g root "$TMP_ENV" "$INSTALL_DIR/.env"
   rm -f "$TMP_ENV"
 else
-  # HTTP_PORT だけは入力値を反映する
-  if sudo grep -q '^HTTP_PORT=' .env; then
-    sudo sed -i "s/^HTTP_PORT=.*/HTTP_PORT=${HTTP_PORT}/" .env
-  else
-    echo "HTTP_PORT=${HTTP_PORT}" | sudo tee -a .env >/dev/null
-  fi
+  # HTTP_PORT・HTTPS_PORT だけは入力値を反映する
+  for kv in "HTTP_PORT=${HTTP_PORT}" "HTTPS_PORT=${HTTPS_PORT}"; do
+    k="${kv%%=*}"
+    if sudo grep -q "^${k}=" .env; then
+      sudo sed -i "s/^${k}=.*/${kv}/" .env
+    else
+      echo "$kv" | sudo tee -a .env >/dev/null
+    fi
+  done
 fi
 
 # =========================
@@ -220,8 +238,13 @@ if systemctl is-active --quiet firewalld; then
   else
     sudo firewall-cmd --permanent --add-port="${HTTP_PORT}/tcp"
   fi
+  if [ "$HTTPS_PORT" = "443" ]; then
+    sudo firewall-cmd --permanent --add-service=https
+  else
+    sudo firewall-cmd --permanent --add-port="${HTTPS_PORT}/tcp"
+  fi
   sudo firewall-cmd --reload
-  echo "[INFO] Port ${HTTP_PORT}/tcp opened in firewalld"
+  echo "[INFO] Port ${HTTP_PORT}/tcp, ${HTTPS_PORT}/tcp opened in firewalld"
 else
   echo "[INFO] firewalld is not running, skipping"
 fi
@@ -229,6 +252,11 @@ fi
 # =========================
 # コンテナのビルド・起動
 # =========================
+# HTTPS の証明書置き場（コンテナにマウントするため、無ければ作る）
+sudo install -d -m 755 "$INSTALL_DIR/certs"
+HTTPS_ENABLED=0
+sudo test -s "$INSTALL_DIR/certs/server.crt" && sudo test -s "$INSTALL_DIR/certs/server.key" && HTTPS_ENABLED=1
+
 echo "[INFO] Building and starting containers (初回は数分かかります)..."
 # podman-compose は compose ファイルが変わらない限り既存コンテナを作り直さない
 # （イメージだけ更新しても古いコンテナが動き続ける）ため、ビルド後に必ず再作成する。
@@ -246,10 +274,11 @@ sudo systemctl enable --now podman-restart.service
 # 起動確認（ヘルスチェック）
 # =========================
 echo "[INFO] Waiting for NetConfig Manager to become ready..."
+# HTTPS 有効時は HTTP が HTTPS へ転送されるため -L で追う（自分自身への確認なので証明書の検証は省く）
 HEALTH_URL="http://localhost:${HTTP_PORT}/api/health"
 READY=0
 for _ in $(seq 1 60); do
-  if curl -fsS -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
+  if curl -fsSkL -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
   sleep 3
 done
 
@@ -272,7 +301,13 @@ echo ""
 echo "✅ 完了"
 echo ""
 echo "■ アクセスURL"
-if [ "$HTTP_PORT" = "80" ]; then echo "http://${IPADD}/"; else echo "http://${IPADD}:${HTTP_PORT}/"; fi
+if [ "$HTTPS_ENABLED" -eq 1 ]; then
+  if [ "$HTTPS_PORT" = "443" ]; then echo "https://${IPADD}/"; else echo "https://${IPADD}:${HTTPS_PORT}/"; fi
+  echo "（HTTP は HTTPS へ転送されます）"
+else
+  if [ "$HTTP_PORT" = "80" ]; then echo "http://${IPADD}/"; else echo "http://${IPADD}:${HTTP_PORT}/"; fi
+  echo "（HTTPS 化: bash $INSTALL_DIR/scripts/import_cert.sh で証明書を取り込む）"
+fi
 echo ""
 if [ "$FIRST_INSTALL" -eq 1 ]; then
   echo "■ 初期管理者（ログイン後「パスワード変更」で変更してください）"
@@ -300,4 +335,4 @@ echo "■ 停止"
 echo "cd $INSTALL_DIR && sudo podman-compose -f $COMPOSE_FILE down"
 echo ""
 echo "■ 動作確認"
-echo "curl $HEALTH_URL"
+echo "curl -kL $HEALTH_URL"
