@@ -116,7 +116,7 @@ bash /opt/netconfig-manager/scripts/import_cert.sh
 ```
 
 - 既定値は `setup_step-ca.sh` の出力に合わせています（Enter でそのまま採用）
-  - 証明書: `~/certs/<COMMON_NAME>.crt`（中間 CA を含むチェーン。短期の `server.crt` は除外）
+  - 証明書: `~/certs/<COMMON_NAME>.crt`（中間 CA を含むチェーン。短期の `server.crt` は除外。`~` は実行ユーザー＝root のホームを先に探し、`su` した場合は元のユーザーのホームも探す）
   - 秘密鍵: 証明書と同じ名前の `.key`
   - ルート CA: `/etc/step-ca/certs/root_ca.crt`（無ければ `~/.step/certs/root_ca.crt`。`-` で指定なし）
 - 取り込む前に、証明書と秘密鍵の組み合わせ・有効期限（期限切れは中止、30日以内は警告）・SAN にサーバーの IP が含まれるか・ルート CA で検証できるかを確認します
