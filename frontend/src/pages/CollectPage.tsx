@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
+import { usePlatforms } from "../platforms";
 
 interface Device { id: string; name: string; hostname: string; platform: string; is_active: boolean; }
 
@@ -37,6 +38,7 @@ function describe(job: Job): string {
 }
 
 export default function CollectPage() {
+  const { label: platformLabel } = usePlatforms();
   const [devices, setDevices] = useState<Device[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -188,7 +190,7 @@ export default function CollectPage() {
                     </td>
                     <td style={{ fontWeight: 500 }}>{d.name}</td>
                     <td className="mono" style={{ fontSize: 12, color: "var(--color-muted)" }}>{d.hostname}</td>
-                    <td style={{ fontSize: 12, color: "var(--color-muted)" }}>{d.platform}</td>
+                    <td style={{ fontSize: 12, color: "var(--color-muted)" }}>{platformLabel(d.platform)}</td>
                   </tr>
                 ))}
               </tbody>

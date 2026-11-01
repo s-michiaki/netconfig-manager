@@ -8,7 +8,7 @@ Gitリポジトリは機器ごとに GIT_REPO_PATH/<device_id>/ に作成する�
 import difflib
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,8 +45,12 @@ _CISCO_IOS_IGNORE = [
 
 @dataclass(frozen=True)
 class PlatformSpec:
-    commands: list[str]
+    label: str  # 画面に表示する名前
+    vendor: str  # 画面でまとめて表示するメーカー名
+    commands: list[str] = field(default_factory=list)
     supports_enable: bool = False
+    # Enable パスワードが未設定でも特権モードに入る（ログイン直後は一般モードで、取得コマンドに特権が必要な機種）
+    auto_enable: bool = False
     ignore_patterns: list[str] = field(default_factory=list)
     # 取得前に実行する設定コマンド（出力は保存しない）
     prep_commands: list[str] = field(default_factory=list)
@@ -54,41 +58,202 @@ class PlatformSpec:
     config_mode_commands: list[str] = field(default_factory=list)
     # 応答の遅い機器。True ならログイン後のプロンプト待ちなどにも応答待ち時間を適用する
     slow_device: bool = False
+    # 取得のたびに値が変わる部分の置き換え（パターン, 置換後）。行単位の除外では足りないもの
+    # （FortiOS の暗号化パスワードのように、行は残して値だけ伏せたいもの）に使う
+    replace_patterns: list[tuple[str, str]] = field(default_factory=list)
+    # 構成図での既定のアイコン（switch / l3switch / router / firewall / wireless）
+    icon: str = "switch"
+    # 機器登録画面に表示する注意事項
+    note: str | None = None
+    # Netmiko の device_type（省略時はプラットフォームのキーと同じ）
+    driver: str | None = None
 
+    @property
+    def device_type(self) -> str:
+        return self.driver or ""
+
+
+def _spec(label: str, vendor: str, commands: list[str], **kw) -> PlatformSpec:
+    return PlatformSpec(label=label, vendor=vendor, commands=commands, **kw)
+
+
+# FASTPATH 系（Ubiquiti EdgeSwitch・NETGEAR・Broadcom ICOS・Dell PowerConnect）の running-config の先頭にある、
+# 稼働時間・現在時刻の行
+_FASTPATH_IGNORE = [
+    r"^!Current Configuration:",
+    r"^!System Up ?Time",
+    r"^!Up Time",
+    r"^!Current SNTP Synchronized Time",
+]
+# 先頭に出る「曜日 月 日 時刻」の行（IOS-XR など）
+_TIMESTAMP_LINE = r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d+ \d{2}:\d{2}:\d{2}"
+
+_FW_NOTE_ENABLE = "特権モードのパスワードが必要な場合は Enable パスワードを設定してください"
 
 PLATFORMS: dict[str, PlatformSpec] = {
-    "cisco_ios": PlatformSpec(["show running-config"], True, _CISCO_IOS_IGNORE),
-    "cisco_xe": PlatformSpec(["show running-config"], True, _CISCO_IOS_IGNORE),
-    "cisco_nxos": PlatformSpec(
-        ["show running-config"],
-        False,
-        [r"^!Time: ", r"^!Running configuration last done at: ", r"^!Command: show running-config"],
+    # ---------------------------------------------------------------- Cisco
+    "cisco_ios": _spec("Cisco IOS", "Cisco", ["show running-config"], supports_enable=True,
+                       ignore_patterns=_CISCO_IOS_IGNORE),
+    "cisco_xe": _spec("Cisco IOS-XE", "Cisco", ["show running-config"], supports_enable=True,
+                      ignore_patterns=_CISCO_IOS_IGNORE),
+    "cisco_nxos": _spec(
+        "Cisco NX-OS", "Cisco", ["show running-config"],
+        ignore_patterns=[r"^!Time: ", r"^!Running configuration last done at: ", r"^!Command: show running-config"],
+        icon="l3switch",
     ),
-    "juniper_junos": PlatformSpec(
-        ["show configuration | display set"], False, [r"^## Last (commit|changed): "]
+    "cisco_xr": _spec(
+        "Cisco IOS-XR", "Cisco", ["show running-config"],
+        ignore_patterns=[r"^Building configuration\.\.\.", r"^!! Last configuration change at ", _TIMESTAMP_LINE],
+        icon="router",
     ),
-    "arista_eos": PlatformSpec(["show running-config"], True, [r"^! Command: show running-config"]),
-    "hp_comware": PlatformSpec(["display current-configuration"], False, []),
-    "huawei": PlatformSpec(
-        ["display current-configuration"], False, [r"^!Last configuration was (updated|saved) at "]
+    "cisco_asa": _spec(
+        "Cisco ASA", "Cisco", ["show running-config"], supports_enable=True,
+        ignore_patterns=[r"^: Saved", r"^: Written by ", r"^Cryptochecksum:"],
+        icon="firewall", note=_FW_NOTE_ENABLE,
     ),
-    # Palo Alto PAN-OS: 差分を見やすくするため set 形式で出力させ、設定モードの show で全体を取得
+    "cisco_s300": _spec("Cisco Small Business（Sx300 / Sx350 など）", "Cisco", ["show running-config"],
+                        supports_enable=True),
+    "cisco_s200": _spec("Cisco Small Business（Sx200 など）", "Cisco", ["show running-config"], supports_enable=True),
+    "cisco_wlc": _spec("Cisco WLC（AireOS）", "Cisco", ["show run-config commands"], icon="wireless"),
+    "cisco_viptela": _spec("Cisco SD-WAN（Viptela）", "Cisco", ["show running-config"], icon="router"),
+    # ---------------------------------------------------------------- Juniper
+    "juniper_junos": _spec("Juniper JunOS", "Juniper", ["show configuration | display set"],
+                           ignore_patterns=[r"^## Last (commit|changed): "], icon="router"),
+    "juniper_screenos": _spec("Juniper ScreenOS", "Juniper", ["get config"], icon="firewall"),
+    # ---------------------------------------------------------------- Arista
+    "arista_eos": _spec("Arista EOS", "Arista", ["show running-config"], supports_enable=True,
+                        ignore_patterns=[r"^! Command: show running-config"]),
+    # ---------------------------------------------------------------- Fortinet
+    # show は既定値以外の設定だけを出す（full-configuration は既定値も含み膨大になる）。
+    # Netmiko はページング無効化のため、収集中だけ config system console の output を standard にし、
+    # 終了時に元に戻す（そのため収集用アカウントにはシステム設定の書き込み権限が必要）
+    "fortinet": _spec(
+        "Fortinet FortiGate（FortiOS）", "Fortinet", ["show"],
+        ignore_patterns=[r"^#conf_file_ver="],
+        replace_patterns=[
+            # 可逆暗号化された値（ENC xxx）は取得のたびに変わる。管理者パスワードのハッシュ（SH2 / PB2）は変わらないので残す
+            (r"^(\s*set \S+ ENC) (?!SH2|PB2)\S+$", r"\1 <暗号化された値（取得のたびに変わるため省略）>"),
+            # 秘密鍵も取得のたびに暗号化し直される（複数行）
+            (r'^(\s*set private-key ")[^"]*(")', r"\1<秘密鍵（取得のたびに変わるため省略）>\2"),
+        ],
+        icon="firewall",
+        note="収集用の管理者アカウントにはシステム設定の書き込み権限が必要です（ページング無効化のため、"
+             "収集中だけ config system console の output を standard にし、終了時に戻します。"
+             "常に standard にしておけば設定は変わりません）。暗号化されたパスワード等の値は取得のたびに変わるため、"
+             "差分の対象から外しています",
+    ),
+    # ---------------------------------------------------------------- Palo Alto
+    # 差分を見やすくするため set 形式で出力させ、設定モードの show で全体を取得
     "paloalto_panos": PlatformSpec(
-        commands=[],
+        label="Palo Alto PAN-OS", vendor="Palo Alto Networks",
         prep_commands=["set cli config-output-format set"],
         config_mode_commands=["show"],
         ignore_patterns=[r"^\[edit\]$", r"^Entering configuration mode$"],
         # ログイン後プロンプトが出るまで数十秒かかることがある（Netmiko 既定の待ちは 20 秒固定）
         slow_device=True,
+        icon="firewall",
     ),
+    # ---------------------------------------------------------------- Allied Telesis
+    "allied_telesis_awplus": _spec(
+        "Allied Telesis AlliedWare Plus", "Allied Telesis", ["show running-config"], supports_enable=True,
+        auto_enable=True,
+        note="AlliedWare Plus（x シリーズ・AR シリーズ・GS900 / SH シリーズなど）に対応。"
+             "ログイン後に自動で enable します（パスワードを設定している場合は Enable パスワード欄に入力）。"
+             "旧 CentreCOM（AlliedWare、Manager > のプロンプト）には未対応です",
+    ),
+    # ---------------------------------------------------------------- 国内メーカー
+    "yamaha": _spec(
+        "Yamaha RTX / NVR / SWX", "Yamaha", ["show config"], supports_enable=True,
+        ignore_patterns=[r"^# Reporting Date: "],
+        icon="router",
+        note="show config は管理者モードが必要な機種があるため、Enable パスワード欄に administrator のパスワードを"
+             "設定してください。console character が sjis の場合、日本語の部分は正しく取得できません",
+    ),
+    "apresia_aeos": _spec("APRESIA AEOS", "APRESIA Systems", ["show running-config"], supports_enable=True),
+    # ---------------------------------------------------------------- HPE / Aruba
+    "hp_comware": _spec("HPE Comware", "HPE / Aruba", ["display current-configuration"]),
+    "hp_procurve": _spec("HPE ProCurve", "HPE / Aruba", ["show running-config"], supports_enable=True,
+                         ignore_patterns=[r"^Running configuration:"]),
+    "aruba_osswitch": _spec("Aruba OS-Switch", "HPE / Aruba", ["show running-config"], supports_enable=True,
+                            ignore_patterns=[r"^Running configuration:"]),
+    "aruba_aoscx": _spec("Aruba AOS-CX", "HPE / Aruba", ["show running-config"]),
+    "aruba_os": _spec("Aruba OS（コントローラー）", "HPE / Aruba", ["show running-config"], supports_enable=True,
+                      ignore_patterns=[r"^Building Configuration\.\.\."], icon="wireless"),
+    # ---------------------------------------------------------------- Huawei
+    "huawei": _spec("Huawei VRP", "Huawei", ["display current-configuration"],
+                    ignore_patterns=[r"^!Last configuration was (updated|saved) at "]),
+    "huawei_vrpv8": _spec("Huawei VRP V8", "Huawei", ["display current-configuration"],
+                          ignore_patterns=[r"^!Last configuration was (updated|saved) at "], icon="router"),
+    # ---------------------------------------------------------------- Dell
+    "dell_os10": _spec("Dell OS10", "Dell", ["show running-configuration"],
+                       ignore_patterns=[r"^! Version ", r"^! Last configuration change at "]),
+    "dell_os9": _spec("Dell OS9（Force10）", "Dell", ["show running-config"], supports_enable=True,
+                      ignore_patterns=[r"^Current Configuration \.\.\.", r"^! Version ",
+                                       r"^! Last configuration change at ", r"^! Startup-config last updated at "]),
+    "dell_os6": _spec("Dell OS6 / PowerConnect", "Dell", ["show running-config"], supports_enable=True,
+                      ignore_patterns=_FASTPATH_IGNORE),
+    # ---------------------------------------------------------------- Extreme / Avaya / Brocade / Ruckus
+    "extreme_exos": _spec("Extreme EXOS", "Extreme / Brocade / Ruckus", ["show configuration"]),
+    "extreme_vsp": _spec(
+        "Extreme VOSS（VSP）", "Extreme / Brocade / Ruckus", ["show running-config"], supports_enable=True,
+        ignore_patterns=[r"(?i)^#\s*(mon|tue|wed|thu|fri|sat|sun)\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}"],
+    ),
+    "extreme_ers": _spec("Extreme ERS（Avaya）", "Extreme / Brocade / Ruckus", ["show running-config"],
+                         supports_enable=True),
+    "extreme_slx": _spec("Extreme SLX", "Extreme / Brocade / Ruckus", ["show running-config"]),
+    "extreme_nos": _spec("Extreme NOS（Brocade VDX）", "Extreme / Brocade / Ruckus", ["show running-config"]),
+    "extreme_netiron": _spec("Extreme NetIron（Brocade MLX）", "Extreme / Brocade / Ruckus", ["show running-config"],
+                             supports_enable=True, ignore_patterns=[r"^Current configuration:"], icon="router"),
+    "ruckus_fastiron": _spec("Ruckus / Brocade FastIron（ICX）", "Extreme / Brocade / Ruckus",
+                             ["show running-config"], supports_enable=True,
+                             ignore_patterns=[r"^Current configuration:"]),
+    # ---------------------------------------------------------------- ルーター・その他
+    "mikrotik_routeros": _spec("MikroTik RouterOS", "MikroTik", ["/export"],
+                               ignore_patterns=[r"^# .* by RouterOS "], icon="router"),
+    "vyos": _spec("VyOS", "VyOS", ["show configuration commands"], icon="router"),
+    "ubiquiti_edgerouter": _spec("Ubiquiti EdgeRouter", "Ubiquiti", ["show configuration commands"], icon="router"),
+    "ubiquiti_edgeswitch": _spec("Ubiquiti EdgeSwitch", "Ubiquiti", ["show running-config"], supports_enable=True,
+                                 ignore_patterns=_FASTPATH_IGNORE),
+    "nokia_sros": _spec("Nokia SR OS", "Nokia", ["admin show configuration"],
+                        ignore_patterns=[r"^# (Generated|Finished) "], icon="router"),
+    "checkpoint_gaia": _spec("Check Point Gaia", "Check Point", ["show configuration"],
+                             ignore_patterns=[r"^# Exported by \S+ on "], icon="firewall"),
+    "hillstone_stoneos": _spec("Hillstone StoneOS", "Hillstone", ["show configuration"], icon="firewall"),
+    "alcatel_aos": _spec("Alcatel-Lucent OmniSwitch（AOS）", "Alcatel-Lucent", ["show configuration snapshot"]),
+    "a10": _spec("A10 ACOS", "A10 Networks", ["show running-config"], supports_enable=True,
+                 ignore_patterns=[r"^!Configuration last (updated|saved) at "], icon="server"),
+    "netscaler": _spec("Citrix NetScaler（ADC）", "Citrix", ["show ns runningConfig"],
+                       ignore_patterns=[r"^# Last modified "], icon="server"),
+    "mellanox_mlnxos": _spec("NVIDIA / Mellanox Onyx", "NVIDIA / Mellanox", ["show running-config"],
+                             supports_enable=True, ignore_patterns=[r"^## Generated at "]),
+    "ruijie_os": _spec("Ruijie", "その他", ["show running-config"], supports_enable=True,
+                       ignore_patterns=[r"^Building configuration\.\.\.", r"^Current configuration\s*:\s*\d+ bytes"]),
+    "zte_zxros": _spec("ZTE ZXROS", "その他", ["show running-config"], supports_enable=True,
+                       ignore_patterns=[r"^Building configuration\.\.\."]),
+    "tplink_jetstream": _spec("TP-Link JetStream", "その他", ["show running-config"], supports_enable=True),
+    "netgear_prosafe": _spec("NETGEAR ProSAFE", "その他", ["show running-config"], supports_enable=True,
+                             ignore_patterns=_FASTPATH_IGNORE),
+    "broadcom_icos": _spec("Broadcom ICOS", "その他", ["show running-config"], supports_enable=True,
+                           ignore_patterns=_FASTPATH_IGNORE),
+    "dlink_ds": _spec("D-Link DGS / DES", "その他", ["show config current_config"]),
+    "zyxel_os": _spec("Zyxel", "その他", ["show running-config"]),
+    "ipinfusion_ocnos": _spec("IP Infusion OcNOS", "その他", ["show running-config"], supports_enable=True,
+                              ignore_patterns=[r"^!Last configuration change at "]),
+    "centec_os": _spec("Centec", "その他", ["show running-config"], supports_enable=True),
+    "fiberstore_fsos": _spec("FS（FiberStore）", "その他", ["show running-config"], supports_enable=True),
+    "eltex": _spec("Eltex", "その他", ["show running-config"]),
 }
+# Netmiko の device_type を埋める（driver 省略時はキーと同じ）
+PLATFORMS = {k: (v if v.driver else replace(v, driver=k)) for k, v in PLATFORMS.items()}
 
 SUPPORTED_PLATFORMS = tuple(PLATFORMS.keys())
 
 # ページャー表示（ページング無効化に失敗したときに出る）
-#   Cisco / Arista / NX-OS: --More--   Huawei / Comware: ---- More ----   JunOS: ---(more 45%)---
-#   PAN-OS（less）: lines 1-40
-PAGER_RE = re.compile(r"(?im)(?:^|\s)-{2,}\s*\(?\s*more(?:\s+\d+%)?\s*\)?\s*-{2,}|^lines \d+-\d+")
+#   Cisco / Arista / NX-OS / FortiOS / AW+: --More--   Huawei / Comware: ---- More ----
+#   JunOS: ---(more 45%)---   PAN-OS（less）: lines 1-40   Yamaha: ---つづく---   MikroTik: -- [Q quit|...
+PAGER_RE = re.compile(
+    r"(?im)(?:^|\s)-{2,}\s*\(?\s*(?:more|つづく)(?:\s+\d+%)?\s*\)?\s*-{2,}|^lines \d+-\d+|-- \[Q quit\|"
+)
 
 
 class PagingNotDisabledError(Exception):
@@ -198,6 +363,9 @@ def migrate_legacy_repo(device_id: str, device_name: str) -> bool:
 def normalize_config(text: str, platform: str) -> str:
     spec = PLATFORMS.get(platform)
     patterns = [re.compile(p) for p in (spec.ignore_patterns if spec else [])]
+    text = text.replace("\r\n", "\n")
+    for pat, repl in (spec.replace_patterns if spec else []):
+        text = re.sub(pat, repl, text, flags=re.M)
     lines = [
         line.rstrip()
         for line in text.replace("\r\n", "\n").split("\n")
@@ -243,7 +411,7 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
 
     read_timeout = effective_read_timeout(device)
     params = {
-        "device_type": device.platform,
+        "device_type": spec.device_type,
         "host": device.hostname,
         "port": device.port,
         "username": device.username,
@@ -288,7 +456,7 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
         conn.use_keys = True
     try:
         conn._open()
-        if device.enable_secret and spec.supports_enable:
+        if spec.supports_enable and (device.enable_secret or spec.auto_enable):
             conn.enable()
         for cmd in spec.prep_commands:
             _send(conn, cmd, read_timeout)

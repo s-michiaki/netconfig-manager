@@ -28,6 +28,7 @@ from app.models.device import CollectLog, ConfigSnapshot, Device, JumpHost
 from app.models.topology import EMPTY_TOPOLOGY, TopologyMap
 from app.models.user import User
 from app.services.audit import Audit, get_audit
+from app.services.config_service import PLATFORMS
 
 router = APIRouter()
 
@@ -119,6 +120,7 @@ class DeviceStatus(BaseModel):
     name: str
     hostname: str
     platform: str
+    icon: str = "switch"  # プラットフォームから決まる既定のアイコン
     is_active: bool
     jump_host_name: str | None = None
     # ok: 前回収集成功（変更なし） / changed: 前回収集で変更あり / failed: 前回収集失敗 / never: 未収集
@@ -252,6 +254,7 @@ async def device_statuses(db: AsyncSession, ids: set[str]) -> dict[str, DeviceSt
             name=d.name,
             hostname=d.hostname,
             platform=d.platform,
+            icon=PLATFORMS[d.platform].icon if d.platform in PLATFORMS else "switch",
             is_active=d.is_active,
             jump_host_name=jump_names.get(d.jump_host_id) if d.jump_host_id else None,
             status=state,

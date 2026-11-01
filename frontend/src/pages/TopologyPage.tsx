@@ -9,6 +9,7 @@ import "@xyflow/react/dist/style.css";
 import { toBlob } from "html-to-image";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import { usePlatforms } from "../platforms";
 import {
   DEFAULT_SIZE, DEVICE_NODE_SIZE, ICON_LABELS, PALETTE, POINT_SIZE, SHAPE_LABELS, STATE_LABELS, VIEW_LABELS,
   defaultIcon, formatTime, forRender, fromFlow, newId, toFlow,
@@ -770,8 +771,9 @@ function DevicePanel({
 }) {
   const navigate = useNavigate();
   const { can } = useAuth();
+  const { label: platformLabel } = usePlatforms();
   const [busy, setBusy] = useState(false);
-  const icon = node.data.icon ?? defaultIcon(status?.platform);
+  const icon = node.data.icon ?? defaultIcon(status?.platform, status?.icon);
   const collect = async () => {
     setBusy(true);
     try {
@@ -791,7 +793,7 @@ function DevicePanel({
         <span className="topo-dev-icon"><DeviceIconSvg icon={icon} size={22} /></span>
         <div>
           <div className="topo-map-name">{status.name}</div>
-          <div className="topo-muted topo-small">{status.platform} · {status.hostname}</div>
+          <div className="topo-muted topo-small">{platformLabel(status.platform)} · {status.hostname}</div>
         </div>
       </div>
       <dl className="topo-kv">
@@ -838,7 +840,7 @@ function DevicePanel({
           <div className="form-group">
             <label className="form-label" htmlFor="dev-icon">アイコン</label>
             <select id="dev-icon" value={node.data.icon ?? ""} onChange={(e) => onChange({ icon: (e.target.value || null) as DeviceIcon | null })}>
-              <option value="">自動（{ICON_LABELS[defaultIcon(status.platform)]}）</option>
+              <option value="">自動（{ICON_LABELS[defaultIcon(status.platform, status.icon)]}）</option>
               {Object.entries(ICON_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
           </div>

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import { usePlatforms } from "../platforms";
 
 type Severity = "high" | "medium" | "low";
 type Status = "pass" | "fail" | "error";
@@ -57,11 +58,6 @@ interface Device { id: string; name: string; platform: string; }
 
 const SEV_LABEL: Record<Severity, string> = { high: "高", medium: "中", low: "低" };
 const SEV_BADGE: Record<Severity, string> = { high: "badge-danger", medium: "badge-warning", low: "badge-neutral" };
-const PLATFORM_LABELS: Record<string, string> = {
-  cisco_ios: "Cisco IOS", cisco_xe: "Cisco IOS-XE", cisco_nxos: "Cisco NX-OS", juniper_junos: "Juniper JunOS",
-  arista_eos: "Arista EOS", hp_comware: "HP Comware", huawei: "Huawei VRP", paloalto_panos: "Palo Alto PAN-OS",
-};
-
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
@@ -106,6 +102,7 @@ const EMPTY_RULE: RuleInput = {
 function RuleModal({
   rule, devices, onClose, onSaved,
 }: { rule: Rule | RuleInput | null; devices: Device[]; onClose: () => void; onSaved: () => void }) {
+  const { groups: platformGroups } = usePlatforms();
   const isEdit = !!rule && "id" in rule;
   const [form, setForm] = useState<RuleInput>(() => ({ ...EMPTY_RULE, ...(rule ?? {}) }));
   const [error, setError] = useState("");
@@ -168,12 +165,17 @@ function RuleModal({
         <div className="form-group">
           <span className="form-label">対象のプラットフォーム（未選択なら全機種）</span>
           <div className="cmp-platforms">
-            {Object.entries(PLATFORM_LABELS).map(([v, l]) => (
-              <label key={v} className="form-check">
-                <input type="checkbox" checked={form.platforms.includes(v)}
-                  onChange={(e) => set("platforms", e.target.checked ? [...form.platforms, v] : form.platforms.filter((x) => x !== v))} />
-                {l}
-              </label>
+            {platformGroups.map(([vendor, list]) => (
+              <div key={vendor} className="cmp-platform-group">
+                <div className="cmp-platform-vendor">{vendor}</div>
+                {list.map((p) => (
+                  <label key={p.id} className="form-check">
+                    <input type="checkbox" checked={form.platforms.includes(p.id)}
+                      onChange={(e) => set("platforms", e.target.checked ? [...form.platforms, p.id] : form.platforms.filter((x) => x !== p.id))} />
+                    {p.label}
+                  </label>
+                ))}
+              </div>
             ))}
           </div>
         </div>
@@ -266,6 +268,7 @@ function RuleModal({
 function TemplateModal({
   existing, onClose, onAdded,
 }: { existing: Set<string>; onClose: () => void; onAdded: (n: number) => void }) {
+  const { label: platformLabel } = usePlatforms();
   const [templates, setTemplates] = useState<(RuleInput & { description: string })[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
@@ -311,7 +314,7 @@ function TemplateModal({
                   <span>
                     <b>{t.name}</b> <SevBadge s={t.severity} />{exists ? <span className="topo-muted">（登録済み）</span> : null}
                     <span className="topo-muted topo-small" style={{ display: "block" }}>
-                      {t.description} ／ {t.platforms.length ? t.platforms.map((p) => PLATFORM_LABELS[p] ?? p).join("・") : "全機種"}
+                      {t.description} ／ {t.platforms.length ? t.platforms.map((p) => platformLabel(p)).join("・") : "全機種"}
                     </span>
                   </span>
                 </label>
@@ -335,6 +338,7 @@ type Tab = "violations" | "devices" | "rules";
 
 export default function CompliancePage() {
   const { can } = useAuth();
+  const { label: platformLabel } = usePlatforms();
   const canWrite = can(PERM.COMPLIANCE_WRITE);
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -490,7 +494,7 @@ export default function CompliancePage() {
                       <td><SevBadge s={x.severity} /></td>
                       <td className="nowrap">
                         <button className="link-btn" onClick={() => navigate(`/history?device=${x.device_id}`)} title="コンフィグの世代を見る">{x.device_name}</button>
-                        <div className="topo-muted topo-small">{PLATFORM_LABELS[x.platform] ?? x.platform}</div>
+                        <div className="topo-muted topo-small">{platformLabel(x.platform)}</div>
                       </td>
                       <td>{x.rule_name}</td>
                       <td><Details items={x.details} /></td>
@@ -516,7 +520,7 @@ export default function CompliancePage() {
                 {summary.devices.map((d) => (
                   <tr key={d.device_id}>
                     <td>{d.name}<div className="topo-muted topo-small mono">{d.hostname}</div></td>
-                    <td>{PLATFORM_LABELS[d.platform] ?? d.platform}</td>
+                    <td>{platformLabel(d.platform)}</td>
                     <td>
                       {d.fail_count ? (
                         <button className="link-btn" onClick={() => { setParams({ device: d.device_id }); setTab("violations"); }}>
@@ -548,7 +552,7 @@ export default function CompliancePage() {
                       <div className="topo-small mono cmp-cond">{describe(r)}</div>
                     </td>
                     <td><SevBadge s={r.severity} /></td>
-                    <td className="topo-small">{r.platforms.length ? r.platforms.map((p) => PLATFORM_LABELS[p] ?? p).join("・") : "全機種"}</td>
+                    <td className="topo-small">{r.platforms.length ? r.platforms.map((p) => platformLabel(p)).join("・") : "全機種"}</td>
                     <td className="nowrap topo-small">
                       <span style={{ color: r.fail_count ? "var(--color-danger)" : undefined }}>違反 {r.fail_count}</span> / 合格 {r.pass_count}
                       {r.error_count ? <span style={{ color: "var(--color-warning)" }}> / エラー {r.error_count}</span> : null}

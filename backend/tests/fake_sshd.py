@@ -1,6 +1,6 @@
-"""テスト用の簡易SSHサーバー（Cisco風 / PAN-OS風プロンプト）
+"""テスト用の簡易SSHサーバー（Cisco風 / PAN-OS風 / FortiGate風 / AlliedWare Plus風 / 汎用プロンプト）
 
-start(pubkey=..., password=..., mode="cisco"|"panos") で起動
+start(pubkey=..., password=..., mode="cisco"|"panos"|"fortinet"|"awplus"|"generic") で起動
 - パスワード認証・キーボード対話認証・公開鍵認証に対応
 """
 import socket
@@ -129,6 +129,136 @@ def _panos(ch, state, login_delay=0.0):
             state["format_set"] = True
 
 
+# ---------------------------------------------------------------- FortiGate（FortiOS 7）
+def _forti_config(state):
+    """show の出力。暗号化された値（ENC）と秘密鍵は実機と同じく取得のたびに変わる"""
+    import secrets
+    n = state["show_count"] = state.get("show_count", 0) + 1
+    console = "config system console\r\n    set output standard\r\nend\r\n" if state["output"] == "standard" else ""
+    return (
+        "#config-version=FGT60F-7.2.5-FW-build1517-230606:opmode=0:vdom=0:user=admin\r\n"
+        f"#conf_file_ver={1000 + n}\r\n#buildno=1517\r\n#global_vdom=1\r\n"
+        'config system global\r\n    set hostname "FGT60F"\r\n    set admintimeout 480\r\nend\r\n'
+        + console
+        + 'config system admin\r\n    edit "admin"\r\n        set password ENC SH2stablehashvalue=\r\n'
+        "    next\r\nend\r\n"
+        'config system interface\r\n    edit "port1"\r\n        set allowaccess ping https ssh http\r\n'
+        '        set description "日本語の説明"\r\n    next\r\nend\r\n'
+        'config vpn ipsec phase1-interface\r\n    edit "vpn1"\r\n'
+        f"        set psksecret ENC {secrets.token_urlsafe(24)}\r\n    next\r\nend\r\n"
+        'config vpn certificate local\r\n    edit "cert1"\r\n        set private-key "-----BEGIN ENCRYPTED PRIVATE KEY-----\r\n'
+        f"{secrets.token_urlsafe(40)}\r\n-----END ENCRYPTED PRIVATE KEY-----\"\r\n    next\r\nend"
+    )
+
+
+def _fortinet(ch, state):
+    state.setdefault("output", "more")
+    ctx = []
+    host = "FGT60F"
+
+    def prompt():
+        return f"{host} ({ctx[-1]}) # " if ctx else f"{host} # "
+
+    ch.send(prompt())
+    for line in _lines(ch):
+        cmd = line.strip()
+        state.setdefault("commands", []).append(cmd)
+        out = ""
+        if cmd == "get system status | grep Virtual":
+            out = "Virtual domain configuration: disable"
+        elif cmd == "get system status | grep Version":
+            out = "Version: FortiGate-60F v7.2.5,build1517,230606 (GA.F)"
+        elif cmd == "get system console":
+            out = f"output              : {state['output']}\r\nlogin               : enable"
+        elif cmd.startswith("config "):
+            ctx.append(cmd.split()[-1])
+        elif cmd == "set output standard" and ctx == ["console"]:
+            state["output"] = "standard"
+        elif cmd == "set output more" and ctx == ["console"]:
+            state["output"] = "more"
+        elif cmd in ("end", "next"):
+            if ctx:
+                ctx.pop()
+        elif cmd == "show":
+            text = _forti_config(state)
+            if state["output"] == "more":
+                ch.send(line + "\r\n" + "\r\n".join(text.split("\r\n")[:6]) + "\r\n--More-- ")
+                continue
+            out = text
+        elif cmd == "exit":
+            ch.send(line + "\r\n")
+            ch.close()
+            return
+        ch.send(line + "\r\n" + (out + "\r\n" if out else "") + "\r\n" + prompt())
+
+
+# ---------------------------------------------------------------- AlliedWare Plus
+AWPLUS_CONFIG = (
+    "!\r\nservice password-encryption\r\n!\r\nhostname awplus\r\n!\r\nno service telnet\r\n!\r\n"
+    "snmp-server community public\r\n!\r\ninterface port1.0.1\r\n description 日本語の説明\r\n"
+    " switchport mode access\r\n!\r\nntp server 192.0.2.123\r\n!\r\nend"
+)
+
+
+def _awplus(ch, state, enable_password=None):
+    priv = False
+    paging = True
+    ch.send("\r\nAlliedWare Plus (TM) 5.5.2 11/01/22 12:00:00\r\n\r\nawplus>")
+    waiting_password = False
+    for line in _lines(ch):
+        cmd = line.strip()
+        state.setdefault("commands", []).append(cmd if not waiting_password else "<password>")
+        prompt = lambda: "awplus#" if priv else "awplus>"  # noqa: E731
+        if waiting_password:
+            waiting_password = False
+            if cmd == (enable_password or ""):
+                priv = True
+                ch.send("\r\n" + prompt())
+            else:
+                ch.send("\r\n% Bad passwords\r\n" + prompt())
+            continue
+        out = ""
+        if cmd == "terminal length 0":
+            paging = False
+        elif cmd == "enable":
+            if enable_password:
+                waiting_password = True
+                ch.send(line + "\r\nPassword: ")
+                continue
+            priv = True
+        elif cmd == "show running-config":
+            if not priv:
+                out = "% Invalid input detected at '^' marker."
+            elif paging:
+                ch.send(line + "\r\n" + "\r\n".join(AWPLUS_CONFIG.split("\r\n")[:5]) + "\r\n--More--")
+                continue
+            else:
+                out = AWPLUS_CONFIG
+        elif cmd in ("exit", "logout"):
+            ch.send(line + "\r\n")
+            ch.close()
+            return
+        ch.send(line + "\r\n" + (out + "\r\n" if out else "") + prompt())
+
+
+# ---------------------------------------------------------------- 汎用（どのコマンドにも応答する）
+GENERIC_CONFIG = "hostname sw1\r\ninterface eth1\r\n description 日本語の説明\r\n!"
+
+
+def _generic(ch, state, prompt="sw1#", config_commands=()):
+    """プロンプトを返し続けるだけの機器。config_commands のコマンドにはコンフィグを返す"""
+    ch.send("\r\n" + prompt)
+    for line in _lines(ch):
+        cmd = line.strip()
+        state.setdefault("commands", []).append(cmd)
+        if cmd in ("exit", "logout", "quit", "/quit"):
+            ch.send(line + "\r\n")
+            ch.close()
+            return
+        out = GENERIC_CONFIG if cmd in config_commands else ""
+        ch.send(line + "\r\n" + (out + "\r\n" if out else "") + prompt)
+
+
 def handle(sock, key, state, cfg=None):
     cfg = cfg or {"password": "pw", "pubkey": None, "mode": "cisco"}
     t = paramiko.Transport(sock)
@@ -146,15 +276,21 @@ def handle(sock, key, state, cfg=None):
     try:
         if cfg["mode"] == "panos":
             _panos(ch, state, cfg.get("login_delay", 0.0))
+        elif cfg["mode"] == "fortinet":
+            _fortinet(ch, state)
+        elif cfg["mode"] == "awplus":
+            _awplus(ch, state, cfg.get("enable_password"))
+        elif cfg["mode"] == "generic":
+            _generic(ch, state, cfg.get("prompt", "sw1#"), cfg.get("config_commands", ()))
         else:
             _cisco(ch, cfg.get("pager"))
     except Exception:  # noqa: BLE001
         pass
 
 
-def start(key=None, password="pw", pubkey=None, mode="cisco", login_delay=0.0, pager=None):
+def start(key=None, password="pw", pubkey=None, mode="cisco", login_delay=0.0, pager=None, **extra):
     key = key or paramiko.RSAKey.generate(2048)
-    cfg = {"password": password, "pubkey": pubkey, "mode": mode, "login_delay": login_delay, "pager": pager}
+    cfg = {"password": password, "pubkey": pubkey, "mode": mode, "login_delay": login_delay, "pager": pager, **extra}
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("127.0.0.1", 0))

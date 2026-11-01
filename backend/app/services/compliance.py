@@ -237,6 +237,7 @@ async def run_checks(
 # ---------------------------------------------------------------- ルールのテンプレート
 
 _IOS = ["cisco_ios", "cisco_xe"]
+_AWPLUS = ["allied_telesis_awplus"]
 
 TEMPLATES: list[dict] = [
     {
@@ -266,7 +267,7 @@ TEMPLATES: list[dict] = [
         "section_pattern": r"^line vty",
     },
     {
-        "name": "NTP サーバーの設定", "severity": "low", "platforms": [*_IOS, "cisco_nxos", "arista_eos"],
+        "name": "NTP サーバーの設定", "severity": "low", "platforms": [*_IOS, "cisco_nxos", "arista_eos", *_AWPLUS],
         "description": "時刻同期のため NTP サーバーを設定する",
         "match_type": "regex", "expect": "present", "pattern": r"^ntp server ", "scope": "config",
     },
@@ -277,7 +278,7 @@ TEMPLATES: list[dict] = [
     },
     {
         "name": "既定の SNMP コミュニティを使わない", "severity": "high",
-        "platforms": [*_IOS, "cisco_nxos", "arista_eos"],
+        "platforms": [*_IOS, "cisco_nxos", "arista_eos", *_AWPLUS],
         "description": "public / private のコミュニティ名は使わない",
         "match_type": "regex", "expect": "absent", "pattern": r"^snmp-server community (public|private)\b",
         "scope": "config",
@@ -293,6 +294,28 @@ TEMPLATES: list[dict] = [
         "description": "管理インターフェースの Telnet を無効にする",
         "match_type": "contains", "expect": "present", "pattern": "deviceconfig system service disable-telnet yes",
         "scope": "config",
+    },
+    {
+        "name": "FortiGate: 管理アクセスに Telnet / HTTP を許可しない", "severity": "high", "platforms": ["fortinet"],
+        "description": "インターフェースの allowaccess に telnet・http（暗号化されない管理アクセス）を含めない",
+        "match_type": "regex", "expect": "absent", "pattern": r"^\s*set allowaccess .*\b(telnet|http)\b",
+        "scope": "config",
+    },
+    {
+        "name": "FortiGate: 管理者のアイドルタイムアウト", "severity": "low", "platforms": ["fortinet"],
+        "description": "管理画面・CLI の無操作時の自動ログアウトを長くしすぎない（30 分以上を違反とする。既定は 5 分）",
+        "match_type": "regex", "expect": "absent", "pattern": r"^\s*set admintimeout (\d{3,}|[3-9]\d)$",
+        "scope": "config",
+    },
+    {
+        "name": "AW+: Telnet サーバーを無効化", "severity": "high", "platforms": _AWPLUS,
+        "description": "Telnet での管理アクセスを無効にする（no service telnet）",
+        "match_type": "regex", "expect": "present", "pattern": r"^no service telnet", "scope": "config",
+    },
+    {
+        "name": "AW+: HTTP サーバーを無効化", "severity": "medium", "platforms": _AWPLUS,
+        "description": "Web 管理画面（service http）を使わない場合は無効にする",
+        "match_type": "regex", "expect": "present", "pattern": r"^no service http\b", "scope": "config",
     },
     {
         "name": "JunOS: root の SSH ログイン禁止", "severity": "high", "platforms": ["juniper_junos"],
