@@ -1,9 +1,9 @@
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,13 +22,21 @@ from app.core.ssh_keys import (
 from app.models.compliance import ComplianceResult
 from app.models.device import Device, DeviceGroup, JumpHost
 from app.services.audit import Audit, changed_fields, get_audit
+from app.services.config_service import PLATFORMS
 from app.worker import collect_all_devices, collect_device_config
 
 router = APIRouter()
 
-Platform = Literal[
-    "cisco_ios", "cisco_xe", "cisco_nxos", "juniper_junos", "arista_eos", "hp_comware", "huawei", "paloalto_panos"
-]
+
+
+def _check_platform(v: str) -> str:
+    if v not in PLATFORMS:
+        raise ValueError("未対応のプラットフォームです")
+    return v
+
+
+# 対応プラットフォームは config_service.PLATFORMS で一元管理する
+Platform = Annotated[str, AfterValidator(_check_platform)]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 Host = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9.:_\-\[\]%]+$")
@@ -209,11 +217,29 @@ class DeviceDefaults(BaseModel):
     read_timeout: int
 
 
-# 注意: "/defaults" "/collect/all" は "/{device_id}" 系より先に定義する
+class PlatformInfo(BaseModel):
+    id: str
+    label: str
+    vendor: str
+    icon: str
+    supports_enable: bool
+    note: str | None = None
+
+
+# 注意: "/defaults" "/platforms" "/collect/all" は "/{device_id}" 系より先に定義する
 @router.get("/defaults", response_model=DeviceDefaults, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def device_defaults():
     """画面表示用の既定値（応答待ち時間など）"""
     return DeviceDefaults(read_timeout=settings.SSH_READ_TIMEOUT)
+
+
+@router.get("/platforms", response_model=list[PlatformInfo], dependencies=[Depends(require(Perm.DEVICE_READ))])
+async def list_platforms():
+    """対応プラットフォームの一覧（画面の選択肢・表示名・構成図の既定アイコンに使う）"""
+    return [
+        PlatformInfo(id=k, label=v.label, vendor=v.vendor, icon=v.icon, supports_enable=v.supports_enable, note=v.note)
+        for k, v in PLATFORMS.items()
+    ]
 
 
 @router.post("/collect/all", dependencies=[Depends(require(Perm.COLLECT))])

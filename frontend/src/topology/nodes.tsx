@@ -80,7 +80,7 @@ function Handles() {
 export const DeviceNodeView = memo(function DeviceNodeView({ data, selected }: NodeProps<DeviceNode>) {
   const { statuses } = useContext(TopologyContext);
   const st = statuses[data.deviceId];
-  const icon = data.icon ?? defaultIcon(st?.platform);
+  const icon = data.icon ?? defaultIcon(st?.platform, st?.icon);
   const style = ICON_STYLE[icon];
   const state = st?.status ?? "never";
   return (

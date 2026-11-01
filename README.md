@@ -21,16 +21,30 @@
 
 ## 対応プラットフォーム（Netmiko経由）
 
-- Cisco IOS / IOS-XE / NX-OS
-- Juniper JunOS
-- Arista EOS
-- HP Comware
-- Huawei VRP
-- Palo Alto Networks PAN-OS（設定モードの `show` を set 形式で取得）
+Netmiko のドライバーがあり、コンフィグを取得するコマンドが決まっている機種に対応しています（56 種類）。一覧と取得コマンド・除外する行は `backend/app/services/config_service.py` の `PLATFORMS` で一元管理しており、画面の選択肢・表示名・構成図の既定アイコンもここから取得します（`GET /api/devices/platforms`）。
+
+| メーカー | 機種（取得コマンド） |
+|---|---|
+| Cisco | IOS / IOS-XE / NX-OS / IOS-XR / ASA（`show running-config`）、Small Business Sx200・Sx300、WLC（`show run-config commands`）、SD-WAN（Viptela） |
+| Juniper | JunOS（`show configuration \| display set`）、ScreenOS（`get config`） |
+| Fortinet | **FortiGate / FortiOS**（`show`） |
+| Palo Alto Networks | PAN-OS（設定モードの `show` を set 形式で取得） |
+| Allied Telesis | **AlliedWare Plus**（`show running-config`。ログイン後に自動で enable） |
+| 国内メーカー | Yamaha RTX / NVR / SWX（`show config`）、APRESIA AEOS |
+| Arista / HPE・Aruba / Huawei / Dell | EOS、Comware・ProCurve・OS-Switch・AOS-CX・ArubaOS、VRP・VRP V8、OS10・OS9・OS6 |
+| Extreme・Brocade・Ruckus | EXOS・VOSS・ERS・SLX・NOS（VDX）・NetIron・FastIron（ICX） |
+| ルーター・FW・その他 | MikroTik RouterOS（`/export`）、VyOS、Ubiquiti EdgeRouter・EdgeSwitch、Nokia SR OS、Check Point Gaia、Hillstone、Alcatel-Lucent OmniSwitch、A10、Citrix NetScaler、NVIDIA / Mellanox Onyx、Ruijie、ZTE、TP-Link JetStream、NETGEAR、Broadcom ICOS、D-Link、Zyxel、IP Infusion OcNOS、Centec、FS、Eltex |
+
+機種ごとの注意（機器登録画面にも表示されます）:
+
+- **FortiGate**: Netmiko がページングを無効化するため、収集中だけ `config system console` の `output` を `standard` にし、終了時に元へ戻します。そのため収集用の管理者アカウントにはシステム設定の書き込み権限が必要です（常に `standard` にしておけば設定は変わりません）。`ENC` で表示される可逆暗号化の値（PSK 等）と秘密鍵は取得のたびに変わるため伏せ字にして保存します（管理者パスワードのハッシュ `SH2` / `PB2` はそのまま）。`#conf_file_ver` の行は除外します
+- **AlliedWare Plus**: `show running-config` には特権モードが必要なため、Enable パスワードが未設定でも自動で `enable` します。旧 CentreCOM（AlliedWare、`Manager >` のプロンプト）は Netmiko のドライバーが無いため未対応です
+- **Yamaha**: `show config` に管理者モードが必要な機種があるため、Enable パスワード欄に administrator のパスワードを設定してください。`console character` が sjis の場合、日本語の部分は正しく取得できません
+- 今回追加した機種は、疑似機器（テスト用 SSH サーバー）で取得の流れを確認したもので、実機での確認はしていません。動かない機種があれば、取得コマンドや除外パターンを `PLATFORMS` で調整してください
 
 収集時、タイムスタンプなど取得のたびに変わる行（`! Last configuration change at ...` 等）は除外してから保存するため、実際に設定が変わったときだけ新しい世代が作られます。除外パターンは `backend/app/services/config_service.py` の `PLATFORMS` で調整できます。
 
-ページング（`--More--` 等）はログイン時に自動で無効化します（`terminal length 0` / `screen-length` / `set cli pager off` 等）。権限不足などで無効化できず出力が途中で止まった場合は、タイムアウトを待たずに収集エラーとし、不完全なコンフィグは保存しません。
+ページング（`--More--` 等）はログイン時に自動で無効化します（`terminal length 0` / `screen-length` / `set cli pager off` / `console lines infinity` 等）。権限不足などで無効化できず出力が途中で止まった場合は、タイムアウトを待たずに収集エラーとし、不完全なコンフィグは保存しません。
 
 ---
 
@@ -211,7 +225,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - 対象のプラットフォームを絞れます（未選択なら全機種）。重要度は高・中・低
 - 検査のタイミング: 収集に成功したとき（その機器）、ルールを作成・変更したとき・「全機器を再検査」を押したとき（全機器）
 - ルール編集画面の「試す」で、保存前に機器の最新のコンフィグで判定結果を確認できます
-- 「テンプレートから追加」で、よく使う基準（SSH v2・Telnet 禁止・HTTP サーバー無効・SNMP コミュニティ・NTP など）をまとめて登録できます
+- 「テンプレートから追加」で、よく使う基準（SSH v2・Telnet 禁止・HTTP サーバー無効・SNMP コミュニティ・NTP、FortiGate の管理アクセス、AlliedWare Plus の Telnet / HTTP 無効化など）をまとめて登録できます
 - 違反のある機器は構成図にも ⚠ と件数を表示します（色は最も重い違反の重要度）
 - 閲覧は閲覧者以上、ルールの編集・再検査はオペレーター以上
 
@@ -398,7 +412,7 @@ netconfig-manager/
 │       │   ├── ping.py          # Ping監視の対象 CRUD・WebSocket で結果を配信
 │       │   └── schedules.py     # スケジュール CRUD
 │       └── services/
-│           ├── config_service.py # Netmiko + GitPython
+│           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
 │           ├── compliance.py    # コンプライアンスの評価エンジン
 │           ├── audit.py         # 操作履歴の記録・ターミナルの記録（asciicast）・保持期間
 │           ├── ping.py          # ICMP 送信（icmplib）・名前解決・一定間隔の実行
@@ -415,6 +429,7 @@ netconfig-manager/
         ├── App.tsx              # ルーティング・ログインガード
         ├── index.css
         ├── auth.tsx             # ログインユーザー・権限（useAuth / RequirePerm）
+        ├── platforms.ts         # 対応プラットフォーム一覧の取得（usePlatforms）
         ├── api/client.ts        # Axios クライアント・認証
         ├── topology/            # 構成図（React Flow のノード・接続線・保存形式の変換）
         └── pages/
@@ -442,4 +457,5 @@ netconfig-manager/
 - **パスワード管理**: HashiCorp Vault 連携
 - **踏み台の多段化**: 2段以上の踏み台経由（現在は1段まで）
 - **Ping監視の拡張**: 結果の履歴保存・グラフ、応答なしが続いたときの通知、踏み台経由の PING、構成図への死活状態の表示
+- **対応プラットフォーム**: 旧 CentreCOM（AlliedWare）・NEC IX・ALAXALA など Netmiko にドライバーの無い機種（独自ドライバーの追加が必要）
 - **構成図の自動生成**: LLDP / CDP の隣接情報から接続線を自動作成（現在は手動作成）

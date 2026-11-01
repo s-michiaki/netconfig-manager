@@ -61,6 +61,7 @@ export interface DeviceStatus {
   name: string;
   hostname: string;
   platform: string;
+  icon?: string; // プラットフォームから決まる既定のアイコン（backend の PLATFORMS）
   is_active: boolean;
   jump_host_name: string | null;
   status: CollectState;
@@ -164,10 +165,11 @@ export const ICON_LABELS: Record<DeviceIcon, string> = {
 
 export const SHAPE_LABELS: Record<ShapeKind, string> = { rect: "四角", rounded: "角丸", ellipse: "楕円", diamond: "ひし形" };
 
-export function defaultIcon(platform: string | undefined): DeviceIcon {
-  if (!platform) return "switch";
-  if (platform.startsWith("paloalto")) return "firewall";
-  if (platform.startsWith("juniper")) return "router";
+/** アイコン未指定の機器の既定アイコン（サーバーがプラットフォームごとに決めたもの。無ければスイッチ） */
+export function defaultIcon(platform: string | undefined, icon?: string): DeviceIcon {
+  if (icon && icon in ICON_LABELS) return icon as DeviceIcon;
+  if (platform?.startsWith("paloalto") || platform === "fortinet") return "firewall";
+  if (platform?.startsWith("juniper")) return "router";
   return "switch";
 }
 

@@ -2,6 +2,7 @@ import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import { usePlatforms } from "../platforms";
 
 interface Device {
   id: string;
@@ -32,17 +33,6 @@ interface DeviceGroup {
   color: string | null;
   device_count: number;
 }
-
-const PLATFORM_LABELS: Record<string, string> = {
-  cisco_ios: "Cisco IOS",
-  cisco_xe: "Cisco IOS-XE",
-  cisco_nxos: "Cisco NX-OS",
-  juniper_junos: "Juniper JunOS",
-  arista_eos: "Arista EOS",
-  hp_comware: "HP Comware",
-  huawei: "Huawei VRP",
-  paloalto_panos: "Palo Alto PAN-OS",
-};
 
 const EMPTY_FORM = {
   name: "", hostname: "", platform: "cisco_ios", port: 22,
@@ -148,6 +138,9 @@ function DeviceModal({
     e.target.value = "";
   };
 
+  const { groups: platformGroups, byId: platformById } = usePlatforms();
+  const platformInfo = platformById[form.platform];
+
   const willHavePassword = (isEdit && device.has_password && !form.clear_password) || !!form.password;
   const willHaveKey = (isEdit && device.has_private_key && !form.clear_private_key) || !!form.private_key;
   const timeoutValid = !form.read_timeout.trim() || (/^\d+$/.test(form.read_timeout.trim())
@@ -177,7 +170,12 @@ function DeviceModal({
           <div className="form-group">
             <label className="form-label">プラットフォーム</label>
             <select value={form.platform} onChange={(e) => set("platform", e.target.value)}>
-              {Object.entries(PLATFORM_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              {!platformInfo && <option value={form.platform}>{form.platform}</option>}
+              {platformGroups.map(([vendor, list]) => (
+                <optgroup key={vendor} label={vendor}>
+                  {list.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </optgroup>
+              ))}
             </select>
           </div>
           <div className="form-group">
@@ -185,6 +183,7 @@ function DeviceModal({
             <input type="number" min={1} max={65535} value={form.port} onChange={(e) => set("port", +e.target.value)} />
           </div>
         </div>
+        {platformInfo?.note && <p className="form-hint platform-note">ⓘ {platformInfo.note}</p>}
         <div className="form-group">
           <label className="form-label">接続経路</label>
           <div style={{ display: "flex", gap: 8 }}>
@@ -434,6 +433,7 @@ function DeviceCard({
   groupColor: string | null; onToggle: () => void; onOpen: () => void;
   onEdit: (e: React.MouseEvent) => void; onDelete: (e: React.MouseEvent) => void;
 }) {
+  const { label: platformLabel } = usePlatforms();
   return (
     <div
       className={`device-card${selected ? " selected" : ""}`}
@@ -460,7 +460,7 @@ function DeviceCard({
       <p className="device-card-name">{d.name}</p>
       <p className="device-card-info">{d.hostname}</p>
       <p className="device-card-info" style={{ marginTop: 2 }}>
-        {PLATFORM_LABELS[d.platform] || d.platform} · port {d.port}
+        {platformLabel(d.platform)} · port {d.port}
       </p>
       {d.has_private_key && (
         <p className="device-card-info" style={{ marginTop: 2 }}>🔑 鍵認証{d.has_password ? "＋パスワード" : ""}</p>
