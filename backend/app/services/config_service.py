@@ -306,6 +306,7 @@ class CollectResult:
     removed: int = 0
     error: str | None = None
     retryable: bool = False
+    first: bool = False  # 初めての取得（変更ではないので通知しない）
 
     def as_dict(self) -> dict:
         return {
@@ -398,7 +399,7 @@ def save_config(device_id: str, config_text: str, triggered_by: str) -> CollectR
     repo.index.add([CONFIG_FILENAME])
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     commit = repo.index.commit(f"Collect ({triggered_by}) {ts}  +{added} -{removed}")
-    return CollectResult(success=True, commit_hash=commit.hexsha, added=added, removed=removed)
+    return CollectResult(success=True, commit_hash=commit.hexsha, added=added, removed=removed, first=not current)
 
 
 # ---------------------------------------------------------------- Collect

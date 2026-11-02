@@ -205,6 +205,7 @@ SSH_HOST_KEY_POLICY=${SSH_HOST_KEY_POLICY}
 ALLOWED_ORIGINS=
 HTTP_PORT=${HTTP_PORT}
 HTTPS_PORT=${HTTPS_PORT}
+PUBLIC_URL=
 EOF
   sudo install -m 600 -o root -g root "$TMP_ENV" "$INSTALL_DIR/.env"
   rm -f "$TMP_ENV"
@@ -256,6 +257,22 @@ fi
 sudo install -d -m 755 "$INSTALL_DIR/certs"
 HTTPS_ENABLED=0
 sudo test -s "$INSTALL_DIR/certs/server.crt" && sudo test -s "$INSTALL_DIR/certs/server.key" && HTTPS_ENABLED=1
+
+# 通知に付ける画面へのリンク（PUBLIC_URL）。未設定のときだけ、IP アドレスとポートから設定する
+if [ "$HTTPS_ENABLED" -eq 1 ]; then
+  if [ "$HTTPS_PORT" = "443" ]; then AUTO_URL="https://${IPADD}"; else AUTO_URL="https://${IPADD}:${HTTPS_PORT}"; fi
+else
+  if [ "$HTTP_PORT" = "80" ]; then AUTO_URL="http://${IPADD}"; else AUTO_URL="http://${IPADD}:${HTTP_PORT}"; fi
+fi
+CUR_URL=$(sudo sed -n 's/^PUBLIC_URL=//p' "$INSTALL_DIR/.env" | tail -1)
+if [ -z "$CUR_URL" ]; then
+  if sudo grep -q '^PUBLIC_URL=' "$INSTALL_DIR/.env"; then
+    sudo sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=${AUTO_URL}|" "$INSTALL_DIR/.env"
+  else
+    echo "PUBLIC_URL=${AUTO_URL}" | sudo tee -a "$INSTALL_DIR/.env" >/dev/null
+  fi
+  echo "[INFO] PUBLIC_URL=${AUTO_URL}（通知のリンク先。変更する場合は .env を編集）"
+fi
 
 echo "[INFO] Building and starting containers (初回は数分かかります)..."
 # podman-compose は compose ファイルが変わらない限り既存コンテナを作り直さない

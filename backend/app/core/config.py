@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）
     PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数
 
+    # --- 通知 ---
+    # 利用者がブラウザで開く URL（例: https://netconfig.example.local）。通知に画面へのリンクを付けるのに使う。空ならリンクなし
+    PUBLIC_URL: str = ""
+
     @field_validator("ADMIN_PASSWORD", mode="before")
     @classmethod
     def _empty_to_none(cls, v):
