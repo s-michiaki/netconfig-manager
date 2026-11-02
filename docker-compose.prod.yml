@@ -20,6 +20,7 @@ x-backend-env: &backend-env
   TERMINAL_LOG_RETENTION_DAYS: ${TERMINAL_LOG_RETENTION_DAYS:-180}
   PING_TIMEOUT: ${PING_TIMEOUT:-1}
   PING_MAX_TARGETS: ${PING_MAX_TARGETS:-300}
+  PUBLIC_URL: ${PUBLIC_URL:-}
   ALLOWED_ORIGINS: ""
 
 x-backend-depends: &backend-depends

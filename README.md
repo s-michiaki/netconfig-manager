@@ -244,6 +244,25 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - `.env` の `PING_TIMEOUT`（1回の応答待ち、既定 1 秒）・`PING_MAX_TARGETS`（同時に監視できる対象数、既定 300）で調整できます
 - 利用は閲覧者以上、IP の追加・編集・削除はオペレーター以上。追加・変更・削除は監査ログに残ります
 
+## コンフィグ変更の通知（Discord / Slack）
+
+収集でコンフィグに変更が見つかったとき、Discord・Slack の Webhook に通知します。「通知設定」画面で設定します。
+
+- **通知内容**: 機器名・IP・機器のグループ・変更行数（+n / -n）・収集の種類と時刻・世代と、差分画面へのリンク。差分の中身（パスワードのハッシュ等を含みうる）は送りません
+- **自分の通知**（全ユーザー）: 次のどれかを選びます
+  - 所属グループの設定を使う（既定）: 所属するユーザーグループのうち、通知が有効なものの通知先・対象で通知
+  - 個別に設定する: 自分の Webhook と、通知する機器のグループ（すべて / 選択したグループ / 未分類）を指定
+  - 通知しない
+- **ユーザーグループ**（管理者）: チームを作ってメンバーを登録し、グループの通知先・対象を設定します。1人が複数のグループに所属できます
+- 同じ Webhook へは1回だけ送ります（グループの Webhook はメンバーが何人いても1回）。「所属グループの設定を使う」メンバーがいないグループの Webhook には送りません
+- 初回の取得は変更ではないため通知しません。通知の送信は収集とは別のタスクで行い、失敗しても収集には影響しません
+- 「テスト通知を送る」で通知先を確認できます。最後の送信結果（失敗時は理由）も表示します
+- 管理者は「通知先の確認」で、機器のグループごとにどこへ送られるかを確認できます
+- Webhook URL は暗号化して保存し、画面では末尾4文字だけ表示します。宛先は Discord（`https://discord.com/api/webhooks/…`）・Slack（`https://hooks.slack.com/…`）の公式 URL に限ります
+- リンク先は `.env` の `PUBLIC_URL`（例: `https://192.168.1.10`）。`setup.sh`・`import_cert.sh` が未設定のときに IP アドレスから設定します。空ならリンクなしで送ります
+- サーバーから Discord・Slack（インターネット）へ HTTPS で接続できる必要があります
+- 設定の変更・テスト通知・ユーザーグループの変更は監査ログに残ります
+
 ## 監査ログ
 
 管理者は「監査ログ」画面で、誰が・いつ・何をしたかを確認できます。
@@ -266,6 +285,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 | 構成図の閲覧 | ✓ | ✓ | ✓ |
 | コンプライアンスの結果・ルールの閲覧 | ✓ | ✓ | ✓ |
 | Ping監視の利用 | ✓ | ✓ | ✓ |
+| 変更通知（自分の通知設定） | ✓ | ✓ | ✓ |
 | 収集の実行 | | ✓ | ✓ |
 | SSHターミナル | | ✓ | ✓ |
 | 構成図の作成・編集・削除 | | ✓ | ✓ |
@@ -273,7 +293,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 | Ping監視の対象 IP の追加・編集・削除 | | ✓ | ✓ |
 | デバイス登録・編集・削除 | | | ✓ |
 | スケジュール編集 | | | ✓ |
-| ユーザー管理 | | | ✓ |
+| ユーザー管理・ユーザーグループ（変更通知のチーム）の管理 | | | ✓ |
 | 監査ログの閲覧 | | | ✓ |
 
 - 割り当ては `backend/app/core/permissions.py` の `ROLE_PERMISSIONS` だけで定義しています。変更する場合はここを編集してください（画面の表示も `/api/auth/me` が返す権限に従って自動で切り替わります）
@@ -394,6 +414,7 @@ netconfig-manager/
 │       │   ├── topology.py      # TopologyMap（構成図）
 │       │   ├── compliance.py    # ComplianceRule / ComplianceResult
 │       │   ├── audit.py         # AuditLog（操作履歴）/ TerminalSession（ターミナルの記録）
+│       │   ├── notification.py  # UserGroup / UserGroupMember / NotificationSetting（変更通知）
 │       │   ├── ping.py          # PingTarget（Ping監視で追加した IP）
 │       │   └── user.py          # User
 │       ├── api/
@@ -409,12 +430,14 @@ netconfig-manager/
 │       │   ├── topology.py      # 構成図 CRUD・機器の収集状態
 │       │   ├── compliance.py    # コンプライアンスのルール・結果・テンプレート
 │       │   ├── audit.py         # 監査ログの閲覧（管理者のみ）
+│       │   ├── notifications.py # 通知設定（自分）・ユーザーグループ・通知先の確認
 │       │   ├── ping.py          # Ping監視の対象 CRUD・WebSocket で結果を配信
 │       │   └── schedules.py     # スケジュール CRUD
 │       └── services/
 │           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
 │           ├── compliance.py    # コンプライアンスの評価エンジン
 │           ├── audit.py         # 操作履歴の記録・ターミナルの記録（asciicast）・保持期間
+│           ├── notify.py        # 変更通知の宛先の決定・Discord / Slack への送信
 │           ├── ping.py          # ICMP 送信（icmplib）・名前解決・一定間隔の実行
 │           └── connection.py    # 接続情報（踏み台含む）の読み出し
 └── frontend/
@@ -444,6 +467,7 @@ netconfig-manager/
             ├── CompliancePage.tsx # コンプライアンス
             ├── AuditPage.tsx    # 監査ログ（操作履歴・ターミナルの記録の再生）
             ├── PingPage.tsx     # Ping監視（deadman 風）
+            ├── NotificationsPage.tsx # 通知設定（自分・ユーザーグループ）
             └── UsersPage.tsx    # ユーザー管理
 ```
 
@@ -452,7 +476,7 @@ netconfig-manager/
 ## 今後の拡張ポイント
 
 - **認証強化**: LDAP/AD 連携、MFA、機器グループ単位の権限
-- **通知機能**: コンフィグ変更検知・コンプライアンス違反時の Slack / メール通知
+- **通知機能の拡張**: コンプライアンス違反・収集失敗の通知、メール・Microsoft Teams への通知
 - **バックアップ**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push
 - **パスワード管理**: HashiCorp Vault 連携
 - **踏み台の多段化**: 2段以上の踏み台経由（現在は1段まで）

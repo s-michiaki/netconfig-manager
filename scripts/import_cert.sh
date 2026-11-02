@@ -231,6 +231,21 @@ if sudo test -f "$INSTALL_DIR/.env"; then
   fi
 fi
 
+# 通知のリンク先（PUBLIC_URL）が未設定、または http のままなら HTTPS の URL にする
+PUBLIC_URL_CHANGED=0
+if sudo test -f "$INSTALL_DIR/.env"; then
+  if [ "$HTTPS_PORT" = "443" ]; then NEW_URL="https://${IPADD}"; else NEW_URL="https://${IPADD}:${HTTPS_PORT}"; fi
+  CUR_URL=$(sudo sed -n 's/^PUBLIC_URL=//p' "$INSTALL_DIR/.env" | tail -1)
+  if [ -z "$CUR_URL" ] || [[ "$CUR_URL" == http://* ]]; then
+    if sudo grep -q '^PUBLIC_URL=' "$INSTALL_DIR/.env"; then
+      sudo sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=${NEW_URL}|" "$INSTALL_DIR/.env"
+    else
+      echo "PUBLIC_URL=${NEW_URL}" | sudo tee -a "$INSTALL_DIR/.env" >/dev/null
+    fi
+    PUBLIC_URL_CHANGED=1
+  fi
+fi
+
 # =========================
 # firewalld ポート開放
 # =========================
@@ -261,13 +276,15 @@ if [ -n "$FRONT" ]; then
     CAN_RESTART=1
   fi
 fi
+# PUBLIC_URL を変えた場合は backend・worker に反映するためコンテナを作り直す（再起動では .env を読み直さない）
+[ "$PUBLIC_URL_CHANGED" -eq 1 ] && CAN_RESTART=0
 
 if [ "$CAN_RESTART" -eq 1 ]; then
   echo "[INFO] Restarting $FRONT ..."
   sudo podman restart "$FRONT" >/dev/null
 else
   # HTTPS 対応前の構成で動いている・ポートを変えた場合は、コンテナを作り直す必要がある
-  echo "[INFO] コンテナの作り直しが必要です（HTTPS 対応前の構成、または HTTPS_PORT の変更）"
+  echo "[INFO] コンテナの作り直しが必要です（HTTPS 対応前の構成、HTTPS_PORT・PUBLIC_URL の変更）"
   echo "[INFO] Recreating containers..."
   # setup.sh と同じ手順（ボリューム＝DB・コンフィグ履歴は保持される）
   (cd "$INSTALL_DIR" && sudo podman-compose -f "$COMPOSE_FILE" build \

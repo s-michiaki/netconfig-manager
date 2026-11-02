@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, StringConstraints
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Role
 from app.core.security import hash_password
+from app.models.notification import NotificationSetting, UserGroupMember
 from app.models.user import User
 from app.services.audit import Audit, get_audit
 
@@ -176,6 +177,11 @@ async def delete_user(
         raise HTTPException(status_code=400, detail="自分自身は削除できません")
     if user.role == Role.ADMIN.value and user.is_active and not await _other_active_admins(db, user.id):
         raise HTTPException(status_code=400, detail="有効な管理者が1人もいなくなるため削除できません")
+    # 所属するユーザーグループ・個人の通知設定も消す（SQLite では外部キーの CASCADE が効かないため明示的に）
+    await db.execute(delete(UserGroupMember).where(UserGroupMember.user_id == user.id))
+    await db.execute(delete(NotificationSetting).where(
+        NotificationSetting.owner_type == "user", NotificationSetting.owner_id == user.id
+    ))
     await db.delete(user)
     audit("user.delete", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()

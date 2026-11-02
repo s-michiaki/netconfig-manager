@@ -56,6 +56,11 @@ ACTIONS = {
     "ping.target_create": "Ping対象の追加",
     "ping.target_update": "Ping対象の変更",
     "ping.target_delete": "Ping対象の削除",
+    "notify.update": "通知設定の変更",
+    "notify.test": "テスト通知",
+    "user_group.create": "ユーザーグループ作成",
+    "user_group.update": "ユーザーグループ変更",
+    "user_group.delete": "ユーザーグループ削除",
     "audit.view_recording": "ターミナル記録の閲覧",
 }
 

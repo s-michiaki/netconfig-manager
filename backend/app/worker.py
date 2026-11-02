@@ -4,6 +4,7 @@ Celeryワーカー定義
 - collect_all_devices: 全デバイスの一括収集タスク
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
+- send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 収集に成功したら、その機器のコンプライアンスチェックも行う
 """
 import asyncio
@@ -29,6 +30,7 @@ from app.services.config_service import (
 )
 from app.services.audit import purge_old
 from app.services.compliance import run_checks
+from app.services.notify import notify_change
 from app.services.connection import load_connection_info
 
 logger = logging.getLogger(__name__)
@@ -132,6 +134,9 @@ def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
                 _run_async(_check_compliance(device_id))
             except Exception:  # noqa: BLE001 - 検査の失敗で収集を失敗扱いにしない
                 logger.exception("コンプライアンスチェックに失敗しました device=%s", device_id)
+        if result.success and result.commit_hash and not result.first:
+            # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
+            send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by)
     finally:
         try:
             lock.release()
@@ -143,6 +148,19 @@ def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
         raise self.retry(exc=RuntimeError(result.error))
 
     return result.as_dict()
+
+
+@celery_app.task
+def send_change_notification(device_id: str, commit_hash: str, added: int, removed: int, triggered_by: str):
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_change(db, device_id, commit_hash, added, removed, triggered_by)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
+        logger.exception("変更通知に失敗しました device=%s", device_id)
+        return {"error": True}
 
 
 async def _check_compliance(device_id: str) -> None:

@@ -668,3 +668,25 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 
 /* ===== 機器登録: プラットフォームの注意事項 ===== */
 .platform-note { font-size: 12px; color: var(--color-muted); background: var(--color-surface2); border-radius: var(--radius-sm); padding: 8px 10px; margin: -4px 0 12px; line-height: 1.6; }
+
+/* ===== 通知設定 ===== */
+.ntf-card { max-width: 860px; }
+.ntf-lead { font-size: 13px; margin-bottom: 12px; line-height: 1.6; }
+.ntf-muted { font-size: 12px; color: var(--color-muted); line-height: 1.6; }
+.ntf-ok { font-size: 12px; color: var(--color-success); margin-top: 8px; }
+.ntf-modes { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ntf-mode { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--color-border); border-radius: var(--radius); cursor: pointer; font-size: 13px; }
+.ntf-mode input { width: auto; }
+.ntf-mode.active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+.ntf-section { border-top: 1px solid var(--color-border); padding-top: 14px; margin-top: 4px; }
+.ntf-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 6px 12px; margin-top: 8px; padding: 8px 10px; background: var(--color-surface2); border-radius: var(--radius-sm); }
+.ntf-members { max-height: 160px; overflow-y: auto; }
+.ntf-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--color-muted); }
+.ntf-test { font-size: 12px; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.ntf-toolbar { display: flex; align-items: center; gap: 16px; justify-content: space-between; margin-bottom: 12px; }
+.ntf-group-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); gap: 12px; }
+.ntf-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ntf-group-head > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ntf-group-head .btn, .ntf-group-head .badge { white-space: nowrap; flex-shrink: 0; }
+.ntf-kv { display: grid; grid-template-columns: 70px 1fr; gap: 4px 10px; font-size: 12px; margin-top: 6px; }
+.ntf-kv dt { color: var(--color-muted); }
