@@ -37,7 +37,7 @@ def test_device_crud_and_encryption(client, auth):
     assert r.status_code == 200 and r.json()["has_enable_secret"]
     # DBには暗号化されて保存されている
     import sqlite3
-    raw = sqlite3.connect(f"{TMP}/t.db").execute("select password, enable_secret from devices").fetchone()
+    raw = sqlite3.connect(f"{TMP}/t.db").execute("select password, enable_secret from devices where id=?", (d["id"],)).fetchone()
     assert raw[0].startswith("enc:") and raw[1].startswith("enc:")
     r = client.put(f"/api/devices/{d['id']}", json={"clear_enable_secret": True}, headers=auth)
     assert r.json()["has_enable_secret"] is False

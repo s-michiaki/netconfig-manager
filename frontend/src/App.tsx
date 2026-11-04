@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
+import ActivityPage from "./pages/ActivityPage";
 import AuditPage from "./pages/AuditPage";
 import CollectPage from "./pages/CollectPage";
 import CompliancePage from "./pages/CompliancePage";
@@ -27,6 +28,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
   { path: "/compliance", label: "コンプライアンス", icon: "✔", perm: PERM.COMPLIANCE_READ },
   { path: "/notifications", label: "通知設定", icon: "🔔", perm: PERM.NOTIFY_SELF },
+  { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
   { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
   { path: "/users", label: "ユーザー管理", icon: "👥", perm: PERM.USER_ADMIN },
 ];
@@ -122,7 +124,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.9.0 · RHEL 10</span>
+          <span className="version-tag">v1.10.0 · RHEL 10</span>
         </div>
       </aside>
 
@@ -141,6 +143,7 @@ function Layout() {
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
           <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />
           <Route path="/notifications" element={<RequirePerm perm={PERM.NOTIFY_SELF}><NotificationsPage /></RequirePerm>} />
+          <Route path="/activity" element={<RequirePerm perm={PERM.ACTIVITY_READ}><ActivityPage /></RequirePerm>} />
           <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
           <Route path="*" element={<Navigate to="/devices" replace />} />

@@ -18,8 +18,10 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.timeutil import utcnow
+from app.models.activity import ActivityLog
 from app.models.audit import AuditLog, TerminalSession
 from app.models.user import User
+from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +240,9 @@ def recording_path(session: TerminalSession) -> Path | None:
 
 
 async def purge_old(db: AsyncSession, now: datetime | None = None) -> dict:
-    """保持期間を過ぎた操作履歴・ターミナル記録を削除する（worker から毎日実行）"""
+    """保持期間を過ぎた操作履歴・ターミナル記録・アクティビティログを削除する（worker から毎日実行）"""
     now = now or utcnow()
-    result = {"audit_logs": 0, "terminal_sessions": 0}
+    result = {"audit_logs": 0, "terminal_sessions": 0, "activity_logs": 0}
     if settings.AUDIT_LOG_RETENTION_DAYS:
         cutoff = now - timedelta(days=settings.AUDIT_LOG_RETENTION_DAYS)
         r = await db.execute(delete(AuditLog).where(AuditLog.at < cutoff))
@@ -257,5 +259,16 @@ async def purge_old(db: AsyncSession, now: datetime | None = None) -> dict:
                     logger.warning("ターミナル記録を削除できません (%s): %s", p, e)
             await db.delete(s)
         result["terminal_sessions"] = len(old)
+    if settings.ACTIVITY_LOG_RETENTION_DAYS:
+        cutoff = now - timedelta(days=settings.ACTIVITY_LOG_RETENTION_DAYS)
+        r = await db.execute(delete(ActivityLog).where(ActivityLog.at < cutoff))
+        result["activity_logs"] = r.rowcount or 0
+    if any(result.values()):
+        record_activity(
+            db, "system.purge",
+            f"保持期間を過ぎたログを削除しました（操作履歴 {result['audit_logs']} 件・ターミナル記録 "
+            f"{result['terminal_sessions']} 件・アクティビティ {result['activity_logs']} 件）",
+            detail=result,
+        )
     await db.commit()
     return result

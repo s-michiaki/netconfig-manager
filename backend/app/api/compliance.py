@@ -215,7 +215,7 @@ async def create_rule(
           detail=_rule_detail(payload))
     await _commit_or_409(db)
     # 作成したルールで全機器を検査する
-    await run_checks(db, rule_ids=[r.id])
+    await run_checks(db, rule_ids=[r.id], actor=user.username)
     await db.commit()
     await db.refresh(r)
     return _rule_out(r, await _rule_counts(db))
@@ -234,7 +234,7 @@ async def update_rule(
     audit("compliance.rule_update", target_type="compliance_rule", target_id=r.id, target_name=r.name,
           detail=_rule_detail(payload))
     await _commit_or_409(db)
-    await run_checks(db, rule_ids=[r.id])
+    await run_checks(db, rule_ids=[r.id], actor=user.username)
     await db.commit()
     await db.refresh(r)
     return _rule_out(r, await _rule_counts(db))
@@ -277,7 +277,7 @@ async def test_rule(payload: RuleTest, db: AsyncSession = Depends(get_db)):
 @router.post("/run", dependencies=[Depends(require(Perm.COMPLIANCE_WRITE))])
 async def run_all(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """全機器 × 全ルールを再検査する"""
-    result = await run_checks(db)
+    result = await run_checks(db, actor=audit.user.username)
     audit("compliance.run", detail=result)
     await db.commit()
     return result

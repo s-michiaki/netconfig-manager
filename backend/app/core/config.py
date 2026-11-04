@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # 保持日数（0 なら削除しない）。毎日1回、古いものを削除する
     AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
     TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)
+    # アクティビティログ（収集の結果など）の保持日数。スケジュール収集の「変更なし」で件数が増えやすいため短め
+    ACTIVITY_LOG_RETENTION_DAYS: int = Field(default=90, ge=0)
+    # 収集で変更が無かったときも記録するか（False なら変更あり・失敗などだけ記録）
+    ACTIVITY_LOG_UNCHANGED: bool = True
 
     # --- Ping監視 ---
     PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）

@@ -5,10 +5,12 @@ Celeryワーカー定義
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
-収集に成功したら、その機器のコンプライアンスチェックも行う
+収集に成功したら、その機器のコンプライアンスチェックも行う。
+収集の結果・スケジュールの実行などはアクティビティログに記録する（ref で同じ実行の記録をまとめる）
 """
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
@@ -28,6 +30,7 @@ from app.services.config_service import (
     DeviceConnectionInfo,
     collect_config_sync,
 )
+from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import run_checks
 from app.services.notify import notify_change
@@ -88,7 +91,18 @@ async def _get_device(device_id: str) -> DeviceConnectionInfo | None:
         return await load_connection_info(db, device_id)
 
 
-async def _save_result(device_id: str, result: CollectResult, started_at: datetime, triggered_by: str):
+def _actor(triggered_by: str, actor: str | None) -> str:
+    """アクティビティログの「きっかけ」（手動ならユーザー名、スケジュールならスケジュール名）"""
+    if actor:
+        return actor
+    return "スケジュール" if triggered_by == "schedule" else SYSTEM_ACTOR
+
+
+async def _save_result(
+    device: DeviceConnectionInfo, result: CollectResult, started_at: datetime, triggered_by: str,
+    actor: str, ref: str | None, will_retry: bool = False, attempt: int = 0,
+):
+    device_id = device.id
     async with _sessionmaker()() as db:
         db.add(
             CollectLog(
@@ -109,17 +123,55 @@ async def _save_result(device_id: str, result: CollectResult, started_at: dateti
                     triggered_by=triggered_by,
                 )
             )
+        kw = dict(device_id=device_id, device_name=device.name, actor=actor, ref=ref)
+        seconds = round((utcnow() - started_at).total_seconds(), 1)
+        if not result.success:
+            if will_retry:
+                record(db, "collect.failed", f"収集に失敗しました（{attempt + 1}回目。1分後に再試行します）: {result.error}",
+                       level="warning", detail={"error": result.error, "seconds": seconds}, **kw)
+            else:
+                record(db, "collect.failed", f"収集に失敗しました: {result.error}",
+                       detail={"error": result.error, "attempt": attempt + 1, "seconds": seconds}, **kw)
+        elif result.commit_hash and result.first:
+            record(db, "collect.first", f"初めてコンフィグを取得しました（{result.added} 行）",
+                   detail={"commit": result.commit_hash, "lines": result.added, "seconds": seconds}, **kw)
+        elif result.commit_hash:
+            record(db, "collect.changed", f"コンフィグの変更を検出しました（+{result.added} / -{result.removed} 行）",
+                   detail={"commit": result.commit_hash, "added": result.added, "removed": result.removed,
+                           "seconds": seconds}, **kw)
+        elif settings.ACTIVITY_LOG_UNCHANGED:
+            record(db, "collect.unchanged", "変更はありませんでした", detail={"seconds": seconds}, **kw)
+        await db.commit()
+
+
+async def _record(event: str, message: str, **kw) -> None:
+    async with _sessionmaker()() as db:
+        record(db, event, message, **kw)
         await db.commit()
 
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=60)
-def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
-    """単一デバイスのコンフィグを収集する"""
+def collect_device_config(
+    self, device_id: str, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None
+):
+    """単一デバイスのコンフィグを収集する
+
+    actor: アクティビティログに残すきっかけ（手動ならユーザー名、スケジュールなら名前）
+    ref: 同じ実行の記録をまとめる ID（一括収集・スケジュールでは親の ID、省略時はこのタスクの ID）
+    """
     started_at = utcnow()
+    actor = _actor(triggered_by, actor)
+    ref = ref or self.request.id
 
     # 同じ機器の収集が重なると git の index.lock が競合するため、機器単位でロックする
     lock = _redis().lock(f"netconfig:collect:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
     if not lock.acquire(blocking=False):
+        try:
+            _run_async(_record("collect.skipped", "同じ機器の収集が実行中のため、スキップしました",
+                               device_id=device_id, device_name=_run_async(_device_name(device_id)),
+                               actor=actor, ref=ref))
+        except Exception:  # noqa: BLE001 - 記録の失敗で処理を止めない
+            logger.exception("アクティビティログの記録に失敗しました")
         return {"success": False, "skipped": True, "error": "同じデバイスの収集が実行中です"}
 
     try:
@@ -128,33 +180,43 @@ def collect_device_config(self, device_id: str, triggered_by: str = "manual"):
             return {"success": False, "error": f"Device {device_id} not found"}
 
         result = collect_config_sync(device, triggered_by)
-        _run_async(_save_result(device_id, result, started_at, triggered_by))
+        # 認証失敗などはリトライしても結果が変わらないので、一時的な失敗のみリトライする
+        will_retry = not result.success and result.retryable and self.request.retries < self.max_retries
+        _run_async(_save_result(device, result, started_at, triggered_by, actor, ref,
+                                will_retry=will_retry, attempt=self.request.retries or 0))
         if result.success:
             try:
-                _run_async(_check_compliance(device_id))
+                _run_async(_check_compliance(device_id, actor, ref))
             except Exception:  # noqa: BLE001 - 検査の失敗で収集を失敗扱いにしない
                 logger.exception("コンプライアンスチェックに失敗しました device=%s", device_id)
         if result.success and result.commit_hash and not result.first:
             # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
-            send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by)
+            send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
+                                           ref)
     finally:
         try:
             lock.release()
         except redis.exceptions.LockError:
             pass
 
-    # 認証失敗などはリトライしても結果が変わらないので、一時的な失敗のみリトライする
-    if not result.success and result.retryable and self.request.retries < self.max_retries:
+    if will_retry:
         raise self.retry(exc=RuntimeError(result.error))
 
     return result.as_dict()
 
 
+async def _device_name(device_id: str) -> str | None:
+    async with _sessionmaker()() as db:
+        d = await db.get(Device, device_id)
+        return d.name if d else None
+
+
 @celery_app.task
-def send_change_notification(device_id: str, commit_hash: str, added: int, removed: int, triggered_by: str):
+def send_change_notification(device_id: str, commit_hash: str, added: int, removed: int, triggered_by: str,
+                             ref: str | None = None):
     async def run():
         async with _sessionmaker()() as db:
-            return await notify_change(db, device_id, commit_hash, added, removed, triggered_by)
+            return await notify_change(db, device_id, commit_hash, added, removed, triggered_by, ref=ref)
 
     try:
         return _run_async(run())
@@ -163,9 +225,9 @@ def send_change_notification(device_id: str, commit_hash: str, added: int, remov
         return {"error": True}
 
 
-async def _check_compliance(device_id: str) -> None:
+async def _check_compliance(device_id: str, actor: str | None = None, ref: str | None = None) -> None:
     async with _sessionmaker()() as db:
-        await run_checks(db, device_ids=[device_id])
+        await run_checks(db, device_ids=[device_id], actor=actor, ref=ref)
         await db.commit()
 
 
@@ -189,20 +251,23 @@ async def _active_device_ids() -> list[str]:
         return list(result.scalars().all())
 
 
-@celery_app.task
-def collect_all_devices(triggered_by: str = "manual"):
-    """全デバイスのコンフィグを一括収集する"""
-    task_ids = [
-        collect_device_config.delay(device_id, triggered_by).id
-        for device_id in _run_async(_active_device_ids())
-    ]
+@celery_app.task(bind=True)
+def collect_all_devices(self, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None):
+    """全デバイスのコンフィグを一括収集する（各機器の記録はこのタスクの ID でまとめる）"""
+    actor = _actor(triggered_by, actor)
+    ref = ref or self.request.id
+    device_ids = _run_async(_active_device_ids())
+    task_ids = [collect_device_config.delay(device_id, triggered_by, actor, ref).id for device_id in device_ids]
+    if triggered_by != "schedule":  # スケジュールは schedule.run で記録済み
+        _run_async(_record("collect.batch", f"有効な機器 {len(task_ids)} 台の収集を開始しました",
+                           detail={"devices": len(task_ids)}, actor=actor, ref=ref))
     return {"success": True, "dispatched": len(task_ids), "task_ids": task_ids}
 
 
-async def _active_schedules() -> list[tuple[str, str, str]]:
+async def _active_schedules() -> list[tuple[str, str, str, str]]:
     async with _sessionmaker()() as db:
         result = await db.execute(select(Schedule).where(Schedule.is_active.is_(True)))
-        return [(s.id, s.cron_expression, s.target) for s in result.scalars().all()]
+        return [(s.id, s.cron_expression, s.target, s.name) for s in result.scalars().all()]
 
 
 def is_due(cron_expression: str, now: datetime) -> datetime | None:
@@ -220,11 +285,15 @@ def dispatch_due_schedules():
 
 def dispatch_schedules_at(now: datetime) -> dict:
     dispatched = []
-    for schedule_id, cron_expression, target in _run_async(_active_schedules()):
+    for schedule_id, cron_expression, target, name in _run_async(_active_schedules()):
         try:
             fire_at = is_due(cron_expression, now)
         except (ValueError, KeyError):
             logger.error("不正なCron式のためスキップ: schedule=%s expr=%r", schedule_id, cron_expression)
+            # 毎分呼ばれるため、記録は1時間に1回まで
+            if _redis().set(f"netconfig:schedule-invalid:{schedule_id}", "1", nx=True, ex=3600):
+                _run_async(_record("schedule.invalid", f"スケジュール「{name}」の Cron 式が不正なため実行できません",
+                                   detail={"cron": cron_expression}, actor=f"スケジュール「{name}」"))
             continue
         if fire_at is None:
             continue
@@ -232,10 +301,18 @@ def dispatch_schedules_at(now: datetime) -> dict:
         key = f"netconfig:schedule-fired:{schedule_id}:{int(fire_at.timestamp())}"
         if not _redis().set(key, "1", nx=True, ex=int(SCHEDULE_WINDOW.total_seconds()) * 2):
             continue
+        actor = f"スケジュール「{name}」"
+        ref = str(uuid.uuid4())
         if target == "all":
-            collect_all_devices.delay("schedule")
+            collect_all_devices.delay("schedule", actor, ref)
+            device_name, msg = None, "全機器の収集を開始しました"
         else:
-            collect_device_config.delay(target, "schedule")
+            collect_device_config.delay(target, "schedule", actor, ref)
+            device_name = _run_async(_device_name(target))
+            msg = "収集を開始しました"
+        _run_async(_record("schedule.run", f"スケジュール「{name}」: {msg}",
+                           device_id=None if target == "all" else target, device_name=device_name,
+                           detail={"cron": cron_expression, "target": target}, actor=actor, ref=ref))
         dispatched.append(schedule_id)
         logger.info("スケジュール実行: %s (target=%s)", schedule_id, target)
     return {"dispatched": dispatched}

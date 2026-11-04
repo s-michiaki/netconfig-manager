@@ -245,8 +245,9 @@ async def list_platforms():
 @router.post("/collect/all", dependencies=[Depends(require(Perm.COLLECT))])
 async def trigger_collect_all(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """全デバイスのコンフィグ収集をトリガー"""
-    task = collect_all_devices.delay("manual")
-    audit("collect.run", target_type="device", target_name="全機器")
+    task = collect_all_devices.delay("manual", audit.user.username)
+    # task_id で、アクティビティログの収集結果（各機器）とつながる
+    audit("collect.run", target_type="device", target_name="全機器", detail={"task_id": task.id})
     await db.commit()
     return {"task_id": task.id, "status": "queued"}
 
@@ -319,7 +320,8 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
 async def trigger_collect(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """単一デバイスのコンフィグ収集をトリガー"""
     device = await _get_or_404(db, device_id)
-    task = collect_device_config.delay(device_id, "manual")
-    audit("collect.run", target_type="device", target_id=device.id, target_name=device.name)
+    task = collect_device_config.delay(device_id, "manual", audit.user.username)
+    audit("collect.run", target_type="device", target_id=device.id, target_name=device.name,
+          detail={"task_id": task.id})
     await db.commit()
     return {"task_id": task.id, "status": "queued"}

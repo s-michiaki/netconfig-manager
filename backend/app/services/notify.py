@@ -30,6 +30,7 @@ from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
+from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ def _retry_after(e: urllib.error.HTTPError) -> float:
 
 
 async def notify_change(db: AsyncSession, device_id: str, commit_hash: str, added: int, removed: int,
-                        triggered_by: str) -> dict:
+                        triggered_by: str, ref: str | None = None) -> dict:
     """コンフィグ変更を通知する（worker から呼ぶ）。結果は通知設定の last_sent_at / last_error に残す"""
     device = await db.get(Device, device_id)
     if device is None:
@@ -230,6 +231,16 @@ async def notify_change(db: AsyncSession, device_id: str, commit_hash: str, adde
                 errors.setdefault(sid, [])
         if err:
             logger.warning("変更通知の送信に失敗 device=%s %s: %s", device.name, d.kind, err)
+        # 送信先の URL（秘密）は残さず、種類と誰の設定かだけ記録する
+        via = "・".join(sorted(d.via))
+        if err:
+            record_activity(db, "notify.failed", f"{KIND_LABELS[d.kind]} への変更通知に失敗しました（{via}）: {err}",
+                            device_id=device.id, device_name=device.name,
+                            detail={"kind": d.kind, "via": sorted(d.via), "error": err}, ref=ref)
+        else:
+            record_activity(db, "notify.sent", f"{KIND_LABELS[d.kind]} へ変更を通知しました（{via}）",
+                            device_id=device.id, device_name=device.name,
+                            detail={"kind": d.kind, "via": sorted(d.via)}, ref=ref)
     for sid, errs in errors.items():
         s = await db.get(NotificationSetting, sid)
         if s is not None:
