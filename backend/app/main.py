@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 
 from app.api import (
+    activity,
     audit,
     auth,
     compliance,
@@ -78,7 +79,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.9.0",
+    version="1.10.0",
     lifespan=lifespan,
 )
 
@@ -106,6 +107,7 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependenci
 app.include_router(topology.router, prefix="/api/topology", tags=["topology"], dependencies=protected)
 app.include_router(compliance.router, prefix="/api/compliance", tags=["compliance"], dependencies=protected)
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependencies=protected)
+app.include_router(activity.router, prefix="/api/activity", tags=["activity"], dependencies=protected)
 app.include_router(ping.router, prefix="/api/ping", tags=["ping"], dependencies=protected)
 app.include_router(
     notifications.router, prefix="/api/notifications", tags=["notifications"], dependencies=protected

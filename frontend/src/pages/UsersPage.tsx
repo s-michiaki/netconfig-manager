@@ -29,6 +29,7 @@ const PERM_LABELS: Record<string, string> = {
   "ping:use": "Ping監視の利用",
   "ping:write": "Ping監視の対象IPの追加・編集",
   "notify:self": "変更通知（自分の設定）",
+  "activity:read": "アクティビティの閲覧",
 };
 
 function UserModal({

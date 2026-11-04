@@ -263,6 +263,23 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - サーバーから Discord・Slack（インターネット）へ HTTPS で接続できる必要があります
 - 設定の変更・テスト通知・ユーザーグループの変更は監査ログに残ります
 
+## アクティビティ（システムで起きたことの記録）
+
+「アクティビティ」画面で、システムで起きた出来事を確認できます（閲覧者以上）。利用者の操作は「監査ログ」、処理の結果・出来事はこちら、と分けています。
+
+| 種類 | 記録する出来事 |
+|---|---|
+| 収集 | 変更あり（+n / -n 行・世代）／変更なし／初回取得／失敗（再試行する場合は警告、最終的な失敗はエラー）／実行中のためスキップ／一括収集の開始 |
+| スケジュール | スケジュールの実行（対象）、Cron 式が不正で実行できないとき（1時間に1回まで） |
+| コンプライアンス | 違反の発生・解消（機器・ルール・重要度・該当箇所）。ルールの追加などで一度に 30 件を超えて変わったときは1件にまとめる |
+| 通知 | 変更通知の送信・失敗（送信先の種類と誰の設定か。URL は残さない） |
+| システム | 保持期間を過ぎたログの削除 |
+
+- 「きっかけ」には、手動の収集なら実行したユーザー名、スケジュールなら「スケジュール「名前」」、自動処理なら「システム」を記録します
+- 種類・重要度（情報・警告・エラー）・機器・キーワード・期間で絞り込めます。行をクリックすると詳細（世代へのリンク・違反箇所など）を表示します
+- 監査ログの「収集の実行」の行にある「収集の結果を見る」から、その実行の結果（各機器の収集・違反・通知）だけを表示できます（一括収集・スケジュールは配下の機器の記録をまとめて表示）
+- 保持期間は `.env` の `ACTIVITY_LOG_RETENTION_DAYS`（既定 90 日、0 で無期限）。スケジュール収集の「変更なし」で件数が増えるため、不要なら `ACTIVITY_LOG_UNCHANGED=false` で記録しないようにできます
+
 ## 監査ログ
 
 管理者は「監査ログ」画面で、誰が・いつ・何をしたかを確認できます。
@@ -286,6 +303,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 | コンプライアンスの結果・ルールの閲覧 | ✓ | ✓ | ✓ |
 | Ping監視の利用 | ✓ | ✓ | ✓ |
 | 変更通知（自分の通知設定） | ✓ | ✓ | ✓ |
+| アクティビティ（収集の結果・違反の発生など）の閲覧 | ✓ | ✓ | ✓ |
 | 収集の実行 | | ✓ | ✓ |
 | SSHターミナル | | ✓ | ✓ |
 | 構成図の作成・編集・削除 | | ✓ | ✓ |
@@ -413,6 +431,7 @@ netconfig-manager/
 │       │   ├── device.py        # Device / DeviceGroup / JumpHost / ConfigSnapshot / CollectLog / Schedule
 │       │   ├── topology.py      # TopologyMap（構成図）
 │       │   ├── compliance.py    # ComplianceRule / ComplianceResult
+│       │   ├── activity.py      # ActivityLog（システムで起きたこと）
 │       │   ├── audit.py         # AuditLog（操作履歴）/ TerminalSession（ターミナルの記録）
 │       │   ├── notification.py  # UserGroup / UserGroupMember / NotificationSetting（変更通知）
 │       │   ├── ping.py          # PingTarget（Ping監視で追加した IP）
@@ -429,6 +448,7 @@ netconfig-manager/
 │       │   ├── terminal.py      # WebSocket SSH ターミナル
 │       │   ├── topology.py      # 構成図 CRUD・機器の収集状態
 │       │   ├── compliance.py    # コンプライアンスのルール・結果・テンプレート
+│       │   ├── activity.py      # アクティビティログの閲覧
 │       │   ├── audit.py         # 監査ログの閲覧（管理者のみ）
 │       │   ├── notifications.py # 通知設定（自分）・ユーザーグループ・通知先の確認
 │       │   ├── ping.py          # Ping監視の対象 CRUD・WebSocket で結果を配信
@@ -436,6 +456,7 @@ netconfig-manager/
 │       └── services/
 │           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
 │           ├── compliance.py    # コンプライアンスの評価エンジン
+│           ├── activity.py      # アクティビティログの記録とイベントの一覧
 │           ├── audit.py         # 操作履歴の記録・ターミナルの記録（asciicast）・保持期間
 │           ├── notify.py        # 変更通知の宛先の決定・Discord / Slack への送信
 │           ├── ping.py          # ICMP 送信（icmplib）・名前解決・一定間隔の実行
@@ -465,6 +486,7 @@ netconfig-manager/
             ├── SchedulePage.tsx # スケジュール
             ├── TopologyPage.tsx # 構成図
             ├── CompliancePage.tsx # コンプライアンス
+            ├── ActivityPage.tsx # アクティビティ（システムで起きたこと）
             ├── AuditPage.tsx    # 監査ログ（操作履歴・ターミナルの記録の再生）
             ├── PingPage.tsx     # Ping監視（deadman 風）
             ├── NotificationsPage.tsx # 通知設定（自分・ユーザーグループ）

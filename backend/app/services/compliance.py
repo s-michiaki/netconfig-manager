@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceResult, ComplianceRule
 from app.models.device import Device
+from app.services.activity import record as record_activity
 from app.services.config_service import CONFIG_FILENAME, repo_path
 
 logger = logging.getLogger(__name__)
@@ -189,10 +190,13 @@ async def run_checks(
     device_ids: Iterable[str] | None = None,
     rule_ids: Iterable[str] | None = None,
     load_config: Callable[[str], tuple[str, str | None] | None] = latest_config,
+    actor: str | None = None,
+    ref: str | None = None,
 ) -> dict:
     """指定した機器（省略時は全機器）× ルール（省略時は全ルール）を検査し、結果を置き換える
 
-    無効なルール・対象外のプラットフォームの結果は削除する。commit は呼び出し側で行う
+    無効なルール・対象外のプラットフォームの結果は削除する。commit は呼び出し側で行う。
+    違反の発生（pass → fail、または初めての fail）と解消（fail → pass）はアクティビティログに記録する
     """
     dq = select(Device)
     if device_ids is not None:
@@ -207,6 +211,12 @@ async def run_checks(
 
     dev_ids = [d.id for d in devices]
     rule_id_list = [r.id for r in rules]
+    previous = {
+        (r.device_id, r.rule_id): r.status
+        for r in (await db.execute(select(ComplianceResult).where(
+            ComplianceResult.device_id.in_(dev_ids), ComplianceResult.rule_id.in_(rule_id_list)
+        ))).scalars()
+    }
     await db.execute(
         delete(ComplianceResult).where(
             ComplianceResult.device_id.in_(dev_ids), ComplianceResult.rule_id.in_(rule_id_list)
@@ -215,6 +225,7 @@ async def run_checks(
     specs = {r.id: spec_of(r) for r in rules if r.enabled}
     now = utcnow()
     checked = 0
+    transitions: list[tuple] = []
     for d in devices:
         targets = [(rid, s) for rid, s in specs.items() if applies_to(s, d.platform)]
         if not targets:
@@ -225,13 +236,48 @@ async def run_checks(
         text, commit = loaded
         for rid, s in targets:
             ev = evaluate(s, text)
+            before = previous.get((d.id, rid))
+            if ev.status == "fail" and before != "fail":
+                transitions.append(("violation", d, rid, ev.details))
+            elif ev.status == "pass" and before == "fail":
+                transitions.append(("resolved", d, rid, None))
             db.add(ComplianceResult(
                 device_id=d.id, rule_id=rid, status=ev.status,
                 detail=json.dumps(ev.details, ensure_ascii=False) if ev.details else None,
                 commit_hash=commit, checked_at=now,
             ))
             checked += 1
-    return {"devices": len(devices), "rules": len(rules), "checked": checked}
+    _record_transitions(db, transitions, {r.id: r for r in rules}, actor, ref)
+    return {"devices": len(devices), "rules": len(rules), "checked": checked,
+            "new_violations": sum(1 for t in transitions if t[0] == "violation"),
+            "resolved": sum(1 for t in transitions if t[0] == "resolved")}
+
+
+SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
+MAX_TRANSITION_RECORDS = 30  # これを超える変化（ルールの追加で多数の機器が違反になった等）はまとめて1件にする
+
+
+def _record_transitions(db: AsyncSession, transitions: list[tuple], rules: dict, actor: str | None, ref: str | None):
+    if not transitions:
+        return
+    if len(transitions) > MAX_TRANSITION_RECORDS:
+        n_v = sum(1 for t in transitions if t[0] == "violation")
+        n_r = len(transitions) - n_v
+        items = [f"{'違反' if k == 'violation' else '解消'}: {d.name} / {rules[rid].name}" for k, d, rid, _ in transitions]
+        record_activity(db, "compliance.summary", f"違反の発生 {n_v} 件・解消 {n_r} 件",
+                        level="warning" if n_v else "info", detail={"items": items[:100]}, actor=actor, ref=ref)
+        return
+    for kind, d, rid, details in transitions:
+        rule = rules[rid]
+        sev = SEVERITY_LABELS.get(rule.severity, rule.severity)
+        if kind == "violation":
+            record_activity(db, "compliance.violation", f"ルール「{rule.name}」（重要度 {sev}）に違反しています",
+                            device_id=d.id, device_name=d.name,
+                            detail={"rule": rule.name, "severity": rule.severity, "matches": (details or [])[:5]},
+                            actor=actor, ref=ref)
+        else:
+            record_activity(db, "compliance.resolved", f"ルール「{rule.name}」の違反が解消しました",
+                            device_id=d.id, device_name=d.name, detail={"rule": rule.name}, actor=actor, ref=ref)
 
 
 # ---------------------------------------------------------------- ルールのテンプレート

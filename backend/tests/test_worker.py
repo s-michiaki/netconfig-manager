@@ -43,7 +43,13 @@ def test_dispatch(r):
     with mock.patch.object(worker, "collect_all_devices") as all_:
         assert len(worker.dispatch_schedules_at(now)["dispatched"]) == 1
         assert worker.dispatch_schedules_at(now)["dispatched"] == []  # 同じ時刻は二重投入しない
-        all_.delay.assert_called_once_with("schedule")
+        all_.delay.assert_called_once()
+        args = all_.delay.call_args.args
+        assert args[0] == "schedule" and args[1] == "スケジュール「s」" and args[2]  # きっかけと、記録をまとめる ID
+    # スケジュールの実行はアクティビティログに残る
+    db = sqlite3.connect(f"{TMP}/t.db")
+    row = db.execute("select message, actor, ref from activity_logs where event='schedule.run' order by at desc").fetchone()
+    assert "スケジュール「s」" in row[0] and row[1] == "スケジュール「s」" and row[2] == args[2]
 
 async def _add_schedule(expr):
     from app.models import Schedule

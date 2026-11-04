@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 
 interface AuditLog {
@@ -94,11 +95,14 @@ function DetailText({ detail }: { detail: string | null }) {
   } catch {
     return <span>{detail}</span>;
   }
+  // 収集の実行は、アクティビティログの結果（task_id でつながる）へのリンクにする
+  const { task_id: taskId, ...rest } = obj;
   return (
     <span className="audit-detail">
-      {Object.entries(obj).map(([k, v]) => (
+      {Object.entries(rest).map(([k, v]) => (
         <span key={k}><span className="topo-muted">{FIELD_LABELS[k] ?? k}:</span> {fmtValue(v)}</span>
       ))}
+      {typeof taskId === "string" && <Link to={`/activity?ref=${encodeURIComponent(taskId)}`}>収集の結果を見る →</Link>}
     </span>
   );
 }
