@@ -288,6 +288,44 @@ echo "[INFO] Enabling auto start on boot..."
 sudo systemctl enable --now podman-restart.service
 
 # =========================
+# 定期バックアップ（DB・コンフィグ履歴・.env など。scripts/backup.sh を systemd タイマーで実行）
+# =========================
+# 実行時刻は .env の BACKUP_ON_CALENDAR（systemd の OnCalendar 形式、既定 毎日 03:15）。off で無効
+BACKUP_ON_CALENDAR=$( (grep -E '^BACKUP_ON_CALENDAR=' "$INSTALL_DIR/.env" 2>/dev/null || true) | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')
+BACKUP_ON_CALENDAR="${BACKUP_ON_CALENDAR:-*-*-* 03:15:00}"
+if [ "$BACKUP_ON_CALENDAR" = "off" ]; then
+  echo "[INFO] 定期バックアップは無効です（BACKUP_ON_CALENDAR=off）"
+  sudo systemctl disable --now netconfig-backup.timer 2>/dev/null || true
+elif ! systemd-analyze calendar "$BACKUP_ON_CALENDAR" >/dev/null 2>&1; then
+  echo "[WARN] BACKUP_ON_CALENDAR の形式が正しくありません（$BACKUP_ON_CALENDAR）。定期バックアップの設定をスキップします"
+else
+  echo "[INFO] Enabling scheduled backup ($BACKUP_ON_CALENDAR)..."
+  sudo tee /etc/systemd/system/netconfig-backup.service >/dev/null <<UNIT
+[Unit]
+Description=NetConfig Manager backup (DB / config history / .env)
+After=podman-restart.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $INSTALL_DIR/scripts/backup.sh
+UNIT
+  sudo tee /etc/systemd/system/netconfig-backup.timer >/dev/null <<UNIT
+[Unit]
+Description=NetConfig Manager scheduled backup
+
+[Timer]
+OnCalendar=$BACKUP_ON_CALENDAR
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+UNIT
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now netconfig-backup.timer
+fi
+
+# =========================
 # 起動確認（ヘルスチェック）
 # =========================
 echo "[INFO] Waiting for NetConfig Manager to become ready..."
@@ -338,6 +376,11 @@ fi
 echo "■ 設定ファイル（暗号化キーを含むため、サーバー外にも必ずバックアップ）"
 echo "$INSTALL_DIR/.env"
 echo "$ENV_BACKUP_DIR/env-$TS"
+echo ""
+echo "■ バックアップ（毎日自動。保存先は .env の BACKUP_DIR、既定 /var/backups/netconfig-manager）"
+echo "今すぐ実行: sudo bash $INSTALL_DIR/scripts/backup.sh  / 一覧: sudo bash $INSTALL_DIR/scripts/backup.sh --list"
+echo "次回の実行: systemctl list-timers netconfig-backup.timer"
+echo "復元: sudo bash $INSTALL_DIR/scripts/restore.sh <バックアップファイル>"
 echo ""
 echo "■ コンテナ状態"
 echo "sudo podman ps"
