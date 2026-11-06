@@ -116,6 +116,8 @@ class Schedule(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     cron_expression: Mapped[str] = mapped_column(String(64), nullable=False)
-    target: Mapped[str] = mapped_column(String(256), default="all")  # "all" or device_id
+    target: Mapped[str] = mapped_column(String(256), default="all")  # "all" / "group:<id>" / device_id
+    # collect: コンフィグ収集 / compliance: 収集済みのコンフィグをコンプライアンスチェック（収集はしない）
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="collect", server_default="collect")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

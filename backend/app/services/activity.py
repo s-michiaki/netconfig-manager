@@ -24,6 +24,7 @@ EVENTS: dict[str, tuple[str, str]] = {
     "compliance.resolved": ("違反の解消", "info"),
     "compliance.exempted": ("違反の除外（例外）", "info"),
     "compliance.summary": ("検査結果の変化", "info"),
+    "compliance.run": ("コンプライアンスチェックの実行", "info"),
     "notify.sent": ("通知の送信", "info"),
     "notify.failed": ("通知の失敗", "error"),
     "system.purge": ("古いログの削除", "info"),

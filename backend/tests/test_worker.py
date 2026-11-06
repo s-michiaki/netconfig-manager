@@ -71,3 +71,47 @@ def test_legacy_migration():
     assert pw.startswith("enc:") and en.startswith("enc:")
     from app.core.crypto import decrypt; assert decrypt(pw) == "plainpw"
     assert os.path.isdir(os.path.join(settings.GIT_REPO_PATH, did, ".git")) and not os.path.exists(legacy)
+
+def test_compliance_schedule(r):
+    """種類「コンプライアンスチェック」のスケジュールは収集せずに再検査する"""
+    from app.services import config_service as cs
+    c = TestClient(app); c.__enter__()
+    tok = c.post("/api/auth/token", data={"username": "admin", "password": "initial-pass-123"}).json()["access_token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    d = c.post("/api/devices/", json=dict(name=f"cs-{uuid.uuid4().hex[:6]}", hostname="10.7.0.1", platform="cisco_ios",
+                                          username="u", password="p"), headers=h).json()
+    cs.save_config(d["id"], "hostname X\nip http server\n", "test")
+    rule = c.post("/api/compliance/rules", json={"name": f"cs-rule-{uuid.uuid4().hex[:4]}", "match_type": "contains",
+                                                 "expect": "absent", "pattern": "ip http server",
+                                                 "platforms": ["cisco_ios"]}, headers=h).json()
+    # 種類の指定（不正な値は 422）と一覧への表示
+    assert c.post("/api/schedules/", json={"name": "x", "cron_expression": "0 1 * * *", "kind": "bad"},
+                  headers=h).status_code == 422
+    sch = c.post("/api/schedules/", json={"name": "夜間検査", "cron_expression": "23 4 * * *", "target": d["id"],
+                                          "kind": "compliance"}, headers=h)
+    assert sch.status_code == 201, sch.text
+    assert sch.json()["kind"] == "compliance"
+    assert c.post("/api/schedules/", json={"name": "y", "cron_expression": "0 1 * * *"}, headers=h).json()["kind"] == "collect"
+
+    # 収集し直さずにコンフィグを差し替えておく → スケジュールの再検査で違反が解消する
+    cs.save_config(d["id"], "hostname X\n", "test")
+    now = datetime(2026, 10, 28, 4, 23, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+    with mock.patch.object(worker, "collect_device_config") as one, \
+            mock.patch.object(worker, "collect_all_devices") as all_, \
+            mock.patch.object(worker.run_compliance_checks, "delay",
+                              side_effect=lambda *a: worker.run_compliance_checks.apply(args=a).get()) as chk:
+        dispatched = worker.dispatch_schedules_at(now)["dispatched"]
+        assert sch.json()["id"] in dispatched
+        one.delay.assert_not_called()
+        all_.delay.assert_not_called()
+        assert chk.call_args.args[0] == "スケジュール「夜間検査」" and chk.call_args.args[2] == d["id"]
+    res = c.get("/api/compliance/results", params={"device_id": d["id"], "rule_id": rule["id"]}, headers=h).json()
+    assert [x["status"] for x in res] == ["pass"]
+    db = sqlite3.connect(f"{TMP}/t.db")
+    ref = chk.call_args.args[1]
+    events = [e for (e,) in db.execute("select event from activity_logs where ref=? order by at", (ref,))]
+    assert events[0] == "schedule.run" and "compliance.resolved" in events and "compliance.run" in events
+    msg = db.execute("select message from activity_logs where ref=? and event='compliance.run'", (ref,)).fetchone()[0]
+    assert "1 台" in msg and "解消 1 件" in msg
+    c.delete(f"/api/compliance/rules/{rule['id']}", headers=h)
+    c.__exit__(None, None, None)

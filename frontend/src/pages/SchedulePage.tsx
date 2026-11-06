@@ -7,12 +7,17 @@ interface Schedule {
   name: string;
   cron_expression: string;
   target: string;
+  kind: Kind;
   is_active: boolean;
   next_run: string | null;
 }
 interface Device { id: string; name: string; }
+type Kind = "collect" | "compliance";
 
-const EMPTY_FORM = { name: "", cron_expression: "0 9 * * *", target: "all", is_active: true };
+const KIND_LABEL: Record<Kind, string> = { collect: "コンフィグ収集", compliance: "コンプライアンスチェック" };
+const EMPTY_FORM: { name: string; cron_expression: string; target: string; kind: Kind; is_active: boolean } = {
+  name: "", cron_expression: "0 9 * * *", target: "all", kind: "collect", is_active: true,
+};
 
 export default function SchedulePage() {
   const canWrite = useAuth().can(PERM.SCHEDULE_WRITE);
@@ -88,6 +93,18 @@ export default function SchedulePage() {
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
             <div className="form-group">
+              <label className="form-label" htmlFor="sch-kind">種類</label>
+              <select id="sch-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as Kind })}>
+                <option value="collect">{KIND_LABEL.collect}</option>
+                <option value="compliance">{KIND_LABEL.compliance}</option>
+              </select>
+              <p style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 4 }}>
+                {form.kind === "collect"
+                  ? "機器に接続してコンフィグを取得します（取得後、その機器のコンプライアンスチェックも行います）"
+                  : "機器には接続せず、収集済みの最新のコンフィグをルールで検査し直します（期限切れの例外の反映など）"}
+              </p>
+            </div>
+            <div className="form-group">
               <label className="form-label">Cron式（Asia/Tokyo）</label>
               <input
                 value={form.cron_expression}
@@ -130,6 +147,7 @@ export default function SchedulePage() {
           <thead>
             <tr>
               <th>名前</th>
+              <th>種類</th>
               <th>対象</th>
               <th>Cron式</th>
               <th>次回実行</th>
@@ -141,6 +159,11 @@ export default function SchedulePage() {
             {schedules.map((s) => (
               <tr key={s.id}>
                 <td style={{ fontWeight: 500 }}>{s.name}</td>
+                <td>
+                  <span className={`badge ${s.kind === "compliance" ? "badge-warning" : "badge-neutral"}`}>
+                    {KIND_LABEL[s.kind] ?? s.kind}
+                  </span>
+                </td>
                 <td style={{ color: "var(--color-muted)", fontSize: 12 }}>{deviceName(s.target)}</td>
                 <td><span className="mono" style={{ fontSize: 12 }}>{s.cron_expression}</span></td>
                 <td style={{ color: "var(--color-muted)", fontSize: 12 }}>
@@ -164,7 +187,7 @@ export default function SchedulePage() {
               </tr>
             ))}
             {schedules.length === 0 && (
-              <tr><td colSpan={canWrite ? 6 : 5} style={{ color: "var(--color-muted)", textAlign: "center", padding: 24 }}>
+              <tr><td colSpan={canWrite ? 7 : 6} style={{ color: "var(--color-muted)", textAlign: "center", padding: 24 }}>
                 スケジュールが登録されていません
               </td></tr>
             )}
