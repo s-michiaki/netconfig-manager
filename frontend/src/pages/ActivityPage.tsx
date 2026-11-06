@@ -27,12 +27,14 @@ interface DeviceItem { id: string; name: string; }
 const PAGE_SIZE = 100;
 const SEVERITY_LABEL: Record<string, string> = { high: "高", medium: "中", low: "低" };
 const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack" };
+const SCHEDULE_KIND_LABEL: Record<string, string> = { collect: "コンフィグ収集", compliance: "コンプライアンスチェック" };
 const LEVEL_LABEL: Record<string, string> = { info: "情報", warning: "警告", error: "エラー" };
 const LEVEL_BADGE: Record<string, string> = { info: "badge-neutral", warning: "badge-warning", error: "badge-danger" };
 const DETAIL_LABELS: Record<string, string> = {
   commit: "世代", added: "追加行", removed: "削除行", lines: "行数", seconds: "所要秒", error: "エラー", attempt: "試行",
   devices: "台数", cron: "Cron", target: "対象", rule: "ルール", severity: "重要度", kind: "通知先", via: "設定",
-  matches: "該当箇所", items: "内訳",
+  matches: "該当箇所", items: "内訳", schedule_kind: "種類", rules: "ルール数", checked: "検査数",
+  new_violations: "新しい違反", resolved: "解消",
   audit_logs: "操作履歴", terminal_sessions: "ターミナル記録", activity_logs: "アクティビティ",
 };
 
@@ -61,6 +63,7 @@ function Detail({ a }: { a: Activity }) {
           ) : typeof v === "boolean" ? (v ? "はい" : "いいえ")
             : k === "severity" ? (SEVERITY_LABEL[String(v)] ?? String(v))
             : k === "kind" ? (KIND_LABEL[String(v)] ?? String(v))
+            : k === "schedule_kind" ? (SCHEDULE_KIND_LABEL[String(v)] ?? String(v))
             : k === "target" && v === "all" ? "全機器" : String(v)}
         </div>
       ))}

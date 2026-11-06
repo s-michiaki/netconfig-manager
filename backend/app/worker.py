@@ -280,10 +280,37 @@ def collect_all_devices(
     return {"success": True, "dispatched": len(task_ids), "task_ids": task_ids}
 
 
-async def _active_schedules() -> list[tuple[str, str, str, str]]:
+async def _scheduled_compliance(device_ids: list[str], actor: str, ref: str, where: str) -> dict:
+    async with _sessionmaker()() as db:
+        result = await run_checks(db, device_ids=device_ids, actor=actor, ref=ref)
+        n_v, n_r = result.get("new_violations", 0), result.get("resolved", 0)
+        record(db, "compliance.run",
+               f"{where}{result['devices']} 台 × {result['rules']} ルールを検査しました（新しい違反 {n_v} 件・解消 {n_r} 件）",
+               level="warning" if n_v else "info", detail=result, actor=actor, ref=ref)
+        await db.commit()
+        return result
+
+
+@celery_app.task
+def run_compliance_checks(actor: str, ref: str, target: str = "all") -> dict:
+    """収集済みのコンフィグをコンプライアンスチェックする（スケジュール用。収集はしない）
+
+    target: all（有効な機器すべて）/ group:<id> / 機器 ID。期限切れになった例外もここで反映される
+    """
+    if target == "all":
+        device_ids, where = _run_async(_active_device_ids()), ""
+    elif target.startswith("group:"):
+        gid = target.split(":", 1)[1]
+        device_ids, where = _run_async(_active_device_ids(gid)), f"グループ「{_run_async(_group_name(gid))}」の "
+    else:
+        device_ids, where = [target], ""
+    return _run_async(_scheduled_compliance(device_ids, actor, ref, where))
+
+
+async def _active_schedules() -> list[tuple[str, str, str, str, str]]:
     async with _sessionmaker()() as db:
         result = await db.execute(select(Schedule).where(Schedule.is_active.is_(True)))
-        return [(s.id, s.cron_expression, s.target, s.name) for s in result.scalars().all()]
+        return [(s.id, s.cron_expression, s.target, s.name, s.kind or "collect") for s in result.scalars().all()]
 
 
 def is_due(cron_expression: str, now: datetime) -> datetime | None:
@@ -301,7 +328,7 @@ def dispatch_due_schedules():
 
 def dispatch_schedules_at(now: datetime) -> dict:
     dispatched = []
-    for schedule_id, cron_expression, target, name in _run_async(_active_schedules()):
+    for schedule_id, cron_expression, target, name, kind in _run_async(_active_schedules()):
         try:
             fire_at = is_due(cron_expression, now)
         except (ValueError, KeyError):
@@ -319,26 +346,37 @@ def dispatch_schedules_at(now: datetime) -> dict:
             continue
         actor = f"スケジュール「{name}」"
         ref = str(uuid.uuid4())
+        compliance = kind == "compliance"
+        what = "コンプライアンスチェック" if compliance else "収集"
         if target == "all":
-            collect_all_devices.delay("schedule", actor, ref)
-            device_name, msg = None, "全機器の収集を開始しました"
+            device_name, msg = None, f"全機器の{what}を開始しました"
         elif target.startswith("group:"):
-            gid = target.split(":", 1)[1]
-            gname = _run_async(_group_name(gid))
+            gname = _run_async(_group_name(target.split(":", 1)[1]))
             if gname is None:
                 _run_async(_record("schedule.invalid", f"スケジュール「{name}」の対象グループが削除されています",
                                    detail={"target": target}, actor=actor))
                 continue
-            collect_all_devices.delay("schedule", actor, ref, gid)
-            device_name, msg = None, f"グループ「{gname}」の収集を開始しました"
+            device_name, msg = None, f"グループ「{gname}」の{what}を開始しました"
         else:
-            collect_device_config.delay(target, "schedule", actor, ref)
             device_name = _run_async(_device_name(target))
-            msg = "収集を開始しました"
+            if device_name is None:
+                _run_async(_record("schedule.invalid", f"スケジュール「{name}」の対象機器が削除されています",
+                                   detail={"target": target}, actor=actor))
+                continue
+            msg = f"{what}を開始しました"
+        # 開始の記録を先に残す（タスクの記録と同じ ref でまとまる）
         _run_async(_record("schedule.run", f"スケジュール「{name}」: {msg}",
                            device_id=None if target == "all" or target.startswith("group:") else target,
                            device_name=device_name,
-                           detail={"cron": cron_expression, "target": target}, actor=actor, ref=ref))
+                           detail={"cron": cron_expression, "target": target, "schedule_kind": kind}, actor=actor, ref=ref))
+        if compliance:
+            run_compliance_checks.delay(actor, ref, target)
+        elif target == "all":
+            collect_all_devices.delay("schedule", actor, ref)
+        elif target.startswith("group:"):
+            collect_all_devices.delay("schedule", actor, ref, target.split(":", 1)[1])
+        else:
+            collect_device_config.delay(target, "schedule", actor, ref)
         dispatched.append(schedule_id)
-        logger.info("スケジュール実行: %s (target=%s)", schedule_id, target)
+        logger.info("スケジュール実行: %s (kind=%s target=%s)", schedule_id, kind, target)
     return {"dispatched": dispatched}

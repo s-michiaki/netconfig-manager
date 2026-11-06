@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -30,6 +30,7 @@ class ScheduleCreate(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
     cron_expression: str
     target: str = "all"
+    kind: Literal["collect", "compliance"] = "collect"  # コンフィグ収集 / コンプライアンスチェック
     is_active: bool = True
 
     @field_validator("cron_expression")
@@ -45,6 +46,7 @@ class ScheduleResponse(BaseModel):
     name: str
     cron_expression: str
     target: str
+    kind: str
     is_active: bool
     next_run: str | None = None
 
@@ -91,7 +93,7 @@ async def create_schedule(
     schedule = Schedule(id=str(uuid.uuid4()), **payload.model_dump())
     db.add(schedule)
     audit("schedule.create", target_type="schedule", target_id=schedule.id, target_name=schedule.name,
-          detail={"cron": schedule.cron_expression, "target": schedule.target})
+          detail={"cron": schedule.cron_expression, "target": schedule.target, "kind": schedule.kind})
     await db.commit()
     await db.refresh(schedule)
     return _to_response(schedule)
