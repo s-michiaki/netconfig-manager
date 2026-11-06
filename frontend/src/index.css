@@ -564,7 +564,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .audit-field-wide { width: 260px; }
 .audit-field .form-label { margin-bottom: 3px; }
 .audit-check { padding-bottom: 8px; }
-.audit-bar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.audit-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 6px; }
 .audit-pager { display: flex; align-items: center; gap: 8px; }
 .audit-table td { vertical-align: top; font-size: 12px; }
 .audit-table th, .audit-table .badge { white-space: nowrap; }

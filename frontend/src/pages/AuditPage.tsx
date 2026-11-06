@@ -121,6 +121,30 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/** 絞り込みと同じ条件で CSV をダウンロードする（認証ヘッダーが要るため blob で受け取る） */
+async function downloadCsv(path: string, params: Record<string, unknown>, fallback: string) {
+  const r = await api.get<Blob>(path, { params, responseType: "blob" });
+  const m = /filename="([^"]+)"/.exec(String(r.headers["content-disposition"] ?? ""));
+  const url = URL.createObjectURL(r.data);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = m ? m[1] : fallback;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+function CsvButton({ onClick }: { onClick: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button className="btn" disabled={busy} title="今の絞り込み条件で出力します（最大10万件）"
+      onClick={async () => { setBusy(true); try { await onClick(); } finally { setBusy(false); } }}>
+      {busy ? "出力中..." : "CSV 出力"}
+    </button>
+  );
+}
+
 function Pager({ total, offset, onChange }: { total: number; offset: number; onChange: (o: number) => void }) {
   if (total <= PAGE_SIZE) return <span className="topo-muted topo-small">{total} 件</span>;
   return (
@@ -147,18 +171,26 @@ function LogsTab({ actions }: { actions: Record<string, string> }) {
   const [page, setPage] = useState<Page<AuditLog> | null>(null);
   const [error, setError] = useState("");
 
+  const filters = () => ({
+    username: username.trim() || undefined, action: category || undefined, q: q.trim() || undefined,
+    failed_only: failedOnly || undefined,
+    // 日付はローカル時刻の 0:00 として扱い、UTC に変換して渡す
+    since: since ? new Date(`${since}T00:00:00`).toISOString() : undefined,
+    until: until ? new Date(new Date(`${until}T00:00:00`).getTime() + 86400_000).toISOString() : undefined,
+  });
+  const exportCsv = async () => {
+    setError("");
+    try {
+      await downloadCsv("/audit/logs/export", filters(), "audit_logs.csv");
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
   const load = useCallback(async (o: number) => {
     setError("");
     try {
       const r = await api.get<Page<AuditLog>>("/audit/logs", {
-        params: {
-          username: username.trim() || undefined, action: category || undefined, q: q.trim() || undefined,
-          failed_only: failedOnly || undefined,
-          // 日付はローカル時刻の 0:00 として扱い、UTC に変換して渡す
-          since: since ? new Date(`${since}T00:00:00`).toISOString() : undefined,
-          until: until ? new Date(new Date(`${until}T00:00:00`).getTime() + 86400_000).toISOString() : undefined,
-          limit: PAGE_SIZE, offset: o,
-        },
+        params: { ...filters(), limit: PAGE_SIZE, offset: o },
       });
       setPage(r.data);
       setOffset(o);
@@ -206,7 +238,7 @@ function LogsTab({ actions }: { actions: Record<string, string> }) {
       {error && <p className="form-error">{error}</p>}
       {page && (
         <>
-          <div className="audit-bar"><Pager total={page.total} offset={offset} onChange={load} /></div>
+          <div className="audit-bar"><CsvButton onClick={exportCsv} /><Pager total={page.total} offset={offset} onChange={load} /></div>
           <div className="table-scroll">
             <table className="data-table audit-table">
               <thead>
@@ -481,7 +513,18 @@ function SessionsTab() {
       {error && <p className="form-error">{error}</p>}
       {page && (
         <>
-          <div className="audit-bar"><Pager total={page.total} offset={offset} onChange={load} /></div>
+          <div className="audit-bar">
+            <CsvButton onClick={async () => {
+              setError("");
+              try {
+                await downloadCsv("/audit/terminal-sessions/export",
+                  { username: username.trim() || undefined, device: device.trim() || undefined }, "terminal_sessions.csv");
+              } catch (e) {
+                setError(errorMessage(e));
+              }
+            }} />
+            <Pager total={page.total} offset={offset} onChange={load} />
+          </div>
           <div className="table-scroll">
             <table className="data-table audit-table">
               <thead>

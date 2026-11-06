@@ -1,14 +1,18 @@
 """監査ログの閲覧 API（管理者のみ）"""
+import csv
+import io
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.audit import AuditLog, TerminalSession
@@ -70,18 +74,39 @@ async def list_actions() -> dict[str, str]:
     return ACTIONS
 
 
-@router.get("/logs", response_model=AuditLogPage, dependencies=[Depends(require(Perm.AUDIT_READ))])
-async def list_logs(
-    username: str | None = Query(None, max_length=64),
-    action: str | None = Query(None, max_length=64, description="完全一致、または「device.」のような前方一致"),
-    q: str | None = Query(None, max_length=200, description="対象名・詳細・IP の部分一致"),
-    failed_only: bool = False,
-    since: datetime | None = None,
-    until: datetime | None = None,
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    db: AsyncSession = Depends(get_db),
-):
+MAX_EXPORT_ROWS = 100_000  # CSV に出力する最大件数
+
+
+def _csv_cell(v) -> str:
+    """表計算ソフトで数式として解釈されないようにする（CSV インジェクション対策）"""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "はい" if v else "いいえ"
+    if isinstance(v, datetime):
+        return v.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(settings.TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+    text = str(v)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def _csv_response(header: list[str], rows: list[list], filename: str) -> Response:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\r\n")
+    w.writerow(header)
+    for r in rows:
+        w.writerow([_csv_cell(v) for v in r])
+    # Excel で文字化けしないよう BOM 付き UTF-8
+    return Response(
+        content="\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _export_name(kind: str) -> str:
+    return f"{kind}_{datetime.now(ZoneInfo(settings.TIMEZONE)).strftime('%Y%m%d-%H%M%S')}.csv"
+
+
+def _log_conditions(username, action, q, failed_only, since, until) -> list:
     cond = []
     if username:
         cond.append(AuditLog.username == username)
@@ -97,11 +122,70 @@ async def list_logs(
         cond.append(AuditLog.at >= since.replace(tzinfo=None))
     if until:
         cond.append(AuditLog.at < until.replace(tzinfo=None))
+    return cond
+
+
+@router.get("/logs", response_model=AuditLogPage, dependencies=[Depends(require(Perm.AUDIT_READ))])
+async def list_logs(
+    username: str | None = Query(None, max_length=64),
+    action: str | None = Query(None, max_length=64, description="完全一致、または「device.」のような前方一致"),
+    q: str | None = Query(None, max_length=200, description="対象名・詳細・IP の部分一致"),
+    failed_only: bool = False,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    cond = _log_conditions(username, action, q, failed_only, since, until)
     total = (await db.execute(select(func.count()).select_from(AuditLog).where(*cond))).scalar_one()
     rows = (
         await db.execute(select(AuditLog).where(*cond).order_by(AuditLog.at.desc()).limit(limit).offset(offset))
     ).scalars().all()
     return AuditLogPage(items=[AuditLogItem.model_validate(r) for r in rows], total=total)
+
+
+@router.get("/logs/export", dependencies=[Depends(require(Perm.AUDIT_READ))])
+async def export_logs(
+    username: str | None = Query(None, max_length=64),
+    action: str | None = Query(None, max_length=64),
+    q: str | None = Query(None, max_length=200),
+    failed_only: bool = False,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    db: AsyncSession = Depends(get_db),
+    audit: Audit = Depends(get_audit),
+):
+    """操作履歴を CSV で出力する（絞り込みは一覧と同じ。新しい順に最大 MAX_EXPORT_ROWS 件）"""
+    cond = _log_conditions(username, action, q, failed_only, since, until)
+    rows = (
+        await db.execute(select(AuditLog).where(*cond).order_by(AuditLog.at.desc()).limit(MAX_EXPORT_ROWS))
+    ).scalars().all()
+    # 出力したこと自体も残す（記録が持ち出されたことを追えるように）
+    audit("audit.export", detail={"kind": "操作履歴", "rows": len(rows), "username": username, "action": action,
+                                  "q": q, "failed_only": failed_only or None,
+                                  "since": since.isoformat() if since else None,
+                                  "until": until.isoformat() if until else None})
+    await db.commit()
+    header = [f"日時（{settings.TIMEZONE}）", "ユーザー", "操作", "操作コード", "対象の種類", "対象", "対象ID", "詳細", "接続元IP", "結果"]
+    data = [[r.at, r.username, ACTIONS.get(r.action, r.action), r.action, r.target_type, r.target_name, r.target_id,
+             r.detail, r.ip, "成功" if r.success else "失敗"] for r in rows]
+    return _csv_response(header, data, _export_name("audit_logs"))
+
+
+def _session_conditions(username, device, since, until) -> list:
+    cond = []
+    if username:
+        cond.append(TerminalSession.username == username)
+    if device:
+        pat = _like(device)
+        cond.append(or_(TerminalSession.device_name.like(pat, escape="\\"),
+                        TerminalSession.device_host.like(pat, escape="\\")))
+    if since:
+        cond.append(TerminalSession.started_at >= since.replace(tzinfo=None))
+    if until:
+        cond.append(TerminalSession.started_at < until.replace(tzinfo=None))
+    return cond
 
 
 @router.get(
@@ -116,17 +200,7 @@ async def list_terminal_sessions(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    cond = []
-    if username:
-        cond.append(TerminalSession.username == username)
-    if device:
-        pat = _like(device)
-        cond.append(or_(TerminalSession.device_name.like(pat, escape="\\"),
-                        TerminalSession.device_host.like(pat, escape="\\")))
-    if since:
-        cond.append(TerminalSession.started_at >= since.replace(tzinfo=None))
-    if until:
-        cond.append(TerminalSession.started_at < until.replace(tzinfo=None))
+    cond = _session_conditions(username, device, since, until)
     total = (await db.execute(select(func.count()).select_from(TerminalSession).where(*cond))).scalar_one()
     rows = (
         await db.execute(
@@ -140,6 +214,33 @@ async def list_terminal_sessions(
         item.has_recording = bool(p and p.is_file())
         items.append(item)
     return TerminalSessionPage(items=items, total=total)
+
+
+@router.get("/terminal-sessions/export", dependencies=[Depends(require(Perm.AUDIT_READ))])
+async def export_terminal_sessions(
+    username: str | None = Query(None, max_length=64),
+    device: str | None = Query(None, max_length=128),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    db: AsyncSession = Depends(get_db),
+    audit: Audit = Depends(get_audit),
+):
+    """ターミナルの接続記録（一覧）を CSV で出力する。画面の記録そのものは含めない"""
+    cond = _session_conditions(username, device, since, until)
+    rows = (
+        await db.execute(select(TerminalSession).where(*cond).order_by(TerminalSession.started_at.desc())
+                         .limit(MAX_EXPORT_ROWS))
+    ).scalars().all()
+    audit("audit.export", detail={"kind": "ターミナルの記録", "rows": len(rows), "username": username,
+                                  "device": device})
+    await db.commit()
+    header = [f"開始（{settings.TIMEZONE}）", f"終了（{settings.TIMEZONE}）", "接続秒数", "ユーザー", "機器", "ホスト",
+              "経由", "接続元IP", "終了理由", "出力バイト数", "記録の打ち切り"]
+    data = [[r.started_at, r.ended_at,
+             int((r.ended_at - r.started_at).total_seconds()) if r.ended_at else None,
+             r.username, r.device_name, r.device_host, r.via, r.ip, r.end_reason, r.bytes_out, r.truncated]
+            for r in rows]
+    return _csv_response(header, data, _export_name("terminal_sessions"))
 
 
 @router.get(
