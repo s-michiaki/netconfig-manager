@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { usePlatforms } from "../platforms";
 
-interface Device { id: string; name: string; hostname: string; platform: string; is_active: boolean; }
+interface Device { id: string; name: string; hostname: string; platform: string; is_active: boolean; group_id: string | null; group_name: string | null; }
+interface Group { id: string; name: string; }
+const UNGROUPED = "__none__";
 
 type JobState = "queued" | "running" | "retry" | "success" | "unchanged" | "failed";
 interface Job { device: Device; taskId?: string; state: JobState; message?: string; }
@@ -40,6 +42,8 @@ function describe(job: Job): string {
 export default function CollectPage() {
   const { label: platformLabel } = usePlatforms();
   const [devices, setDevices] = useState<Device[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [groupFilter, setGroupFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [jobs, setJobs] = useState<Job[]>([]);
   const [running, setRunning] = useState(false);
@@ -55,13 +59,28 @@ export default function CollectPage() {
         setSelected(new Set(r.data.filter((d) => d.is_active).map((d) => d.id)));
       })
       .catch((e) => setError(errorMessage(e)));
+    api.get<Group[]>("/device-groups/").then((r) => setGroups(r.data)).catch(() => undefined);
     return () => {
       mounted.current = false;
     };
   }, []);
 
+  const inGroup = (d: Device) => !groupFilter || (groupFilter === UNGROUPED ? !d.group_id : d.group_id === groupFilter);
+  const shown = devices.filter(inGroup);
+
   const toggleAll = (checked: boolean) => {
-    setSelected(checked ? new Set(devices.map((d) => d.id)) : new Set());
+    // 絞り込み中は表示している機器だけを対象にする
+    setSelected((prev) => {
+      const next = new Set(prev);
+      shown.forEach((d) => (checked ? next.add(d.id) : next.delete(d.id)));
+      return next;
+    });
+  };
+
+  /** グループを選ぶと、そのグループの有効な機器だけを選択状態にする */
+  const pickGroup = (g: string) => {
+    setGroupFilter(g);
+    if (g) setSelected(new Set(devices.filter((d) => d.is_active && (g === UNGROUPED ? !d.group_id : d.group_id === g)).map((d) => d.id)));
   };
 
   const toggleDevice = (id: string) => {
@@ -110,7 +129,7 @@ export default function CollectPage() {
 
   const startCollect = async () => {
     if (selected.size === 0) return;
-    const targets = devices.filter((d) => selected.has(d.id));
+    const targets = shown.filter((d) => selected.has(d.id)); // 絞り込み中は表示している機器だけ
     setRunning(true);
     setError("");
     setJobs(targets.map((device) => ({ device, state: "queued" })));
@@ -137,7 +156,7 @@ export default function CollectPage() {
     <div className="page">
       <div className="page-header">
         <span className="page-title">コンフィグ収集</span>
-        <button className="btn btn-primary" onClick={startCollect} disabled={running || selected.size === 0}>
+        <button className="btn btn-primary" onClick={startCollect} disabled={running || !shown.some((d) => selected.has(d.id))}>
           {running ? "収集中..." : "▶ 収集開始"}
         </button>
       </div>
@@ -160,14 +179,22 @@ export default function CollectPage() {
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 16 }}>
           <div>
-            <p className="section-label">収集対象デバイス</p>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <p className="section-label" style={{ margin: 0 }}>収集対象デバイス</p>
+              <select value={groupFilter} onChange={(e) => pickGroup(e.target.value)} disabled={running} style={{ width: 240, marginLeft: "auto" }} aria-label="グループで選ぶ">
+                <option value="">すべてのグループ</option>
+                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                <option value={UNGROUPED}>未分類</option>
+              </select>
+              <span className="topo-muted topo-small">{shown.filter((d) => selected.has(d.id)).length}台を選択中</span>
+            </div>
             <table className="data-table">
               <thead>
                 <tr>
                   <th>
                     <input
                       type="checkbox"
-                      checked={selected.size === devices.length && devices.length > 0}
+                      checked={shown.length > 0 && shown.every((d) => selected.has(d.id))}
                       onChange={(e) => toggleAll(e.target.checked)}
                       disabled={running}
                     />
@@ -178,7 +205,7 @@ export default function CollectPage() {
                 </tr>
               </thead>
               <tbody>
-                {devices.map((d) => (
+                {shown.map((d) => (
                   <tr key={d.id} style={d.is_active ? undefined : { opacity: 0.5 }}>
                     <td>
                       <input
@@ -188,7 +215,7 @@ export default function CollectPage() {
                         disabled={running}
                       />
                     </td>
-                    <td style={{ fontWeight: 500 }}>{d.name}</td>
+                    <td style={{ fontWeight: 500 }}>{d.name}{d.group_name && <span className="topo-muted topo-small"> · {d.group_name}</span>}</td>
                     <td className="mono" style={{ fontSize: 12, color: "var(--color-muted)" }}>{d.hostname}</td>
                     <td style={{ fontSize: 12, color: "var(--color-muted)" }}>{platformLabel(d.platform)}</td>
                   </tr>

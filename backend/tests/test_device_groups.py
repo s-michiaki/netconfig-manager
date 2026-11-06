@@ -81,3 +81,62 @@ def test_group_crud_and_membership(ctx):
     assert {"device_group.create", "device_group.update", "device_group.delete"} <= {a["action"] for a in acts}
     deleted = next(a for a in acts if a["action"] == "device_group.delete")
     assert '"moved_to_ungrouped": 2' in deleted["detail"]
+
+
+# ---------------------------------------------------------------- グループ単位の収集・スケジュール
+
+def test_group_collect_and_schedule(ctx):
+    from datetime import datetime
+    from unittest import mock
+    from zoneinfo import ZoneInfo
+
+    import fakeredis
+
+    from app import worker
+
+    c, admin, op = ctx["c"], ctx["admin"], ctx["op"]
+    g = c.post("/api/device-groups/", json={"name": f"収集-{uuid.uuid4().hex[:4]}"}, headers=admin).json()
+    other = c.post("/api/device-groups/", json={"name": f"他-{uuid.uuid4().hex[:4]}"}, headers=admin).json()
+    a = dev(c, admin, group_id=g["id"])
+    b = dev(c, admin, group_id=g["id"], is_active=False)  # 無効な機器は収集しない
+    x = dev(c, admin, group_id=other["id"])
+
+    # 画面からグループを収集（オペレーター以上）。実行したユーザー名とグループを渡す
+    with mock.patch("app.api.device_groups.collect_all_devices") as all_:
+        all_.delay.return_value.id = "grp-task"
+        r = c.post(f"/api/device-groups/{g['id']}/collect", headers=op)
+        assert r.status_code == 200 and r.json()["task_id"] == "grp-task"
+        assert all_.delay.call_args.args == ("manual", "grp-op", None, g["id"])
+    assert c.post("/api/device-groups/nope/collect", headers=admin).status_code == 404
+    log = c.get("/api/audit/logs", params={"action": "collect.run"}, headers=admin).json()["items"][0]
+    assert log["target_name"] == f"グループ「{g['name']}」" and "grp-task" in log["detail"]
+
+    # worker: 指定したグループの有効な機器だけを投入する
+    fr = fakeredis.FakeRedis()
+    with mock.patch.object(worker, "_redis", return_value=fr), \
+            mock.patch.object(worker, "collect_device_config") as one:
+        one.delay.return_value.id = "t"
+        res = worker.collect_all_devices.apply(args=("manual", "admin", "ref-g", g["id"])).get()
+        assert res["dispatched"] == 1 and one.delay.call_args.args[0] == a["id"]
+    acts = c.get("/api/activity/logs", params={"ref": "ref-g"}, headers=admin).json()["items"]
+    assert acts[0]["event"] == "collect.batch" and g["name"] in acts[0]["message"]
+    assert b["id"] and x["id"]
+
+    # スケジュールの対象にグループを指定できる
+    bad = c.post("/api/schedules/", json={"name": "x", "cron_expression": "0 1 * * *", "target": "group:nope"}, headers=admin)
+    assert bad.status_code == 422
+    s = c.post("/api/schedules/", json={"name": "グループ夜間", "cron_expression": "23 4 * * *",
+                                          "target": f"group:{g['id']}"}, headers=admin)
+    assert s.status_code == 201, s.text
+    now = datetime(2026, 11, 7, 4, 23, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+    with mock.patch.object(worker, "_redis", return_value=fr), \
+            mock.patch.object(worker, "collect_all_devices") as all_:
+        assert s.json()["id"] in worker.dispatch_schedules_at(now)["dispatched"]
+        args = all_.delay.call_args.args
+        assert args[0] == "schedule" and args[3] == g["id"]
+
+    # グループを削除すると、そのグループを対象にしたスケジュールは無効になる
+    assert c.delete(f"/api/device-groups/{g['id']}", headers=admin).status_code == 204
+    sch = next(x for x in c.get("/api/schedules/", headers=admin).json() if x["id"] == s.json()["id"])
+    assert sch["is_active"] is False
+    c.delete(f"/api/schedules/{sch['id']}", headers=admin)

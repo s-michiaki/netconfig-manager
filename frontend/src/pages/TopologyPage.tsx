@@ -21,7 +21,7 @@ import {
 import { DeviceIconSvg, TopologyContext, nodeTypes } from "../topology/nodes";
 import { edgeTypes } from "../topology/LinkEdge";
 
-interface DeviceItem { id: string; name: string; hostname: string; platform: string; }
+interface DeviceItem { id: string; name: string; hostname: string; platform: string; group_id: string | null; group_name: string | null; }
 
 const STATUS_REFRESH_MS = 30_000;
 const LAST_MAP_KEY = "topology:last-map";
@@ -1125,8 +1125,13 @@ function Palette({
   onAddDevice: (id: string) => void; onAddDecoration: (k: AddKind, shape?: ShapeKind) => void;
 }) {
   const [q, setQ] = useState("");
-  const rest = devices
-    .filter((d) => !placed.has(d.id))
+  const [group, setGroup] = useState("");
+  // 未配置の機器があるグループだけを選択肢にする（"" = すべて、"__none__" = 未分類）
+  const unplaced = devices.filter((d) => !placed.has(d.id));
+  const groupOptions = [...new Map(unplaced.filter((d) => d.group_id).map((d) => [d.group_id!, d.group_name ?? ""])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1], "ja"));
+  const rest = unplaced
+    .filter((d) => !group || (group === "__none__" ? !d.group_id : d.group_id === group))
     .filter((d) => !q || `${d.name} ${d.hostname}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
@@ -1157,6 +1162,13 @@ function Palette({
         </Section>
       )}
       <Section title={`未配置の機器（${devices.length - placed.size}）`}>
+        {groupOptions.length > 0 && (
+          <select value={group} onChange={(e) => setGroup(e.target.value)} aria-label="グループで絞り込み" style={{ marginBottom: 6 }}>
+            <option value="">すべてのグループ</option>
+            {groupOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            {unplaced.some((d) => !d.group_id) && <option value="__none__">未分類</option>}
+          </select>
+        )}
         <input placeholder="名前・IPで絞り込み" value={q} onChange={(e) => setQ(e.target.value)} aria-label="未配置の機器を絞り込み" style={{ marginBottom: 8 }} />
         {rest.length === 0 ? (
           <p className="topo-muted topo-small">{devices.length ? "すべて配置済みです" : "機器が登録されていません"}</p>

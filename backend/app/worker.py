@@ -24,7 +24,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.core.timeutil import utcnow
-from app.models import CollectLog, ConfigSnapshot, Device, Schedule
+from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.services.config_service import (
     CollectResult,
     DeviceConnectionInfo,
@@ -245,22 +245,38 @@ def purge_audit_logs():
     return result
 
 
-async def _active_device_ids() -> list[str]:
+async def _active_device_ids(group_id: str | None = None) -> list[str]:
+    """有効な機器（group_id を指定するとそのグループの機器だけ）"""
     async with _sessionmaker()() as db:
-        result = await db.execute(select(Device.id).where(Device.is_active.is_(True)))
+        q = select(Device.id).where(Device.is_active.is_(True))
+        if group_id:
+            q = q.where(Device.group_id == group_id)
+        result = await db.execute(q)
         return list(result.scalars().all())
 
 
+async def _group_name(group_id: str) -> str | None:
+    async with _sessionmaker()() as db:
+        g = await db.get(DeviceGroup, group_id)
+        return g.name if g else None
+
+
 @celery_app.task(bind=True)
-def collect_all_devices(self, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None):
-    """全デバイスのコンフィグを一括収集する（各機器の記録はこのタスクの ID でまとめる）"""
+def collect_all_devices(
+    self, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None, group_id: str | None = None
+):
+    """有効な機器のコンフィグを一括収集する（group_id を指定するとそのグループだけ）。
+
+    各機器の記録はこのタスクの ID（または ref）でまとめる
+    """
     actor = _actor(triggered_by, actor)
     ref = ref or self.request.id
-    device_ids = _run_async(_active_device_ids())
+    device_ids = _run_async(_active_device_ids(group_id))
     task_ids = [collect_device_config.delay(device_id, triggered_by, actor, ref).id for device_id in device_ids]
     if triggered_by != "schedule":  # スケジュールは schedule.run で記録済み
-        _run_async(_record("collect.batch", f"有効な機器 {len(task_ids)} 台の収集を開始しました",
-                           detail={"devices": len(task_ids)}, actor=actor, ref=ref))
+        where = f"グループ「{_run_async(_group_name(group_id))}」の" if group_id else ""
+        _run_async(_record("collect.batch", f"{where}有効な機器 {len(task_ids)} 台の収集を開始しました",
+                           detail={"devices": len(task_ids), "group_id": group_id}, actor=actor, ref=ref))
     return {"success": True, "dispatched": len(task_ids), "task_ids": task_ids}
 
 
@@ -306,12 +322,22 @@ def dispatch_schedules_at(now: datetime) -> dict:
         if target == "all":
             collect_all_devices.delay("schedule", actor, ref)
             device_name, msg = None, "全機器の収集を開始しました"
+        elif target.startswith("group:"):
+            gid = target.split(":", 1)[1]
+            gname = _run_async(_group_name(gid))
+            if gname is None:
+                _run_async(_record("schedule.invalid", f"スケジュール「{name}」の対象グループが削除されています",
+                                   detail={"target": target}, actor=actor))
+                continue
+            collect_all_devices.delay("schedule", actor, ref, gid)
+            device_name, msg = None, f"グループ「{gname}」の収集を開始しました"
         else:
             collect_device_config.delay(target, "schedule", actor, ref)
             device_name = _run_async(_device_name(target))
             msg = "収集を開始しました"
         _run_async(_record("schedule.run", f"スケジュール「{name}」: {msg}",
-                           device_id=None if target == "all" else target, device_name=device_name,
+                           device_id=None if target == "all" or target.startswith("group:") else target,
+                           device_name=device_name,
                            detail={"cron": cron_expression, "target": target}, actor=actor, ref=ref))
         dispatched.append(schedule_id)
         logger.info("スケジュール実行: %s (target=%s)", schedule_id, target)

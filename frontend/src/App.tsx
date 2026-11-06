@@ -124,7 +124,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.10.0 · RHEL 10</span>
+          <span className="version-tag">v1.11.0 · RHEL 10</span>
         </div>
       </aside>
 

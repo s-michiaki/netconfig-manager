@@ -536,6 +536,16 @@ export default function DevicesPage() {
     }
   };
 
+  const collectGroup = async (groupId: string, name: string) => {
+    setError("");
+    try {
+      await api.post(`/device-groups/${groupId}/collect`);
+      setMessage(`グループ「${name}」の機器の収集をキューに投入しました。結果は「アクティビティ」「世代管理」で確認できます。`);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
   const deleteDevice = async (d: Device, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm(`「${d.name}」を削除しますか？`)) return;
@@ -669,16 +679,23 @@ export default function DevicesPage() {
             const isCollapsed = collapsed.includes(s.key);
             return (
               <section key={s.key} className="dev-group">
-                <button
-                  className="dev-group-head" aria-expanded={!isCollapsed}
-                  onClick={() => setCollapsed(isCollapsed ? collapsed.filter((k) => k !== s.key) : [...collapsed, s.key])}
-                >
-                  <span className="dev-group-caret">{isCollapsed ? "▸" : "▾"}</span>
-                  <span className="grp-dot" style={{ background: s.color ?? "#4a5178" }} />
-                  <span className="dev-group-name">{s.name}</span>
-                  <span className="topo-muted topo-small">{s.devices.length}台</span>
-                  {s.description && <span className="topo-muted topo-small dev-group-desc">— {s.description}</span>}
-                </button>
+                <div className="dev-group-bar">
+                  <button
+                    className="dev-group-head" aria-expanded={!isCollapsed}
+                    onClick={() => setCollapsed(isCollapsed ? collapsed.filter((k) => k !== s.key) : [...collapsed, s.key])}
+                  >
+                    <span className="dev-group-caret">{isCollapsed ? "▸" : "▾"}</span>
+                    <span className="grp-dot" style={{ background: s.color ?? "#4a5178" }} />
+                    <span className="dev-group-name">{s.name}</span>
+                    <span className="topo-muted topo-small">{s.devices.length}台</span>
+                    {s.description && <span className="topo-muted topo-small dev-group-desc">— {s.description}</span>}
+                  </button>
+                  {s.group && can(PERM.COLLECT) && s.devices.some((d) => d.is_active) && (
+                    <button className="btn btn-sm" onClick={() => collectGroup(s.key, s.name)} title="このグループの有効な機器をまとめて収集">
+                      このグループを収集
+                    </button>
+                  )}
+                </div>
                 {!isCollapsed && (
                   s.devices.length ? (
                     <div className="device-grid">{s.devices.map((d) => card(d, false))}</div>

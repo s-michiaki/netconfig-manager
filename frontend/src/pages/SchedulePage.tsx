@@ -18,6 +18,7 @@ export default function SchedulePage() {
   const canWrite = useAuth().can(PERM.SCHEDULE_WRITE);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
   const [error, setError] = useState("");
@@ -28,9 +29,17 @@ export default function SchedulePage() {
   useEffect(() => {
     load();
     api.get<Device[]>("/devices/").then((r) => setDevices(r.data)).catch(() => undefined);
+    api.get<{ id: string; name: string }[]>("/device-groups/").then((r) => setGroups(r.data)).catch(() => undefined);
   }, []);
 
-  const deviceName = (id: string) => (id === "all" ? "全デバイス" : devices.find((d) => d.id === id)?.name ?? `(削除済み) ${id}`);
+  const deviceName = (id: string) => {
+    if (id === "all") return "全デバイス";
+    if (id.startsWith("group:")) {
+      const g = groups.find((x) => `group:${x.id}` === id);
+      return g ? `グループ「${g.name}」` : "（削除されたグループ）";
+    }
+    return devices.find((d) => d.id === id)?.name ?? `(削除済み) ${id}`;
+  };
 
   const create = async () => {
     setFormError("");
@@ -93,7 +102,14 @@ export default function SchedulePage() {
               <label className="form-label">対象</label>
               <select value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })}>
                 <option value="all">全デバイス（有効なもの）</option>
-                {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                {groups.length > 0 && (
+                  <optgroup label="グループ（所属する有効な機器）">
+                    {groups.map((g) => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
+                  </optgroup>
+                )}
+                <optgroup label="機器">
+                  {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </optgroup>
               </select>
             </div>
             {formError && <p className="form-error">{formError}</p>}

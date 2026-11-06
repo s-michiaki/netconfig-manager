@@ -15,9 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.device import Device, DeviceGroup
+from app.models.device import Device, DeviceGroup, Schedule
 from app.models.ping import PingTarget
 from app.services.audit import Audit, get_audit
+from app.worker import collect_all_devices
 
 router = APIRouter()
 
@@ -108,14 +109,31 @@ async def update_group(
     "/{group_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require(Perm.DEVICE_WRITE))]
 )
 async def delete_group(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
-    """グループを削除する。所属していた機器・Ping監視の追加IPは削除せず未分類に戻す"""
+    """グループを削除する。所属していた機器・Ping監視の追加IPは削除せず未分類に戻す。
+
+    このグループを対象にしたスケジュールは無効にする（対象が無くなるため）
+    """
     g = await _get_or_404(db, group_id)
     r = await db.execute(update(Device).where(Device.group_id == g.id).values(group_id=None))
     await db.execute(update(PingTarget).where(PingTarget.group_id == g.id).values(group_id=None))
+    s = await db.execute(
+        update(Schedule).where(Schedule.target == f"group:{g.id}", Schedule.is_active.is_(True)).values(is_active=False)
+    )
     await db.delete(g)
     audit("device_group.delete", target_type="device_group", target_id=g.id, target_name=g.name,
-          detail={"moved_to_ungrouped": r.rowcount or 0})
+          detail={"moved_to_ungrouped": r.rowcount or 0, "disabled_schedules": s.rowcount or 0})
     await db.commit()
+
+
+@router.post("/{group_id}/collect", dependencies=[Depends(require(Perm.COLLECT))])
+async def collect_group(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    """グループに所属する有効な機器をまとめて収集する"""
+    g = await _get_or_404(db, group_id)
+    task = collect_all_devices.delay("manual", audit.user.username, None, g.id)
+    audit("collect.run", target_type="device_group", target_id=g.id, target_name=f"グループ「{g.name}」",
+          detail={"task_id": task.id})
+    await db.commit()
+    return {"task_id": task.id, "status": "queued"}
 
 
 @router.post("/assign", dependencies=[Depends(require(Perm.DEVICE_WRITE))])
