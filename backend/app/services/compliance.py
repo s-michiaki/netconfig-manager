@@ -11,6 +11,14 @@
 - 収集に成功したとき（その機器だけ）
 - ルールを作成・変更したとき、画面から「再検査」したとき（全機器）
 結果は機器 × ルールごとに最新の1件だけを保存する
+
+例外（承認済みの逸脱。ComplianceException）
+- 機器単位: その機器ではルールの違反を「除外（exempt）」として扱う（違反の件数に数えない）
+- 該当箇所単位: 正規表現に一致する箇所を検査から外す
+    セクション検査 → 見出しが一致するセクション（未使用のポートなど）
+    コンフィグ全体で「あってはいけない」→ 一致する違反行
+  外した結果すべて合格になれば「除外」とする
+期限切れの例外は使わない（次の検査から反映）
 """
 import asyncio
 import json
@@ -24,7 +32,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timeutil import utcnow
-from app.models.compliance import ComplianceResult, ComplianceRule
+from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
 from app.services.activity import record as record_activity
 from app.services.config_service import CONFIG_FILENAME, repo_path
@@ -47,8 +55,27 @@ class RuleSpec:
 
 @dataclass
 class Evaluation:
-    status: str  # pass / fail / error
+    status: str  # pass / fail / error / exempt（例外で除外）
     details: list[str] = field(default_factory=list)
+    ignored: list[str] = field(default_factory=list)  # 例外で検査から外した箇所
+
+
+@dataclass
+class ExceptionSpec:
+    reason: str
+    ignore_pattern: str | None = None  # None なら機器単位の除外
+
+
+def pattern_allowed(spec: RuleSpec) -> bool:
+    """該当箇所単位の例外を使えるルールか（コンフィグ全体で「必要」なルールは外す箇所が無い）"""
+    return spec.scope == "section" or spec.expect == "absent"
+
+
+def validate_ignore_pattern(pattern: str) -> None:
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"除外する箇所の正規表現が正しくありません: {e}") from e
 
 
 def spec_of(rule: ComplianceRule) -> RuleSpec:
@@ -119,23 +146,32 @@ def _fmt(no: int, line: str) -> str:
     return f"{no}行目: {line.strip()}"
 
 
-def evaluate(spec: RuleSpec, config_text: str) -> Evaluation:
+def evaluate(spec: RuleSpec, config_text: str, ignore: list[re.Pattern] | None = None) -> Evaluation:
+    """ignore: 検査から外す箇所（違反行・セクションの見出しに一致する正規表現）"""
     try:
         match = make_matcher(spec)
     except ValueError as e:
         return Evaluation("error", [str(e)])
     lines = config_text.splitlines()
+    ignore = ignore or []
 
+    def ignored(text: str) -> bool:
+        return any(rx.search(text) for rx in ignore)
+
+    skipped: list[str] = []
     if spec.scope != "section":
         hits = [(no, line) for no, line in enumerate(lines, 1) if match(line)]
         if spec.expect == "present":
             return Evaluation("pass") if hits else Evaluation("fail", ["一致する行がありません"])
+        if ignore:
+            skipped = [_fmt(no, line) for no, line in hits if ignored(line)]
+            hits = [(no, line) for no, line in hits if not ignored(line)]
         if not hits:
-            return Evaluation("pass")
+            return Evaluation("pass", ignored=skipped[:MAX_DETAILS])
         details = [_fmt(no, line) for no, line in hits[:MAX_DETAILS]]
         if len(hits) > MAX_DETAILS:
             details.append(f"ほか {len(hits) - MAX_DETAILS} 行")
-        return Evaluation("fail", details)
+        return Evaluation("fail", details, ignored=skipped[:MAX_DETAILS])
 
     try:
         head_rx = re.compile(spec.section_pattern or "")
@@ -150,6 +186,9 @@ def evaluate(spec: RuleSpec, config_text: str) -> Evaluation:
         bad = (not hits) if spec.expect == "present" else bool(hits)
         if not bad:
             continue
+        if ignore and ignored(head):
+            skipped.append(f"{head_no}行目: {head.strip()}")
+            continue
         count += 1
         if len(violations) < MAX_DETAILS:
             if spec.expect == "present":
@@ -158,7 +197,30 @@ def evaluate(spec: RuleSpec, config_text: str) -> Evaluation:
                 violations.append(f"{head_no}行目: {head.strip()} → {hits[0][1].strip()}")
     if count > MAX_DETAILS:
         violations.append(f"ほか {count - MAX_DETAILS} セクション")
-    return Evaluation("fail", violations) if violations else Evaluation("pass")
+    skipped = skipped[:MAX_DETAILS]
+    return Evaluation("fail", violations, ignored=skipped) if violations else Evaluation("pass", ignored=skipped)
+
+
+def evaluate_with_exceptions(spec: RuleSpec, config_text: str, exceptions: list[ExceptionSpec]) -> Evaluation:
+    """例外を適用して評価する。例外のおかげで違反でなくなったものは exempt"""
+    ignore = []
+    for e in exceptions:
+        if e.ignore_pattern:
+            try:
+                ignore.append(re.compile(e.ignore_pattern))
+            except re.error:
+                continue  # 登録時に検証しているので通常は起きない
+    ev = evaluate(spec, config_text, ignore if pattern_allowed(spec) else None)
+    reasons = "・".join(dict.fromkeys(e.reason for e in exceptions))
+    if ev.status == "pass" and ev.ignored:
+        return Evaluation("exempt", [f"例外: {reasons}"] + [f"除外: {x}" for x in ev.ignored], ev.ignored)
+    if ev.status == "fail" and any(not e.ignore_pattern for e in exceptions):
+        return Evaluation("exempt", [f"例外（機器単位）: {reasons}"] + ev.details, ev.ignored)
+    return ev
+
+
+def active_exception(e: ComplianceException, now) -> bool:
+    return e.expires_at is None or e.expires_at > now
 
 
 # ---------------------------------------------------------------- コンフィグの読み込み
@@ -224,6 +286,12 @@ async def run_checks(
     )
     specs = {r.id: spec_of(r) for r in rules if r.enabled}
     now = utcnow()
+    # 有効な例外: (rule_id, device_id or None) → [ExceptionSpec]
+    exceptions: dict[tuple[str, str | None], list[ExceptionSpec]] = {}
+    for e in (await db.execute(select(ComplianceException).where(
+            ComplianceException.rule_id.in_(rule_id_list)))).scalars():
+        if active_exception(e, now):
+            exceptions.setdefault((e.rule_id, e.device_id), []).append(ExceptionSpec(e.reason, e.ignore_pattern))
     checked = 0
     transitions: list[tuple] = []
     for d in devices:
@@ -235,12 +303,15 @@ async def run_checks(
             continue  # 未収集の機器は結果を持たない
         text, commit = loaded
         for rid, s in targets:
-            ev = evaluate(s, text)
+            excs = exceptions.get((rid, None), []) + exceptions.get((rid, d.id), [])
+            ev = evaluate_with_exceptions(s, text, excs) if excs else evaluate(s, text)
             before = previous.get((d.id, rid))
             if ev.status == "fail" and before != "fail":
                 transitions.append(("violation", d, rid, ev.details))
             elif ev.status == "pass" and before == "fail":
                 transitions.append(("resolved", d, rid, None))
+            elif ev.status == "exempt" and before == "fail":
+                transitions.append(("exempted", d, rid, None))
             db.add(ComplianceResult(
                 device_id=d.id, rule_id=rid, status=ev.status,
                 detail=json.dumps(ev.details, ensure_ascii=False) if ev.details else None,
@@ -263,8 +334,9 @@ def _record_transitions(db: AsyncSession, transitions: list[tuple], rules: dict,
     if len(transitions) > MAX_TRANSITION_RECORDS:
         n_v = sum(1 for t in transitions if t[0] == "violation")
         n_r = len(transitions) - n_v
-        items = [f"{'違反' if k == 'violation' else '解消'}: {d.name} / {rules[rid].name}" for k, d, rid, _ in transitions]
-        record_activity(db, "compliance.summary", f"違反の発生 {n_v} 件・解消 {n_r} 件",
+        kinds = {"violation": "違反", "resolved": "解消", "exempted": "除外"}
+        items = [f"{kinds[k]}: {d.name} / {rules[rid].name}" for k, d, rid, _ in transitions]
+        record_activity(db, "compliance.summary", f"違反の発生 {n_v} 件・解消・除外 {n_r} 件",
                         level="warning" if n_v else "info", detail={"items": items[:100]}, actor=actor, ref=ref)
         return
     for kind, d, rid, details in transitions:
@@ -275,6 +347,9 @@ def _record_transitions(db: AsyncSession, transitions: list[tuple], rules: dict,
                             device_id=d.id, device_name=d.name,
                             detail={"rule": rule.name, "severity": rule.severity, "matches": (details or [])[:5]},
                             actor=actor, ref=ref)
+        elif kind == "exempted":
+            record_activity(db, "compliance.exempted", f"ルール「{rule.name}」の違反を例外として除外しました",
+                            device_id=d.id, device_name=d.name, detail={"rule": rule.name}, actor=actor, ref=ref)
         else:
             record_activity(db, "compliance.resolved", f"ルール「{rule.name}」の違反が解消しました",
                             device_id=d.id, device_name=d.name, detail={"rule": rule.name}, actor=actor, ref=ref)

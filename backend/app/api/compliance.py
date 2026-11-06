@@ -1,7 +1,7 @@
 """コンプライアンスチェック API"""
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -15,7 +15,8 @@ from app.api.deps import require
 from app.api.devices import Platform
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.compliance import ComplianceResult, ComplianceRule
+from app.core.timeutil import utcnow
+from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
 from app.models.user import User
 from app.services.audit import Audit, get_audit
@@ -27,7 +28,10 @@ from app.services.compliance import (
     evaluate,
     latest_config,
     load_platforms,
+    pattern_allowed,
     run_checks,
+    spec_of,
+    validate_ignore_pattern,
     validate_spec,
 )
 
@@ -80,6 +84,8 @@ class RuleOut(BaseModel):
     pass_count: int = 0
     fail_count: int = 0
     error_count: int = 0
+    exempt_count: int = 0
+    exception_count: int = 0  # 登録されている例外（期限切れを含む）
 
 
 class RuleTest(BaseModel):
@@ -117,6 +123,7 @@ class DeviceSummary(BaseModel):
     pass_count: int = 0
     fail_count: int = 0
     error_count: int = 0
+    exempt_count: int = 0
     worst_severity: str | None = None  # 違反の中で最も重いもの
     checked_at: datetime | None = None
 
@@ -129,12 +136,14 @@ class Summary(BaseModel):
 
 def _rule_out(r: ComplianceRule, counts: dict[str, dict[str, int]] | None = None) -> RuleOut:
     c = (counts or {}).get(r.id, {})
+    # 例外の件数は _rule_counts が "_exceptions" に入れる
     return RuleOut(
         id=r.id, name=r.name, description=r.description, platforms=load_platforms(r.platforms),
         match_type=r.match_type, expect=r.expect, pattern=r.pattern, scope=r.scope,
         section_pattern=r.section_pattern, severity=r.severity, enabled=r.enabled,
         updated_by=r.updated_by, updated_at=r.updated_at,
         pass_count=c.get("pass", 0), fail_count=c.get("fail", 0), error_count=c.get("error", 0),
+        exempt_count=c.get("exempt", 0), exception_count=c.get("_exceptions", 0),
     )
 
 
@@ -167,6 +176,9 @@ async def _rule_counts(db: AsyncSession) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {}
     for rule_id, st, n in rows:
         out.setdefault(rule_id, {})[st] = n
+    for rule_id, n in (await db.execute(
+            select(ComplianceException.rule_id, func.count()).group_by(ComplianceException.rule_id))).all():
+        out.setdefault(rule_id, {})["_exceptions"] = n
     return out
 
 
@@ -249,6 +261,7 @@ async def delete_rule(
 ):
     r = await _get_rule(db, rule_id)
     await db.execute(delete(ComplianceResult).where(ComplianceResult.rule_id == r.id))
+    await db.execute(delete(ComplianceException).where(ComplianceException.rule_id == r.id))
     await db.delete(r)
     audit("compliance.rule_delete", target_type="compliance_rule", target_id=r.id, target_name=r.name)
     await db.commit()
@@ -271,6 +284,129 @@ async def test_rule(payload: RuleTest, db: AsyncSession = Depends(get_db)):
     return RuleTestResult(applicable=True, has_config=True, status=ev.status, details=ev.details, commit_hash=commit)
 
 
+# ---------------------------------------------------------------- 例外
+
+
+class ExceptionIn(BaseModel):
+    rule_id: str
+    device_id: str | None = None  # None なら全機器
+    ignore_pattern: Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)] | None = None
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+    expires_at: datetime | None = None  # UTC
+
+    @model_validator(mode="after")
+    def _valid(self):
+        self.ignore_pattern = self.ignore_pattern or None
+        if self.ignore_pattern:
+            validate_ignore_pattern(self.ignore_pattern)
+        elif not self.device_id:
+            raise ValueError("全機器を対象にする場合は、除外する箇所（正規表現）を指定してください（ルールを無効にするのと同じになるため）")
+        if self.expires_at is not None:
+            if self.expires_at.tzinfo is not None:
+                self.expires_at = self.expires_at.astimezone(UTC).replace(tzinfo=None)
+            if self.expires_at <= utcnow():
+                raise ValueError("期限は現在より後の日時を指定してください")
+        return self
+
+
+class ExceptionOut(BaseModel):
+    id: str
+    rule_id: str
+    rule_name: str
+    device_id: str | None
+    device_name: str | None
+    ignore_pattern: str | None
+    reason: str
+    expires_at: datetime | None
+    expired: bool
+    created_by: str | None
+    created_at: datetime
+
+
+def _exception_out(e: ComplianceException, rule_names: dict[str, str], device_names: dict[str, str]) -> ExceptionOut:
+    return ExceptionOut(
+        id=e.id, rule_id=e.rule_id, rule_name=rule_names.get(e.rule_id, "—"), device_id=e.device_id,
+        device_name=device_names.get(e.device_id) if e.device_id else None, ignore_pattern=e.ignore_pattern,
+        reason=e.reason, expires_at=e.expires_at, expired=e.expires_at is not None and e.expires_at <= utcnow(),
+        created_by=e.created_by, created_at=e.created_at,
+    )
+
+
+async def _names(db: AsyncSession) -> tuple[dict[str, str], dict[str, str]]:
+    rules = dict((await db.execute(select(ComplianceRule.id, ComplianceRule.name))).all())
+    devices = dict((await db.execute(select(Device.id, Device.name))).all())
+    return rules, devices
+
+
+@router.get("/exceptions", response_model=list[ExceptionOut], dependencies=[Depends(require(Perm.COMPLIANCE_READ))])
+async def list_exceptions(rule_id: str | None = None, device_id: str | None = None,
+                          db: AsyncSession = Depends(get_db)):
+    q = select(ComplianceException).order_by(ComplianceException.created_at.desc())
+    if rule_id:
+        q = q.where(ComplianceException.rule_id == rule_id)
+    if device_id:
+        q = q.where((ComplianceException.device_id == device_id) | ComplianceException.device_id.is_(None))
+    rows = (await db.execute(q)).scalars().all()
+    rules, devices = await _names(db)
+    return [_exception_out(e, rules, devices) for e in rows]
+
+
+@router.post("/exceptions", response_model=ExceptionOut, status_code=status.HTTP_201_CREATED)
+async def create_exception(
+    payload: ExceptionIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require(Perm.COMPLIANCE_WRITE)),
+    audit: Audit = Depends(get_audit),
+):
+    rule = await _get_rule(db, payload.rule_id)
+    device = None
+    if payload.device_id:
+        device = await db.get(Device, payload.device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+    if payload.ignore_pattern and not pattern_allowed(spec_of(rule)):
+        raise HTTPException(status_code=422, detail="このルール（コンフィグ全体に必要な行）では箇所の除外は使えません。機器単位で除外してください")
+    e = ComplianceException(
+        rule_id=rule.id, device_id=payload.device_id, ignore_pattern=payload.ignore_pattern,
+        reason=payload.reason, expires_at=payload.expires_at, created_by=user.username,
+    )
+    db.add(e)
+    audit("compliance.exception_create", target_type="compliance_rule", target_id=rule.id, target_name=rule.name,
+          detail={"device": device.name if device else "全機器", "ignore_pattern": payload.ignore_pattern,
+                  "reason": payload.reason,
+                  "expires_at": payload.expires_at.isoformat() if payload.expires_at else None})
+    await db.commit()
+    await run_checks(db, device_ids=[device.id] if device else None, rule_ids=[rule.id], actor=user.username)
+    await db.commit()
+    await db.refresh(e)
+    rules, devices = await _names(db)
+    return _exception_out(e, rules, devices)
+
+
+@router.delete("/exceptions/{exception_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_exception(
+    exception_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require(Perm.COMPLIANCE_WRITE)),
+    audit: Audit = Depends(get_audit),
+):
+    e = await db.get(ComplianceException, exception_id)
+    if e is None:
+        raise HTTPException(status_code=404, detail="例外が見つかりません")
+    rule = await db.get(ComplianceRule, e.rule_id)
+    device = await db.get(Device, e.device_id) if e.device_id else None
+    await db.delete(e)
+    audit("compliance.exception_delete", target_type="compliance_rule", target_id=e.rule_id,
+          target_name=rule.name if rule else None,
+          detail={"device": device.name if device else "全機器", "ignore_pattern": e.ignore_pattern,
+                  "reason": e.reason})
+    await db.commit()
+    # 例外を外した状態で検査し直す
+    await run_checks(db, device_ids=[e.device_id] if e.device_id else None, rule_ids=[e.rule_id],
+                     actor=user.username)
+    await db.commit()
+
+
 # ---------------------------------------------------------------- 結果
 
 
@@ -287,7 +423,7 @@ async def run_all(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get
 async def list_results(
     device_id: str | None = None,
     rule_id: str | None = None,
-    status_filter: Literal["pass", "fail", "error"] | None = Query(None, alias="status"),
+    status_filter: Literal["pass", "fail", "error", "exempt"] | None = Query(None, alias="status"),
     db: AsyncSession = Depends(get_db),
 ):
     q = (
@@ -341,6 +477,8 @@ async def summary(db: AsyncSession = Depends(get_db)):
         s.checked_at = max(filter(None, [s.checked_at, at]), default=None)
         if st == "pass":
             s.pass_count += 1
+        elif st == "exempt":
+            s.exempt_count += 1
         elif st == "fail":
             s.fail_count += 1
             fail_by_severity[sev] = fail_by_severity.get(sev, 0) + 1

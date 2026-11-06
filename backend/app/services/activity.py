@@ -22,6 +22,7 @@ EVENTS: dict[str, tuple[str, str]] = {
     "schedule.invalid": ("スケジュールの設定エラー", "error"),
     "compliance.violation": ("違反の発生", "warning"),
     "compliance.resolved": ("違反の解消", "info"),
+    "compliance.exempted": ("違反の除外（例外）", "info"),
     "compliance.summary": ("検査結果の変化", "info"),
     "notify.sent": ("通知の送信", "info"),
     "notify.failed": ("通知の失敗", "error"),
