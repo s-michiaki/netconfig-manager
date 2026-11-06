@@ -2,9 +2,15 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from sqlalchemy import select
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +25,7 @@ from app.core.ssh_keys import (
     load_private_key,
     normalize_private_key,
 )
-from app.models.compliance import ComplianceResult
+from app.models.compliance import ComplianceException, ComplianceResult
 from app.models.device import Device, DeviceGroup, JumpHost
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
@@ -310,6 +316,7 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
     """デバイスを削除する（Gitの履歴ディレクトリは監査用に残す）"""
     device = await _get_or_404(db, device_id)
     await db.execute(delete(ComplianceResult).where(ComplianceResult.device_id == device.id))
+    await db.execute(delete(ComplianceException).where(ComplianceException.device_id == device.id))
     await db.delete(device)
     audit("device.delete", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname})

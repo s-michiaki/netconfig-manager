@@ -186,3 +186,107 @@ def test_rule_test_and_templates(ctx):
         body = {k: v for k, v in x.items() if k != "description"}
         assert c.post("/api/compliance/rules/test", json={"rule": body, "device_id": devs["cmp-r2"]["id"]},
                       headers=view).status_code == 200, x["name"]
+
+
+# ---------------------------------------------------------------- 例外
+def test_evaluate_with_exceptions():
+    from app.services.compliance import ExceptionSpec, evaluate_with_exceptions
+    sec = RuleSpec("regex", "present", r"^\s+description ", "section", r"^interface GigabitEthernet")
+    # 予備ポート（Gi0/2）のセクションを外すと除外扱い
+    ev = evaluate_with_exceptions(sec, IOS, [ExceptionSpec("予備ポート", r"GigabitEthernet0/2$")])
+    assert ev.status == "exempt" and ev.details[0] == "例外: 予備ポート"
+    assert ev.details[1] == "除外: 10行目: interface GigabitEthernet0/2"
+    # 一致しない箇所を指定しても違反のまま
+    assert evaluate_with_exceptions(sec, IOS, [ExceptionSpec("x", r"Gi9/9")]).status == "fail"
+    # コンフィグ全体で「あってはいけない」: 違反行の一部だけ外す
+    absent = RuleSpec("regex", "absent", r"^(ip http server|ntp server)")
+    ev = evaluate_with_exceptions(absent, IOS, [ExceptionSpec("NTP は許可", r"^ntp ")])
+    assert ev.status == "fail" and ev.details == ["4行目: ip http server"] and ev.ignored == ["21行目: ntp server 10.0.0.100"]
+    # 機器単位: 違反は除外、合格はそのまま合格
+    ev = evaluate_with_exceptions(absent, IOS, [ExceptionSpec("移行中")])
+    assert ev.status == "exempt" and ev.details[0] == "例外（機器単位）: 移行中" and "4行目: ip http server" in ev.details
+    assert evaluate_with_exceptions(RuleSpec("contains", "absent", "nothing"), IOS, [ExceptionSpec("x")]).status == "pass"
+    # 「必要」なルールでは箇所の指定は使わない
+    present = RuleSpec("regex", "present", r"^ip ssh version 2")
+    assert evaluate_with_exceptions(present, IOS, [ExceptionSpec("x", r".*")]).status == "fail"
+
+
+def test_exception_api(ctx):
+    c, op, view, admin, devs = ctx["c"], ctx["op"], ctx["view"], ctx["admin"], ctx["devs"]
+    rule = c.post("/api/compliance/rules", json={
+        "name": f"IF説明-例外-{uuid.uuid4().hex[:4]}", "match_type": "regex", "expect": "present",
+        "pattern": r"^\s+description ", "scope": "section", "section_pattern": r"^interface GigabitEthernet",
+        "severity": "medium", "platforms": ["cisco_ios"]}, headers=op).json()
+    r1 = devs["cmp-r1"]["id"]
+
+    def status_of(device_id):
+        res = c.get("/api/compliance/results", params={"rule_id": rule["id"], "device_id": device_id}, headers=view).json()
+        return res[0]["status"] if res else None
+
+    cleanup = c.post("/api/compliance/rules", json={
+        "name": f"HTTP-例外-{uuid.uuid4().hex[:4]}", "match_type": "regex", "expect": "present",
+        "pattern": "^ip ssh version 2", "platforms": ["cisco_ios"]}, headers=op).json()
+    # IOS の Gi0/2 は shutdown で description なし → 違反（r1 は前のテストで差し替え済みでも Gi0/2 は同じ）
+    assert status_of(r1) == "fail"
+    body = {"rule_id": rule["id"], "device_id": r1, "ignore_pattern": r"GigabitEthernet0/2$", "reason": "予備ポート"}
+    assert c.post("/api/compliance/exceptions", json=body, headers=view).status_code == 403
+    # 入力チェック: 全機器 × 箇所なし / 不正な正規表現 / 過去の期限 / 「必要」ルールで箇所指定
+    assert c.post("/api/compliance/exceptions", json={**body, "device_id": None, "ignore_pattern": None},
+                  headers=op).status_code == 422
+    assert c.post("/api/compliance/exceptions", json={**body, "ignore_pattern": "([x"}, headers=op).status_code == 422
+    assert c.post("/api/compliance/exceptions", json={**body, "expires_at": "2020-01-01T00:00:00Z"},
+                  headers=op).status_code == 422
+    assert c.post("/api/compliance/exceptions", json={**body, "rule_id": cleanup["id"]}, headers=op).status_code == 422
+
+    e = c.post("/api/compliance/exceptions", json={**body, "expires_at": "2099-01-01T00:00:00+09:00"}, headers=op)
+    assert e.status_code == 201, e.text
+    e = e.json()
+    assert e["device_name"] == devs["cmp-r1"]["name"] and e["created_by"] == "cmp-op" and not e["expired"]
+    assert e["expires_at"].startswith("2098-12-31T15:00")
+    # 登録と同時に再検査されて除外になる。違反の件数・サマリーにも反映
+    assert status_of(r1) == "exempt"
+    rules = {x["id"]: x for x in c.get("/api/compliance/rules", headers=view).json()}
+    assert rules[rule["id"]]["exempt_count"] >= 1 and rules[rule["id"]]["exception_count"] == 1
+    s = next(x for x in c.get("/api/compliance/summary", headers=view).json()["devices"] if x["device_id"] == r1)
+    assert s["exempt_count"] >= 1
+    assert c.get("/api/compliance/results", params={"rule_id": rule["id"], "status": "exempt"},
+                 headers=view).json()[0]["details"][0] == "例外: 予備ポート"
+    acts = c.get("/api/activity/logs", params={"device_id": r1, "category": "compliance"}, headers=view).json()["items"]
+    assert acts[0]["event"] == "compliance.exempted"
+    listed = c.get("/api/compliance/exceptions", params={"device_id": r1}, headers=view).json()
+    assert [x["id"] for x in listed] == [e["id"]]
+
+    # 期限切れの例外は使わない
+    import asyncio
+    from datetime import timedelta
+
+    from app.core.database import AsyncSessionLocal
+    from app.core.timeutil import utcnow
+    from app.models.compliance import ComplianceException
+
+    async def expire():
+        async with AsyncSessionLocal() as db:
+            x = await db.get(ComplianceException, e["id"])
+            x.expires_at = utcnow() - timedelta(minutes=1)
+            await db.commit()
+    asyncio.run(expire())
+    assert c.get("/api/compliance/exceptions", headers=view).json()[0]["expired"] is True
+    c.post("/api/compliance/run", headers=op)
+    assert status_of(r1) == "fail"
+
+    # 全機器 × 箇所の例外 → 削除すると違反に戻る。監査ログに残る
+    e2 = c.post("/api/compliance/exceptions", json={**body, "device_id": None}, headers=op).json()
+    assert status_of(r1) == "exempt" and e2["device_name"] is None
+    assert c.delete(f"/api/compliance/exceptions/{e2['id']}", headers=view).status_code == 403
+    assert c.delete(f"/api/compliance/exceptions/{e2['id']}", headers=op).status_code == 204
+    assert status_of(r1) == "fail"
+    acts = [x["action"] for x in c.get("/api/audit/logs", params={"action": "compliance."},
+                                       headers=admin).json()["items"]]
+    assert "compliance.exception_create" in acts and "compliance.exception_delete" in acts
+
+    # 機器単位の例外 → ルールを削除すると例外も消える
+    c.post("/api/compliance/exceptions", json={**body, "ignore_pattern": None, "reason": "更改予定"}, headers=op)
+    assert status_of(r1) == "exempt"
+    c.delete(f"/api/compliance/rules/{rule['id']}", headers=op)
+    c.delete(f"/api/compliance/rules/{cleanup['id']}", headers=op)
+    assert [x for x in c.get("/api/compliance/exceptions", headers=view).json() if x["rule_id"] == rule["id"]] == []

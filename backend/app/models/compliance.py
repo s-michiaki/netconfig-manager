@@ -47,3 +47,28 @@ class ComplianceResult(Base):
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON 配列（違反箇所など）
     commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)  # 検査したコンフィグの世代
     checked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ComplianceException(Base):
+    """コンプライアンスの例外（承認済みの逸脱）
+
+    - 該当箇所（ignore_pattern）なし: 機器ではこのルールの違反を「除外」として扱う
+    - 該当箇所あり: 一致する箇所だけを検査から外す（セクション検査は見出し、コンフィグ全体の検査は違反行に一致）
+    device_id が None なら全機器（このときは該当箇所が必須）。expires_at を過ぎたら無効
+    """
+
+    __tablename__ = "compliance_exceptions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    rule_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("compliance_rules.id", name="fk_compliance_exceptions_rule_id"), nullable=False,
+        index=True,
+    )
+    device_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("devices.id", name="fk_compliance_exceptions_device_id"), nullable=True
+    )
+    ignore_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)  # 正規表現
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

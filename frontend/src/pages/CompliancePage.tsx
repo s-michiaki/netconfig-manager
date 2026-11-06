@@ -1,4 +1,4 @@
-/** コンプライアンスチェック: 違反一覧・機器別・ルール管理 */
+/** コンプライアンスチェック: 違反一覧・機器別・ルール管理・例外 */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
@@ -6,7 +6,7 @@ import { PERM, useAuth } from "../auth";
 import { usePlatforms } from "../platforms";
 
 type Severity = "high" | "medium" | "low";
-type Status = "pass" | "fail" | "error";
+type Status = "pass" | "fail" | "error" | "exempt";
 
 interface Rule {
   id: string;
@@ -25,8 +25,25 @@ interface Rule {
   pass_count: number;
   fail_count: number;
   error_count: number;
+  exempt_count: number;
+  exception_count: number;
 }
-type RuleInput = Omit<Rule, "id" | "updated_by" | "updated_at" | "pass_count" | "fail_count" | "error_count">;
+type RuleInput = Omit<Rule, "id" | "updated_by" | "updated_at" | "pass_count" | "fail_count" | "error_count" | "exempt_count" | "exception_count">;
+
+/** 例外（承認済みの逸脱） */
+interface CmpException {
+  id: string;
+  rule_id: string;
+  rule_name: string;
+  device_id: string | null;
+  device_name: string | null;
+  ignore_pattern: string | null;
+  reason: string;
+  expires_at: string | null;
+  expired: boolean;
+  created_by: string | null;
+  created_at: string;
+}
 
 interface Result {
   device_id: string;
@@ -50,6 +67,7 @@ interface DeviceSummary {
   pass_count: number;
   fail_count: number;
   error_count: number;
+  exempt_count: number;
   worst_severity: Severity | null;
   checked_at: string | null;
 }
@@ -89,6 +107,135 @@ function Details({ items }: { items: string[] }) {
       {items.length > 3 && (
         <button className="link-btn" onClick={() => setOpen(!open)}>{open ? "閉じる" : `ほか ${items.length - 3} 件を表示`}</button>
       )}
+    </div>
+  );
+}
+
+// ============================================================ 例外の登録
+
+/** 該当箇所単位の例外を使えるルールか（コンフィグ全体に「必要」なルールは外す箇所が無い） */
+const patternAllowed = (r: RuleInput) => r.scope === "section" || r.expect === "absent";
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** 違反箇所（「10行目: interface Gi0/2（…）」「4行目: ip http server」）から除外用の正規表現を作る */
+function patternFromDetail(rule: RuleInput, detail: string): string | null {
+  const m = detail.match(/^\d+行目: (.+)$/);
+  if (!m) return null;
+  let text = m[1];
+  if (rule.scope === "section") text = text.replace(/（一致する行がありません）$/, "").replace(/ → .*$/, "");
+  return `^${escapeRe(text.trim())}$`;
+}
+
+function ExceptionModal({
+  rule, device, details, devices, onClose, onSaved,
+}: {
+  rule: Rule; device: { id: string; name: string } | null; details: string[]; devices: Device[];
+  onClose: () => void; onSaved: (msg: string) => void;
+}) {
+  const allowPattern = patternAllowed(rule);
+  const [deviceId, setDeviceId] = useState(device?.id ?? "");
+  const [mode, setMode] = useState<"device" | "pattern">(allowPattern && details.length ? "pattern" : "device");
+  const [pattern, setPattern] = useState("");
+  const [reason, setReason] = useState("");
+  const [expires, setExpires] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const candidates = devices.filter((d) => !rule.platforms.length || rule.platforms.includes(d.platform));
+  const suggestions = allowPattern
+    ? Array.from(new Set(details.map((d) => patternFromDetail(rule, d)).filter((x): x is string => !!x)))
+    : [];
+  const effectiveMode = !deviceId ? "pattern" : mode;
+  const canSave = reason.trim() && (effectiveMode === "device" || pattern.trim());
+
+  const addSuggestion = (p: string) => {
+    const parts = pattern ? pattern.split("|") : [];
+    if (!parts.includes(p)) setPattern([...parts, p].join("|"));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.post("/compliance/exceptions", {
+        rule_id: rule.id,
+        device_id: deviceId || null,
+        ignore_pattern: effectiveMode === "pattern" ? pattern.trim() : null,
+        reason: reason.trim(),
+        expires_at: expires ? new Date(`${expires}T23:59:59`).toISOString() : null,
+      });
+      onSaved("例外を登録して再検査しました");
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal cmp-modal" onClick={(e) => e.stopPropagation()}>
+        <p className="modal-title">例外の登録</p>
+        <p className="topo-muted topo-small" style={{ marginBottom: 10 }}>
+          承認済みの逸脱を登録すると、違反ではなく「除外」として扱います（違反の件数に数えません）。
+        </p>
+        <div className="form-group">
+          <span className="form-label">ルール</span>
+          <div><b>{rule.name}</b> <SevBadge s={rule.severity} /></div>
+          <div className="topo-small mono cmp-cond">{describe(rule)}</div>
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="x-device">対象の機器</label>
+          <select id="x-device" value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+            {allowPattern && <option value="">全機器（該当箇所の指定が必要）</option>}
+            {candidates.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+        </div>
+        <div className="form-group">
+          <span className="form-label">除外の範囲</span>
+          <label className="form-check">
+            <input type="radio" name="x-mode" checked={effectiveMode === "device"} disabled={!deviceId}
+              onChange={() => setMode("device")} />
+            この機器ではルールの違反をすべて除外する
+          </label>
+          <label className="form-check">
+            <input type="radio" name="x-mode" checked={effectiveMode === "pattern"} disabled={!allowPattern}
+              onChange={() => setMode("pattern")} />
+            該当箇所だけ除外する
+            {!allowPattern && <span className="topo-muted topo-small">（コンフィグ全体に「必要」なルールでは使えません）</span>}
+          </label>
+        </div>
+        {effectiveMode === "pattern" && (
+          <div className="form-group">
+            <label className="form-label" htmlFor="x-pattern">
+              {rule.scope === "section" ? "除外するセクションの見出し（正規表現）" : "除外する行（正規表現）"}
+            </label>
+            <input id="x-pattern" className="mono" value={pattern} onChange={(e) => setPattern(e.target.value)}
+              placeholder={rule.scope === "section" ? "例: ^interface GigabitEthernet0/(2|3)$" : "例: ^ntp server 10\\.0\\.0\\.100$"} />
+            {suggestions.length > 0 && (
+              <div className="cmp-suggest">
+                <span className="topo-muted topo-small">違反箇所から追加:</span>
+                {suggestions.map((p) => (
+                  <button key={p} type="button" className="btn btn-sm mono" onClick={() => addSuggestion(p)}>{p}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <div className="form-group">
+          <label className="form-label" htmlFor="x-reason">理由</label>
+          <input id="x-reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="例: 予備ポートのため / 機器更改まで（チケット #123）" />
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="x-expires">期限（任意。この日の終わりまで有効）</label>
+          <input id="x-expires" type="date" value={expires} onChange={(e) => setExpires(e.target.value)} />
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="btn-row">
+          <button className="btn" onClick={onClose}>キャンセル</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving || !canSave}>{saving ? "登録・検査中..." : "登録して再検査"}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -335,7 +482,7 @@ function TemplateModal({
 
 // ============================================================ ページ
 
-type Tab = "violations" | "devices" | "rules";
+type Tab = "violations" | "devices" | "rules" | "exceptions";
 
 export default function CompliancePage() {
   const { can } = useAuth();
@@ -348,6 +495,8 @@ export default function CompliancePage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [results, setResults] = useState<Result[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
+  const [exceptions, setExceptions] = useState<CmpException[]>([]);
+  const [excepting, setExcepting] = useState<{ rule: Rule; device: { id: string; name: string } | null; details: string[] } | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
   const [groupFilter, setGroupFilter] = useState("");
@@ -361,14 +510,16 @@ export default function CompliancePage() {
   const load = useCallback(async () => {
     setError("");
     try {
-      const [s, r, ru] = await Promise.all([
+      const [s, r, ru, ex] = await Promise.all([
         api.get<Summary>("/compliance/summary"),
         api.get<Result[]>("/compliance/results", { params: { status: "fail" } }),
         api.get<Rule[]>("/compliance/rules"),
+        api.get<CmpException[]>("/compliance/exceptions"),
       ]);
       setSummary(s.data);
       setResults(r.data);
       setRules(ru.data);
+      setExceptions(ex.data);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -409,6 +560,18 @@ export default function CompliancePage() {
     }
   };
 
+  const removeException = async (x: CmpException) => {
+    if (!window.confirm(`ルール「${x.rule_name}」の例外（${x.device_name ?? "全機器"}）を削除しますか？\n削除後に再検査します。`)) return;
+    try {
+      await api.delete(`/compliance/exceptions/${x.id}`);
+      setNotice("例外を削除して再検査しました");
+      await load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+  const ruleById = useMemo(() => new Map(rules.map((r) => [r.id, r])), [rules]);
+
   const groupOf = useMemo(() => new Map(devices.map((d) => [d.id, d.group_id ?? UNGROUPED])), [devices]);
   const inGroup = (deviceId: string) => !groupFilter || groupOf.get(deviceId) === groupFilter;
   const shown = useMemo(
@@ -424,6 +587,10 @@ export default function CompliancePage() {
     <div className="page">
       {editing !== undefined && (
         <RuleModal rule={editing} devices={devices} onClose={() => setEditing(undefined)} onSaved={load} />
+      )}
+      {excepting && (
+        <ExceptionModal rule={excepting.rule} device={excepting.device} details={excepting.details} devices={devices}
+          onClose={() => setExcepting(null)} onSaved={(m) => { setNotice(m); load(); }} />
       )}
       {showTemplates && (
         <TemplateModal existing={new Set(rules.map((r) => r.name))} onClose={() => setShowTemplates(false)}
@@ -467,7 +634,7 @@ export default function CompliancePage() {
         )}
 
         <div className="seg-tabs" role="tablist" style={{ marginBottom: 12 }}>
-          {([["violations", `違反一覧（${results.length}）`], ["devices", "機器別"], ["rules", `ルール（${rules.length}）`]] as [Tab, string][]).map(([k, l]) => (
+          {([["violations", `違反一覧（${results.length}）`], ["devices", "機器別"], ["rules", `ルール（${rules.length}）`], ["exceptions", `例外（${exceptions.length}）`]] as [Tab, string][]).map(([k, l]) => (
             <button key={k} role="tab" aria-selected={tab === k} className={`seg-tab${tab === k ? " active" : ""}`} onClick={() => setTab(k)}>{l}</button>
           ))}
         </div>
@@ -502,7 +669,7 @@ export default function CompliancePage() {
             </div>
             <div className="table-scroll">
               <table className="data-table">
-                <thead><tr><th>重要度</th><th>機器</th><th>ルール</th><th>違反箇所</th><th>検査</th></tr></thead>
+                <thead><tr><th>重要度</th><th>機器</th><th>ルール</th><th>違反箇所</th><th>検査</th>{canWrite && <th />}</tr></thead>
                 <tbody>
                   {shown.map((x) => (
                     <tr key={`${x.device_id}:${x.rule_id}`}>
@@ -514,10 +681,20 @@ export default function CompliancePage() {
                       <td>{x.rule_name}</td>
                       <td><Details items={x.details} /></td>
                       <td className="nowrap topo-small">{fmtDate(x.checked_at)}{x.commit_hash ? <div className="topo-muted mono">{x.commit_hash.slice(0, 8)}</div> : null}</td>
+                      {canWrite && (
+                        <td className="nowrap">
+                          {ruleById.get(x.rule_id) && (
+                            <button className="btn btn-sm" title="承認済みの逸脱として除外する"
+                              onClick={() => setExcepting({ rule: ruleById.get(x.rule_id)!, device: { id: x.device_id, name: x.device_name }, details: x.details })}>
+                              例外にする
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                   {!shown.length && (
-                    <tr><td colSpan={5} className="topo-muted" style={{ textAlign: "center", padding: 24 }}>
+                    <tr><td colSpan={6} className="topo-muted" style={{ textAlign: "center", padding: 24 }}>
                       {rules.length ? "違反はありません" : "ルールが登録されていません。「テンプレートから追加」で始められます"}
                     </td></tr>
                   )}
@@ -541,7 +718,7 @@ export default function CompliancePage() {
           </div>
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>機器</th><th>プラットフォーム</th><th>違反</th><th>合格</th><th>エラー</th><th>最も重い違反</th><th>検査</th></tr></thead>
+              <thead><tr><th>機器</th><th>プラットフォーム</th><th>違反</th><th>合格</th><th>除外</th><th>エラー</th><th>最も重い違反</th><th>検査</th></tr></thead>
               <tbody>
                 {summary.devices.filter((d) => inGroup(d.device_id)).map((d) => (
                   <tr key={d.device_id}>
@@ -555,6 +732,7 @@ export default function CompliancePage() {
                       ) : d.checked ? "0" : "—"}
                     </td>
                     <td>{d.checked ? d.pass_count : "—"}</td>
+                    <td>{d.checked ? d.exempt_count : "—"}</td>
                     <td>{d.error_count || (d.checked ? "0" : "—")}</td>
                     <td><SevBadge s={d.worst_severity} /></td>
                     <td className="nowrap topo-small">{d.checked ? fmtDate(d.checked_at) : <span className="topo-muted">未検査</span>}</td>
@@ -582,11 +760,16 @@ export default function CompliancePage() {
                     <td className="topo-small">{r.platforms.length ? r.platforms.map((p) => platformLabel(p)).join("・") : "全機種"}</td>
                     <td className="nowrap topo-small">
                       <span style={{ color: r.fail_count ? "var(--color-danger)" : undefined }}>違反 {r.fail_count}</span> / 合格 {r.pass_count}
+                      {r.exempt_count ? <span> / 除外 {r.exempt_count}</span> : null}
                       {r.error_count ? <span style={{ color: "var(--color-warning)" }}> / エラー {r.error_count}</span> : null}
+                      {r.exception_count ? (
+                        <div><button className="link-btn" onClick={() => setTab("exceptions")}>例外 {r.exception_count}件</button></div>
+                      ) : null}
                     </td>
                     {canWrite && (
                       <td className="nowrap">
                         <button className="btn" onClick={() => setEditing(r)}>編集</button>{" "}
+                        <button className="btn" onClick={() => setExcepting({ rule: r, device: null, details: [] })}>例外</button>{" "}
                         <button className="btn btn-danger" onClick={() => removeRule(r)}>削除</button>
                       </td>
                     )}
@@ -598,6 +781,41 @@ export default function CompliancePage() {
               </tbody>
             </table>
           </div>
+        )}
+
+        {tab === "exceptions" && (
+          <>
+            <p className="topo-muted topo-small" style={{ marginBottom: 8 }}>
+              承認済みの逸脱です。登録・削除すると対象を再検査します。期限切れの例外は次の検査（収集・再検査）から使われません。
+              追加は「違反一覧」の「例外にする」か、「ルール」の「例外」から行います。
+            </p>
+            <div className="table-scroll">
+              <table className="data-table">
+                <thead><tr><th>ルール</th><th>機器</th><th>除外する箇所</th><th>理由</th><th>期限</th><th>登録</th>{canWrite && <th />}</tr></thead>
+                <tbody>
+                  {exceptions.map((x) => (
+                    <tr key={x.id} style={{ opacity: x.expired ? 0.6 : 1 }}>
+                      <td>{x.rule_name}</td>
+                      <td className="nowrap">{x.device_name ?? <span className="badge badge-neutral">全機器</span>}</td>
+                      <td className="mono topo-small">{x.ignore_pattern ?? <span className="topo-muted">（機器単位で除外）</span>}</td>
+                      <td>{x.reason}</td>
+                      <td className="nowrap topo-small">
+                        {x.expires_at ? new Date(/[zZ]|[+-]\d\d:\d\d$/.test(x.expires_at) ? x.expires_at : x.expires_at + "Z").toLocaleDateString("ja-JP") + " まで" : <span className="topo-muted">なし</span>}
+                        {x.expired && <span className="badge badge-warning" style={{ marginLeft: 6 }}>期限切れ</span>}
+                      </td>
+                      <td className="nowrap topo-small">{x.created_by ?? "—"}<div className="topo-muted">{fmtDate(x.created_at)}</div></td>
+                      {canWrite && (
+                        <td className="nowrap"><button className="btn btn-danger btn-sm" onClick={() => removeException(x)}>削除</button></td>
+                      )}
+                    </tr>
+                  ))}
+                  {!exceptions.length && (
+                    <tr><td colSpan={7} className="topo-muted" style={{ textAlign: "center", padding: 24 }}>例外は登録されていません</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>
