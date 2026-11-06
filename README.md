@@ -147,6 +147,36 @@ bash /opt/netconfig-manager/scripts/import_cert.sh
 3. Windows: 管理者の PowerShell で `Import-Certificate -FilePath .\netconfig-root-ca.crt -CertStoreLocation Cert:\LocalMachine\Root`（またはファイルをダブルクリック →「証明書のインストール」→ ローカルコンピューター →「信頼されたルート証明機関」）
 4. ホスト名（例: `www.sameshima.test`）で開く場合は、DNS か hosts ファイルにサーバーの IP を登録
 
+### バックアップと復元
+
+`setup.sh` が systemd タイマー（`netconfig-backup.timer`）を登録し、毎日 `scripts/backup.sh` でバックアップを取ります。
+
+- **内容**: DB（`pg_dump`）・コンフィグ履歴（機器ごとの Git リポジトリ）・SSH の known_hosts・ターミナルの記録・`.env`・証明書（`certs/`）を1つのファイル `netconfig-backup-<日時>.tar.gz` にまとめます
+- **保存先**: `/var/backups/netconfig-manager/`（root だけが読める）。`.env` の `BACKUP_DIR` で変更できます。サーバーの故障に備えて、別ディスク・NFS など**サーバーの外**にも置いてください
+- **保存期間**: `BACKUP_KEEP_DAYS`（既定 14 日）より古いものを削除します（最新の1つは必ず残します）
+- **実行時刻**: `BACKUP_ON_CALENDAR`（systemd の OnCalendar 形式。既定 `*-*-* 03:15:00`、`off` で無効）。変更後は `setup.sh` を実行すると反映されます
+- ターミナルの記録を含めない場合は `BACKUP_TERMINAL_LOGS=false`
+- バックアップには `.env`（`DEVICE_ENCRYPTION_KEY`）が含まれ、機器のパスワードを復号できます。持ち出すときは取り扱いに注意してください
+
+```bash
+sudo bash /opt/netconfig-manager/scripts/backup.sh          # 今すぐ実行
+sudo bash /opt/netconfig-manager/scripts/backup.sh --list   # 一覧
+systemctl list-timers netconfig-backup.timer                # 次回の実行
+journalctl -u netconfig-backup.service                      # 実行結果
+```
+
+**復元**（現在のデータはすべてバックアップの時点に置き換わります）
+
+```bash
+sudo bash /opt/netconfig-manager/scripts/restore.sh /var/backups/netconfig-manager/netconfig-backup-<日時>.tar.gz
+```
+
+- アプリのコンテナを止めて DB を作り直し、コンフィグ履歴などのボリュームを入れ替えてから起動します（起動時にマイグレーションが適用されます）
+- `.env` の `DEVICE_ENCRYPTION_KEY` がバックアップと違うとき（別サーバーへの復元など）は、`.env` をバックアップのものに戻します。今までの `.env` は `/root/netconfig-manager-backup/` に退避します
+- **別サーバーへ移す場合**: 新しいサーバーで `setup.sh` を実行して起動したあと、バックアップファイルをコピーして `restore.sh` を実行します
+- 新しいバージョンで取ったバックアップを古いバージョンに戻すことはできません（先に `setup.sh` で更新してください）
+
+
 ---
 
 ## 機器のグループ
@@ -414,7 +444,9 @@ netconfig-manager/
 ├── scripts/
 │   ├── setup.sh                 # 自動セットアップ・更新
 │   ├── check_env.sh             # 導入前チェック
-│   └── import_cert.sh           # HTTPS 化（証明書の取り込み）
+│   ├── import_cert.sh           # HTTPS 化（証明書の取り込み）
+│   ├── backup.sh                # バックアップ（setup.sh が毎日実行するよう登録）
+│   └── restore.sh               # バックアップからの復元
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -509,7 +541,7 @@ netconfig-manager/
 
 - **認証強化**: LDAP/AD 連携、MFA、機器グループ単位の権限
 - **通知機能の拡張**: コンプライアンス違反・収集失敗の通知、メール・Microsoft Teams への通知
-- **バックアップ**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push
+- **バックアップの拡張**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push、バックアップの外部ストレージ（S3 など）への転送
 - **パスワード管理**: HashiCorp Vault 連携
 - **踏み台の多段化**: 2段以上の踏み台経由（現在は1段まで）
 - **Ping監視の拡張**: 結果の履歴保存・グラフ、応答なしが続いたときの通知、踏み台経由の PING、構成図への死活状態の表示
