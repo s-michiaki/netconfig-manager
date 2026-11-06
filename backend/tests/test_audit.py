@@ -193,3 +193,35 @@ def test_terminal_closed_by_device(ctx):
             break
         time.sleep(0.1)
     assert s[0]["end_reason"] == "機器側で終了"
+
+
+def test_csv_export(ctx):
+    import csv
+    import io
+    c, admin, op = ctx["c"], ctx["admin"], ctx["op"]
+    assert c.get("/api/audit/logs/export", headers=op).status_code == 403
+    assert c.get("/api/audit/terminal-sessions/export", headers=op).status_code == 403
+    # 数式として解釈される名前の機器を作って、絞り込み付きで出力する
+    name = f"=cmd|{uuid.uuid4().hex[:6]}"
+    c.post("/api/devices/", json={"name": name, "hostname": "10.9.9.9", "platform": "cisco_ios",
+                                  "username": "u", "password": "secret-pw"}, headers=admin)
+    r = c.get("/api/audit/logs/export", params={"action": "device.create", "q": name}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/csv")
+    assert 'filename="audit_logs_' in r.headers["content-disposition"]
+    assert r.content.startswith("﻿".encode())
+    rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert rows[0][0].startswith("日時（") and rows[0][2] == "操作"
+    assert len(rows) == 2
+    row = rows[1]
+    assert row[1] == "admin" and row[3] == "device.create" and row[5] == "'" + name and row[9] == "成功"
+    assert "secret-pw" not in r.text
+    # 出力したことが記録される
+    exp = logs(c, admin, action="audit.export")["items"][0]
+    d = json.loads(exp["detail"])
+    assert d["kind"] == "操作履歴" and d["rows"] == 1 and d["q"] == name
+
+    r = c.get("/api/audit/terminal-sessions/export", headers=admin)
+    assert r.status_code == 200
+    head = next(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert head[3] == "ユーザー" and head[-1] == "記録の打ち切り"
