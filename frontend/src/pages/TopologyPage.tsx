@@ -24,6 +24,8 @@ import { edgeTypes } from "../topology/LinkEdge";
 interface DeviceItem { id: string; name: string; hostname: string; platform: string; group_id: string | null; group_name: string | null; }
 
 const STATUS_REFRESH_MS = 30_000;
+const HISTORY_LIMIT = 100; // 取り消せる操作の数
+type Snapshot = { nodes: TopoNode[]; edges: LinkEdge[] };
 const LAST_MAP_KEY = "topology:last-map";
 
 function lastMap(): string | null {
@@ -253,6 +255,44 @@ function Editor(props: EditorProps) {
   const [saving, setSaving] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
 
+  // ---------------------------------------------------------------- 取り消し・やり直し（編集中のみ。保存・読み込みでリセット）
+  // 変更の直前の状態（nodes / edges）を積む。連続した入力（同じ項目へのタイピング）は1回分にまとめる
+  const nodesRef = useRef(nodes);
+  const edgesRef = useRef(edges);
+  nodesRef.current = nodes;
+  edgesRef.current = edges;
+  const history = useRef<{ past: Snapshot[]; future: Snapshot[]; savedAt: number; lastKey: string; lastAt: number; batching: boolean }>(
+    { past: [], future: [], savedAt: 0, lastKey: "", lastAt: 0, batching: false }
+  );
+  const [historyLen, setHistoryLen] = useState({ past: 0, future: 0 });
+  const syncHistory = () => setHistoryLen({ past: history.current.past.length, future: history.current.future.length });
+  const resetHistory = useCallback(() => {
+    history.current = { past: [], future: [], savedAt: 0, lastKey: "", lastAt: 0, batching: false };
+    setHistoryLen({ past: 0, future: 0 });
+  }, []);
+  /** 変更の直前に呼ぶ。key を渡すと、同じ key が続く間（1.5 秒以内）は1回分にまとめる */
+  const checkpoint = useCallback((key = "") => {
+    const h = history.current;
+    const now = Date.now();
+    if (h.batching) return; // 同じ操作から続けて届く変更（ノードと線の削除など）
+    if (key && key === h.lastKey && now - h.lastAt < 1500) {
+      h.lastAt = now;
+      return;
+    }
+    if (h.past.length < h.savedAt) h.savedAt = -1; // 保存した状態には戻れなくなった
+    h.past.push({ nodes: nodesRef.current, edges: edgesRef.current });
+    if (h.past.length > HISTORY_LIMIT) {
+      h.past.shift();
+      h.savedAt -= 1;
+    }
+    h.future = [];
+    h.lastKey = key;
+    h.lastAt = now;
+    h.batching = true;
+    window.setTimeout(() => { h.batching = false; }, 0);
+    setHistoryLen({ past: h.past.length, future: 0 });
+  }, []);
+
   // 親から渡される関数は描画のたびに作り直されるため、ref 経由で呼ぶ（読み込みが繰り返されないように）
   const onDirtyRef = useRef(onDirtyChange);
   onDirtyRef.current = onDirtyChange;
@@ -269,7 +309,8 @@ function Editor(props: EditorProps) {
     setStatuses(d.devices);
     setDirty(false);
     setConflict(false);
-  }, [setDirty, docOf]);
+    resetHistory();
+  }, [setDirty, docOf, resetHistory]);
 
   const load = useCallback(async () => {
     setError("");
@@ -305,28 +346,36 @@ function Editor(props: EditorProps) {
   }, [notice]);
 
   // ---------------------------------------------------------------- 変更
+  const resizingRef = useRef(false);
   const onNodesChange = useCallback((changes: NodeChange<TopoNode>[]) => {
+    // ドラッグの開始は onNodeDragStart、サイズ変更は開始時の1回だけ記録する
+    if (changes.some((c) => c.type === "remove")) checkpoint();
+    const resizing = changes.some((c) => c.type === "dimensions" && c.resizing === true);
+    if (resizing && !resizingRef.current) checkpoint();
+    if (changes.some((c) => c.type === "dimensions" && c.resizing !== undefined)) resizingRef.current = resizing;
     setNodes((nds) => applyNodeChanges(changes, nds));
     // 選択や初回の大きさ計測は「変更」に数えない
     if (changes.some((c) => c.type === "position" || c.type === "remove" || c.type === "add"
       || (c.type === "dimensions" && c.resizing !== undefined))) {
       setDirty(true);
     }
-  }, [setDirty]);
+  }, [setDirty, checkpoint]);
 
   const onEdgesChange = useCallback((changes: EdgeChange<LinkEdge>[]) => {
+    if (changes.some((c) => c.type === "remove")) checkpoint();
     setEdges((eds) => applyEdgeChanges(changes, eds));
     if (changes.some((c) => c.type === "remove" || c.type === "add")) setDirty(true);
-  }, [setDirty]);
+  }, [setDirty, checkpoint]);
 
   const onConnect = useCallback((c: Connection) => {
     if (!c.source || !c.target || c.source === c.target) return;
     // つないだ線を選択状態にして、すぐポート名を入力できるようにする
     const edge: LinkEdge = { id: newId("e"), source: c.source, target: c.target, type: "link", data: {}, selected: true };
+    checkpoint();
     setNodes((nds) => nds.map((n) => (n.selected ? { ...n, selected: false } : n)));
     setEdges((eds) => [...eds.map((e) => (e.selected ? { ...e, selected: false } : e)), edge]);
     setDirty(true);
-  }, [setDirty]);
+  }, [setDirty, checkpoint]);
 
   // 線をつなげられるノード（テキスト・グループ枠は不可）
   const CONNECTABLE = useMemo(() => new Set(["device", "unmanaged", "cloud", "shape", "segment", "point"]), []);
@@ -345,21 +394,61 @@ function Editor(props: EditorProps) {
   }, [CONNECTABLE, onConnect, rf]);
 
   const updateNode = useCallback((id: string, patch: Record<string, unknown>) => {
+    checkpoint(`node:${id}:${Object.keys(patch).sort().join(",")}`);
     setNodes((nds) => nds.map((n) => (n.id === id ? ({ ...n, data: { ...n.data, ...patch } } as TopoNode) : n)));
     setDirty(true);
-  }, [setDirty]);
+  }, [setDirty, checkpoint]);
 
   const updateEdge = useCallback((id: string, patch: Partial<NonNullable<LinkEdge["data"]>>) => {
+    checkpoint(`edge:${id}:${Object.keys(patch).sort().join(",")}`);
     setEdges((eds) => eds.map((e) => (e.id === id ? { ...e, data: { ...e.data, ...patch } } : e)));
     setDirty(true);
-  }, [setDirty]);
+  }, [setDirty, checkpoint]);
 
   const removeSelected = useCallback(() => {
+    checkpoint();
     const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
     setNodes((nds) => nds.filter((n) => !n.selected));
     setEdges((eds) => eds.filter((e) => !e.selected && !ids.has(e.source) && !ids.has(e.target)));
     setDirty(true);
-  }, [nodes, setDirty]);
+  }, [nodes, setDirty, checkpoint]);
+
+  /** 取り消し（back=true）・やり直し。選択は解除して戻す */
+  const travel = useCallback((back: boolean) => {
+    const h = history.current;
+    const from = back ? h.past : h.future;
+    const to = back ? h.future : h.past;
+    const snap = from.pop();
+    if (!snap) return;
+    to.push({ nodes: nodesRef.current, edges: edgesRef.current });
+    h.lastKey = "";
+    setNodes(snap.nodes.map((n) => (n.selected ? { ...n, selected: false } : n)));
+    setEdges(snap.edges.map((e) => (e.selected ? { ...e, selected: false } : e)));
+    setDirty(h.past.length !== h.savedAt);
+    syncHistory();
+  }, [setDirty]);
+  const undo = useCallback(() => travel(true), [travel]);
+  const redo = useCallback(() => travel(false), [travel]);
+
+  // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y（入力欄では各欄の取り消しを優先する）
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((k === "z" && e.shiftKey) || k === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing, undo, redo]);
 
   const viewCenter = () => {
     const rect = wrapper.current!.getBoundingClientRect();
@@ -367,6 +456,7 @@ function Editor(props: EditorProps) {
   };
 
   const addNode = (node: TopoNode) => {
+    checkpoint();
     setNodes((nds) => [...nds.map((n) => (n.selected ? { ...n, selected: false } : n)), { ...node, selected: true }]);
     setEdges((eds) => eds.map((e) => (e.selected ? { ...e, selected: false } : e)));
     setDirty(true);
@@ -524,6 +614,7 @@ function Editor(props: EditorProps) {
   const toggleEditing = () => {
     if (editing && dirty && !window.confirm("保存していない変更があります。破棄して閲覧モードに戻りますか？")) return;
     if (editing && dirty) load();
+    if (editing) resetHistory();
     setEditing(!editing);
   };
 
@@ -590,7 +681,9 @@ function Editor(props: EditorProps) {
             editing ? (
               <>
                 {dirty && <span className="topo-dirty">未保存の変更あり</span>}
-                <button className="btn" onClick={discard} disabled={!dirty}>元に戻す</button>
+                <button className="btn topo-undo" onClick={undo} disabled={!historyLen.past} title="取り消す（Ctrl+Z）" aria-label="取り消す">↶</button>
+                <button className="btn topo-undo" onClick={redo} disabled={!historyLen.future} title="やり直す（Ctrl+Shift+Z / Ctrl+Y）" aria-label="やり直す">↷</button>
+                <button className="btn" onClick={discard} disabled={!dirty} title="保存済みの状態に戻す">変更を破棄</button>
                 <button className="btn" onClick={toggleEditing}>編集を終了</button>
                 <button className="btn btn-primary" onClick={save} disabled={saving || !dirty}>
                   {saving ? "保存中..." : "保存"}
@@ -621,6 +714,8 @@ function Editor(props: EditorProps) {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onConnectEnd={onConnectEnd}
+              onNodeDragStart={() => checkpoint()}
+              onSelectionDragStart={() => checkpoint()}
               isValidConnection={(c) => c.source !== c.target}
               connectionMode={ConnectionMode.Loose}
               connectionRadius={30}
