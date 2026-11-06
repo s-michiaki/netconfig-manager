@@ -14,7 +14,7 @@ from app.services.audit import Audit, get_audit
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.device import Device, Schedule
+from app.models.device import Device, DeviceGroup, Schedule
 
 router = APIRouter()
 
@@ -49,6 +49,18 @@ class ScheduleResponse(BaseModel):
     next_run: str | None = None
 
 
+async def _check_target(db: AsyncSession, target: str) -> None:
+    """対象: all（全機器）/ group:<グループID>（グループの機器）/ 機器 ID"""
+    if target == "all":
+        return
+    if target.startswith("group:"):
+        if not await db.get(DeviceGroup, target.split(":", 1)[1]):
+            raise HTTPException(status_code=422, detail="指定されたグループが存在しません")
+        return
+    if not await db.get(Device, target):
+        raise HTTPException(status_code=422, detail="対象には all・group:<グループID>・登録済みデバイスのIDを指定してください")
+
+
 def _to_response(s: Schedule) -> ScheduleResponse:
     resp = ScheduleResponse.model_validate(s)
     if s.is_active:
@@ -75,8 +87,7 @@ async def list_schedules(db: AsyncSession = Depends(get_db)):
 async def create_schedule(
     payload: ScheduleCreate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)
 ):
-    if payload.target != "all" and not await db.get(Device, payload.target):
-        raise HTTPException(status_code=422, detail="対象には all または登録済みデバイスのIDを指定してください")
+    await _check_target(db, payload.target)
     schedule = Schedule(id=str(uuid.uuid4()), **payload.model_dump())
     db.add(schedule)
     audit("schedule.create", target_type="schedule", target_id=schedule.id, target_name=schedule.name,

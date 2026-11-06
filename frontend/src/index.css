@@ -701,3 +701,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .act-detail ul { margin: 2px 0 0 18px; }
 .act-table a, .audit-detail a { color: var(--color-accent); text-decoration: none; }
 .act-table a:hover, .audit-detail a:hover { text-decoration: underline; }
+
+.dev-group-bar { display: flex; align-items: center; gap: 8px; }
+.dev-group-bar .dev-group-head { flex: 1; min-width: 0; }
+.dev-group-bar > .btn { flex-shrink: 0; }

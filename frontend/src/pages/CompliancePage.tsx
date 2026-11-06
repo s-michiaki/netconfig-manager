@@ -54,7 +54,8 @@ interface DeviceSummary {
   checked_at: string | null;
 }
 interface Summary { rules: number; devices: DeviceSummary[]; fail_by_severity: Record<Severity, number>; }
-interface Device { id: string; name: string; platform: string; }
+interface Device { id: string; name: string; platform: string; group_id: string | null; }
+const UNGROUPED = "__none__";
 
 const SEV_LABEL: Record<Severity, string> = { high: "高", medium: "中", low: "低" };
 const SEV_BADGE: Record<Severity, string> = { high: "badge-danger", medium: "badge-warning", low: "badge-neutral" };
@@ -348,6 +349,8 @@ export default function CompliancePage() {
   const [results, setResults] = useState<Result[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [groups, setGroups] = useState<{ id: string; name: string }[]>([]);
+  const [groupFilter, setGroupFilter] = useState("");
   const [sevFilter, setSevFilter] = useState<"" | Severity>("");
   const [editing, setEditing] = useState<Rule | RuleInput | null | undefined>(undefined);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -374,6 +377,7 @@ export default function CompliancePage() {
   useEffect(() => {
     load();
     api.get<Device[]>("/devices/").then((r) => setDevices(r.data)).catch(() => {});
+    api.get<{ id: string; name: string }[]>("/device-groups/").then((r) => setGroups(r.data)).catch(() => {});
   }, [load]);
 
   useEffect(() => {
@@ -405,9 +409,12 @@ export default function CompliancePage() {
     }
   };
 
+  const groupOf = useMemo(() => new Map(devices.map((d) => [d.id, d.group_id ?? UNGROUPED])), [devices]);
+  const inGroup = (deviceId: string) => !groupFilter || groupOf.get(deviceId) === groupFilter;
   const shown = useMemo(
-    () => results.filter((x) => (!deviceFilter || x.device_id === deviceFilter) && (!sevFilter || x.severity === sevFilter)),
-    [results, deviceFilter, sevFilter]
+    () => results.filter((x) => (!deviceFilter || x.device_id === deviceFilter) && (!sevFilter || x.severity === sevFilter)
+      && (!groupFilter || groupOf.get(x.device_id) === groupFilter)),
+    [results, deviceFilter, sevFilter, groupFilter, groupOf]
   );
   const deviceName = summary?.devices.find((d) => d.device_id === deviceFilter)?.name;
   const violatingDevices = summary?.devices.filter((d) => d.fail_count > 0).length ?? 0;
@@ -469,10 +476,18 @@ export default function CompliancePage() {
           <>
             <div className="audit-filters">
               <label className="audit-field">
+                <span className="form-label">グループ</span>
+                <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+                  <option value="">すべて</option>
+                  {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  <option value={UNGROUPED}>未分類</option>
+                </select>
+              </label>
+              <label className="audit-field">
                 <span className="form-label">機器</span>
                 <select value={deviceFilter} onChange={(e) => setParams(e.target.value ? { device: e.target.value } : {})}>
                   <option value="">すべて</option>
-                  {summary?.devices.filter((d) => d.fail_count).map((d) => <option key={d.device_id} value={d.device_id}>{d.name}</option>)}
+                  {summary?.devices.filter((d) => d.fail_count && inGroup(d.device_id)).map((d) => <option key={d.device_id} value={d.device_id}>{d.name}</option>)}
                   {deviceFilter && !summary?.devices.some((d) => d.device_id === deviceFilter && d.fail_count) && (
                     <option value={deviceFilter}>{deviceName ?? "（選択中の機器）"}</option>
                   )}
@@ -513,11 +528,22 @@ export default function CompliancePage() {
         )}
 
         {tab === "devices" && summary && (
+          <>
+          <div className="audit-filters">
+            <label className="audit-field">
+              <span className="form-label">グループ</span>
+              <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)}>
+                <option value="">すべて</option>
+                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                <option value={UNGROUPED}>未分類</option>
+              </select>
+            </label>
+          </div>
           <div className="table-scroll">
             <table className="data-table">
               <thead><tr><th>機器</th><th>プラットフォーム</th><th>違反</th><th>合格</th><th>エラー</th><th>最も重い違反</th><th>検査</th></tr></thead>
               <tbody>
-                {summary.devices.map((d) => (
+                {summary.devices.filter((d) => inGroup(d.device_id)).map((d) => (
                   <tr key={d.device_id}>
                     <td>{d.name}<div className="topo-muted topo-small mono">{d.hostname}</div></td>
                     <td>{platformLabel(d.platform)}</td>
@@ -537,6 +563,7 @@ export default function CompliancePage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
 
         {tab === "rules" && (

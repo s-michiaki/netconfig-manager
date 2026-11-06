@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 
-interface Device { id: string; name: string; }
+interface Device { id: string; name: string; group_name: string | null; }
 interface Commit { hash: string; full_hash: string; message: string; date: string; }
 
 function parseDiff(diff: string) {
@@ -98,7 +98,14 @@ export default function HistoryPage() {
             onChange={(e) => setSelectedDevice(e.target.value)}
           >
             <option value="">デバイスを選択...</option>
-            {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            {/* グループごとにまとめる（未分類は最後） */}
+            {[...new Set(devices.map((d) => d.group_name ?? ""))]
+              .sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "ja")))
+              .map((g) => (
+                <optgroup key={g || "__none__"} label={g || "未分類"}>
+                  {devices.filter((d) => (d.group_name ?? "") === g).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </optgroup>
+              ))}
           </select>
         </div>
       </div>
