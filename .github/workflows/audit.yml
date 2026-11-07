@@ -1,0 +1,50 @@
+# 依存パッケージの既知の脆弱性を確認する（本番で使うパッケージだけ）
+#   backend : pip-audit（backend/requirements.txt）
+#   frontend: npm audit（devDependencies を除く。high 以上で失敗）
+# push・プルリクエストのほか、新しく公開された脆弱性に気づけるよう毎週月曜にも実行する
+name: Audit
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 0 * * 1"  # 毎週月曜 9:17（日本時間）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # 本番のコンテナ（python:3.12-slim）と合わせる
+      - name: pip-audit のインストール
+        run: pip install pip-audit==2.10.1
+      - name: pip-audit
+        # 除外している脆弱性（理由は README の「セキュリティ」を参照）
+        #   PYSEC-2026-2858 paramiko: ssh-rsa（SHA-1 署名）を許可している。修正版（5.0）は ssh-rsa を廃止しており、
+        #                    ssh-rsa しか使えない古いネットワーク機器へ接続できなくなるため、3.5 系のまま使う
+        run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-2858
+
+  npm-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=high

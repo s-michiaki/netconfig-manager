@@ -179,8 +179,11 @@ def collect_fortigate(device: DeviceConnectionInfo) -> FwHitResult:
     raw = f"### show firewall policy\n{show}\n\n### diagnose firewall iprope list 100004\n{iprope}"
     policies = parse_forti_policies(show)
     stats = parse_forti_iprope(iprope)
-    if not policies and not stats:
-        return FwHitResult([], raw, "ポリシーの出力を解析できませんでした（生の出力を確認してください）")
+    if not stats:
+        # 統計を1件も読めないとき（権限不足・VDOM 構成の Command fail・出力形式の違いなど）は、
+        # 全ポリシーを「ヒット 0（未使用）」と誤って表示しないよう、取得の失敗として扱う
+        return FwHitResult([], raw, "ヒット数の統計（diagnose firewall iprope list）を解析できませんでした"
+                                    "（「取得した出力」を確認してください）")
     if not policies:  # 名前が取れなくても統計は出す
         policies = [(pid, "") for pid in sorted(stats, key=int)]
     rules = []
@@ -188,7 +191,7 @@ def collect_fortigate(device: DeviceConnectionInfo) -> FwHitResult:
         st = stats.get(pid, {})
         rules.append(RuleHit(
             position=i, rule_id=pid, name=name or f"ポリシー {pid}",
-            # ヒット数を出さないバージョンでは、統計が無い（= 一度も通っていない）ポリシーを 0 とする
+            # 統計が1件以上読めたときだけ、統計に出ないポリシーを「一度も通っていない」= 0 とする
             hit_count=st.get("hit_count", 0 if not st else None),
             packets=st.get("packets"), bytes=st.get("bytes"),
             first_hit_at=st.get("first_hit_at"), last_hit_at=st.get("last_hit_at"),

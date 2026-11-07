@@ -16,7 +16,9 @@ location /api/ {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
     proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    # 前段のプロキシは nginx だけなので、クライアントが送った X-Forwarded-For は引き継がずに上書きする
+    # （引き継ぐと監査ログの接続元 IP を偽装できる）
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
     # ターミナルの無操作時間で切断されないよう長めに取る
     proxy_read_timeout 3600s;
@@ -26,6 +28,7 @@ location /api/ {
 # API ドキュメント（不要なら削除してよい）
 location ~ ^/(docs|openapi\.json)$ {
     proxy_pass http://backend:8000;
+    proxy_set_header X-Forwarded-For $remote_addr;
 }
 
 location /assets/ {

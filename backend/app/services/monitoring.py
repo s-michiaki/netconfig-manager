@@ -8,7 +8,7 @@ SNMP は UDP でサーバーから機器へ直接届く必要がある（踏み�
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from pysnmp.hlapi.v3arch.asyncio import (
     CommunityData,
@@ -53,6 +53,7 @@ OID_OPER = "1.3.6.1.2.1.2.2.1.8"
 OID_SYSNAME = "1.3.6.1.2.1.1.5.0"
 OID_SYSDESCR = "1.3.6.1.2.1.1.1.0"
 MAX_CONCURRENT = 20  # 同時に問い合わせる機器の数
+MIN_SAMPLE_SEC = 60  # これより短い間隔の読み取りでは bps を計算しない
 
 
 class SnmpError(Exception):
@@ -142,12 +143,19 @@ async def snmp_get_info(t: SnmpTarget, engine: SnmpEngine | None = None) -> dict
             engine.close_dispatcher()
 
 
-async def poll_interfaces(t: SnmpTarget, engine: SnmpEngine) -> list[IfReading]:
+async def poll_interfaces(t: SnmpTarget, engine: SnmpEngine) -> tuple[list[IfReading], datetime]:
+    """（インタフェースごとの値, カウンタを読んだ時刻）。
+
+    bps は前回との差を経過秒数で割って出すので、時刻は「カウンタを読んだとき」でなければならない。
+    全機器の取得が終わってから時刻を取ると、応答しない機器のタイムアウト待ちの分だけ回ごとにずれる
+    """
     names = await _walk(engine, t, OID_IFNAME)
     if not names:
         raise SnmpError("IF-MIB（ifXTable）を読めませんでした（機器の SNMP の設定・ビューを確認してください）")
+    before = utcnow()
     hc_in = await _walk(engine, t, OID_HC_IN)
     hc_out = await _walk(engine, t, OID_HC_OUT)
+    read_at = before + (utcnow() - before) / 2  # 入力・出力の2列を読んだ間の中央
     speed = await _walk(engine, t, OID_HIGHSPEED)
     alias = await _walk(engine, t, OID_ALIAS)
     oper = await _walk(engine, t, OID_OPER)
@@ -161,7 +169,7 @@ async def poll_interfaces(t: SnmpTarget, engine: SnmpEngine) -> list[IfReading]:
             in_octets=int(hc_in[idx]) if idx in hc_in else None,
             out_octets=int(hc_out[idx]) if idx in hc_out else None,
         ))
-    return out
+    return out, read_at
 
 
 def _rate(prev: int | None, cur: int | None, seconds: float) -> float | None:
@@ -170,9 +178,9 @@ def _rate(prev: int | None, cur: int | None, seconds: float) -> float | None:
     return (cur - prev) * 8 / seconds
 
 
-async def store_readings(db: AsyncSession, device_id: str, readings: list[IfReading]) -> int:
-    """取得結果を保存する。記録した件数を返す"""
-    now = utcnow()
+async def store_readings(db: AsyncSession, device_id: str, readings: list[IfReading], read_at: datetime | None = None) -> int:
+    """取得結果を保存する。記録した件数を返す。read_at: カウンタを読んだ時刻（bps の計算と記録の時刻に使う）"""
+    now = read_at or utcnow()
     existing = {i.if_index: i for i in (await db.execute(
         select(MonInterface).where(MonInterface.device_id == device_id))).scalars()}
     saved = 0
@@ -186,6 +194,9 @@ async def store_readings(db: AsyncSession, device_id: str, readings: list[IfRead
         in_bps = out_bps = None
         if i.last_at is not None:
             secs = (now - i.last_at).total_seconds()
+            if secs < MIN_SAMPLE_SEC:
+                # 前回の取得から短すぎる（「今すぐ取得」の直後など）。誤差が大きいので値は更新せず、前回を基準に残す
+                continue
             in_bps = _rate(i.last_in_octets, r.in_octets, secs)
             out_bps = _rate(i.last_out_octets, r.out_octets, secs)
         i.in_bps, i.out_bps = in_bps, out_bps
@@ -208,7 +219,8 @@ async def poll_all(db: AsyncSession) -> dict:
     async def one(t: SnmpTarget):
         async with sem:
             try:
-                return t, await poll_interfaces(t, engine), None
+                readings, read_at = await poll_interfaces(t, engine)
+                return t, (readings, read_at), None
             except Exception as e:  # noqa: BLE001 - 1台の失敗で全体を止めない
                 return t, None, str(e) or type(e).__name__
 
@@ -218,7 +230,7 @@ async def poll_all(db: AsyncSession) -> dict:
         engine.close_dispatcher()
     ok = failed = samples = 0
     by_id = {s.device_id: s for s, _ in rows}
-    for t, readings, err in results:
+    for t, got, err in results:
         s = by_id[t.device_id]
         s.last_polled_at = utcnow()
         if err is not None:
@@ -226,7 +238,7 @@ async def poll_all(db: AsyncSession) -> dict:
             failed += 1
             continue
         s.last_error = None
-        samples += await store_readings(db, t.device_id, readings)
+        samples += await store_readings(db, t.device_id, *got)
         ok += 1
     purged = await purge_samples(db)
     await db.commit()

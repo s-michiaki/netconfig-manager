@@ -83,6 +83,13 @@ celery_app.conf.update(
 # このウィンドウ内に直近のcron発火時刻があれば実行する（beat の60秒間隔の揺らぎを吸収）
 SCHEDULE_WINDOW = timedelta(seconds=90)
 COLLECT_LOCK_TIMEOUT = 900
+# 同じ機器へ SSH で入る処理（コンフィグ収集・FW ヒット数の取得）は1つずつにする。
+# FortiGate は接続のたびに console の output を変えて終了時に戻すため、重なると片方の出力がページングで止まる
+SSH_LOCK_WAIT = 300  # 収集は、ほかの SSH 処理が終わるのを最大この秒数待つ
+
+
+def _ssh_lock(device_id: str):
+    return _redis().lock(f"netconfig:ssh:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
 
 
 @lru_cache
@@ -196,7 +203,18 @@ def collect_device_config(
         if not device:
             return {"success": False, "error": f"Device {device_id} not found"}
 
-        result = collect_config_sync(device, triggered_by)
+        ssh = _ssh_lock(device_id)
+        if ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
+            try:
+                result = collect_config_sync(device, triggered_by)
+            finally:
+                try:
+                    ssh.release()
+                except redis.exceptions.LockError:
+                    pass
+        else:
+            result = CollectResult(False, error="同じ機器への別の SSH 処理（FW ヒット数の取得など）が終わらないため、"
+                                                "収集できませんでした", retryable=True)
         # 認証失敗などはリトライしても結果が変わらないので、一時的な失敗のみリトライする
         will_retry = not result.success and result.retryable and self.request.retries < self.max_retries
         _run_async(_save_result(device, result, started_at, triggered_by, actor, ref,
@@ -256,12 +274,23 @@ def poll_snmp():
     """SNMP を有効にした機器の帯域を取得する（MONITOR_INTERVAL_SEC ごと）"""
     if not settings.MONITORING_ENABLED:
         return {"disabled": True}
+    # 定期実行と「今すぐ取得」が重なると、インタフェースの同時作成（一意制約違反）で全体が失敗したり、
+    # 間隔の短すぎるサンプルが入ったりするため、1つずつ実行する
+    lock = _redis().lock("netconfig:snmp-poll", timeout=max(settings.MONITOR_INTERVAL_SEC * 2, 600))
+    if not lock.acquire(blocking=False):
+        return {"skipped": True}
 
     async def run():
         async with _sessionmaker()() as db:
             return await monitoring.poll_all(db)
 
-    result = _run_async(run())
+    try:
+        result = _run_async(run())
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
     if result.get("failed"):
         logger.warning("SNMP の取得に失敗した機器があります: %s", result)
     return result
@@ -287,7 +316,8 @@ def collect_fw_hits_all():
 @celery_app.task
 def collect_fw_hits_device(device_id: str, actor: str | None = None, ref: str | None = None):
     """1台の FW のルールのヒット数を取得して保存する"""
-    lock = _redis().lock(f"netconfig:fwhits:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
+    # コンフィグ収集と同じ機器の SSH ロックを使う。収集中なら今回は取得しない（次の定期取得で取る）
+    lock = _ssh_lock(device_id)
     if not lock.acquire(blocking=False):
         return {"skipped": True}
     try:

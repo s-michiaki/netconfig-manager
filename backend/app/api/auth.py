@@ -27,6 +27,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.user import User
+from app.services import login_limit
 from app.services.audit import client_ip, make_log, record_now
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,15 @@ def user_info(user: User) -> UserInfo:
 async def login(
     request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
 ):
+    ip = client_ip(request)
+    # 失敗が続いている接続元は、パスワードを照合せずに止める（存在しないユーザー名でも同じ応答）
+    wait = await login_limit.locked(form_data.username, ip)
+    if wait:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"ログインの失敗が続いたため、一時的にログインできません。{-(-wait // 60)} 分ほど待ってから再度お試しください",
+            headers={"Retry-After": str(wait)},
+        )
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalar_one_or_none()
     hashed = user.hashed_password if user else DUMMY_HASH
@@ -89,16 +99,27 @@ async def login(
         await record_now(
             db,
             make_log(
-                "auth.login_failed", username=form_data.username[:64], ip=client_ip(request),
+                "auth.login_failed", username=form_data.username[:64], ip=ip,
                 detail={"reason": reason}, success=False,
             ),
         )
+        newly = await login_limit.record_failure(form_data.username, ip)
+        if newly:
+            await record_now(
+                db,
+                make_log(
+                    "auth.login_locked", username=form_data.username[:64], ip=ip, success=False,
+                    detail={"unit": "接続元" if newly == ["ip"] else "ユーザー名と接続元" if newly == ["user"] else "両方",
+                            "minutes": settings.LOGIN_LOCK_MIN},
+                ),
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ユーザー名またはパスワードが正しくありません",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    await record_now(db, make_log("auth.login", user=user, ip=client_ip(request)))
+    await login_limit.record_success(form_data.username, ip)
+    await record_now(db, make_log("auth.login", user=user, ip=ip))
     return {"access_token": create_access_token(user.id, user.hashed_password), "token_type": "bearer"}
 
 

@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     TERMINAL_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
     # 記録を DEVICE_ENCRYPTION_KEY で暗号化して保存する（.cast.enc）。false で従来どおり平文（.cast）
     TERMINAL_LOG_ENCRYPT: bool = True
+    # ログインの失敗回数の制限（services/login_limit.py。0 で制限しない）
+    LOGIN_MAX_FAILURES: int = 5  # 同じユーザー名・同じ接続元からの失敗の上限
+    LOGIN_MAX_FAILURES_PER_IP: int = 20  # 同じ接続元からの失敗の上限（ユーザー名を問わない）
+    LOGIN_FAILURE_WINDOW_MIN: int = 10  # 失敗を数える期間（分）
+    LOGIN_LOCK_MIN: int = 15  # 上限に達したときにログインを止める時間（分）
+    # コンプライアンスの正規表現の照合にかけられる時間（1回の評価＝ルール × 機器 あたりの合計秒数。ReDoS 対策）
+    COMPLIANCE_REGEX_TIMEOUT: float = 2.0
     # 保持日数（0 なら削除しない）。毎日1回、古いものを削除する
     AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
     TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 ACTIONS = {
     "auth.login": "ログイン",
     "auth.login_failed": "ログイン失敗",
+    "auth.login_locked": "ログインの一時停止（失敗の繰り返し）",
     "auth.password_change": "パスワード変更",
     "user.create": "ユーザー作成",
     "user.update": "ユーザー変更",

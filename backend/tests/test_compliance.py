@@ -173,19 +173,76 @@ def test_section_rule_summary_and_topology(ctx):
 
 
 def test_rule_test_and_templates(ctx):
-    c, view, devs = ctx["c"], ctx["view"], ctx["devs"]
+    c, op, view, devs = ctx["c"], ctx["op"], ctx["view"], ctx["devs"]
     t = c.get("/api/compliance/templates", headers=view).json()
     assert len(t) >= 8 and all({"name", "pattern", "severity"} <= set(x) for x in t)
     rule = {"name": "t", "match_type": "contains", "expect": "present", "pattern": "ntp server", "platforms": ["cisco_ios"]}
-    r = c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-r1"]["id"]}, headers=view).json()
+    # 試すのはルールを作る人（オペレーター以上）だけ
+    assert c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-r1"]["id"]},
+                  headers=view).status_code == 403
+    r = c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-r1"]["id"]}, headers=op).json()
     assert r == {**r, "applicable": True, "has_config": True, "status": "pass"}
-    r = c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-fw"]["id"]}, headers=view).json()
+    r = c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-fw"]["id"]}, headers=op).json()
     assert r["applicable"] is False
     # テンプレートはそのままルールとして登録できる
     for x in t:
         body = {k: v for k, v in x.items() if k != "description"}
         assert c.post("/api/compliance/rules/test", json={"rule": body, "device_id": devs["cmp-r2"]["id"]},
-                      headers=view).status_code == 200, x["name"]
+                      headers=op).status_code == 200, x["name"]
+
+
+# ---------------------------------------------------------------- 正規表現の照合時間（ReDoS 対策）
+EVIL = r"^(?:a|aa)+c"  # 「a」が続く行で照合が指数関数的に長くなる
+EVIL_CONFIG = "hostname r1\n" + "a" * 40 + "\n"
+
+
+@pytest.mark.parametrize("spec, ignore", [
+    (RuleSpec("regex", "absent", EVIL), None),
+    (RuleSpec("contains", "present", "x", "section", section_pattern=EVIL), None),
+    (RuleSpec("contains", "absent", "a"), [EVIL]),  # 例外の正規表現
+])
+def test_regex_timeout(monkeypatch, spec, ignore):
+    import time
+
+    from app.core.config import settings
+    from app.services.compliance import compile_pattern
+    monkeypatch.setattr(settings, "COMPLIANCE_REGEX_TIMEOUT", 0.3)
+    t0 = time.monotonic()
+    ev = evaluate(spec, EVIL_CONFIG, [compile_pattern(p) for p in ignore] if ignore else None)
+    assert time.monotonic() - t0 < 2
+    assert ev.status == "error" and "0.3 秒" in ev.details[0]
+
+
+def test_regex_timeout_does_not_block_api(ctx, monkeypatch):
+    """照合が終わらないパターンを試しても、ほかのリクエストは止まらず、結果はエラーになる"""
+    import threading
+    import time
+
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "COMPLIANCE_REGEX_TIMEOUT", 1.5)
+    c, op, admin = ctx["c"], ctx["op"], ctx["admin"]
+    dev = c.post("/api/devices/", json=dict(name=f"cmp-evil-{uuid.uuid4().hex[:4]}", hostname="10.6.0.9",
+                                            platform="cisco_ios", username="u", password="p"), headers=admin).json()
+    cs.save_config(dev["id"], EVIL_CONFIG, "test")
+    rule = {"name": "evil", "match_type": "regex", "expect": "absent", "pattern": EVIL}
+    out = {}
+
+    def run():
+        try:
+            out["r"] = c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": dev["id"]},
+                              headers=op).json()
+        except Exception as e:  # noqa: BLE001
+            out["e"] = repr(e)
+
+    th = threading.Thread(target=run)
+    th.start()
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    assert c.get("/api/health").status_code == 200
+    assert time.monotonic() - t0 < 1.0  # 照合中でも応答する（GIL を手放している）
+    th.join(10)
+    assert "r" in out, out
+    assert out["r"]["status"] == "error", out
 
 
 # ---------------------------------------------------------------- 例外
