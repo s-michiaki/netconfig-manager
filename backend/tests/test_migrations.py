@@ -2,10 +2,10 @@
 import sqlite3
 
 import pytest
+from conftest import TMP
 
 from app.core import migrate
 from app.core.config import settings
-from conftest import TMP
 
 V11_SCHEMA = """
 CREATE TABLE devices (id VARCHAR(36) PRIMARY KEY, name VARCHAR(128) NOT NULL UNIQUE, hostname VARCHAR(256) NOT NULL,

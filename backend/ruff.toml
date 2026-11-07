@@ -1,0 +1,32 @@
+# ruff（リンター）の設定。実行: ruff check .（自動修正: ruff check --fix .）
+target-version = "py312"
+line-length = 130
+extend-exclude = ["migrations/versions"]
+
+[lint]
+select = [
+  "E", "W",  # pycodestyle
+  "F",       # pyflakes（未使用・未定義など）
+  "I",       # import の並び
+  "B",       # バグになりやすい書き方
+  "UP",      # 新しい書き方へ
+  "SIM",     # 簡潔な書き方
+  "C4",      # 内包表記
+  "RUF",     # ruff 独自
+]
+ignore = [
+  "B008",    # FastAPI の Depends()/Query() は引数の既定値に書くのが標準の書き方
+  "RUF001", "RUF002", "RUF003",  # 日本語の全角記号（（）・：など）を誤検知するため
+  "SIM108",  # 三項演算子への書き換えは読みやすさ次第
+  "SIM105",  # try-except-pass の方が意図（失敗を無視する）が読みやすい場面があるため
+  "C408",    # dict(a=1) の形はキーワード引数として読みやすいため許可
+  "UP042",   # Enum(str, Enum) を StrEnum に変えると DB の Enum 型の扱いが変わりうるため
+]
+# 理由を残すために書いている noqa（bandit の S、広い except の BLE）を未使用扱いにしない
+external = ["S", "BLE"]
+
+[lint.per-file-ignores]
+"tests/*" = ["E501", "E701", "E702", "B017"]
+
+[lint.isort]
+known-first-party = ["app"]

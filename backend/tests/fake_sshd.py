@@ -208,7 +208,7 @@ def _awplus(ch, state, enable_password=None):
     for line in _lines(ch):
         cmd = line.strip()
         state.setdefault("commands", []).append(cmd if not waiting_password else "<password>")
-        prompt = lambda: "awplus#" if priv else "awplus>"  # noqa: E731
+        prompt = lambda: "awplus#" if priv else "awplus>"  # noqa: E731, B023 - 呼んだ時点の権限を表示する
         if waiting_password:
             waiting_password = False
             if cmd == (enable_password or ""):

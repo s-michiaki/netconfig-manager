@@ -190,7 +190,7 @@ class TerminalRecorder:
         self._f = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._f = open(self.path, "w", encoding="utf-8")
+            self._f = open(self.path, "w", encoding="utf-8")  # noqa: SIM115 - セッションの間開いたままにして書き足す
             header = {"version": 2, "width": cols, "height": rows, "timestamp": int(started.timestamp()), "title": title}
             self._f.write(self._line(json.dumps(header, ensure_ascii=False)))
             self._f.flush()

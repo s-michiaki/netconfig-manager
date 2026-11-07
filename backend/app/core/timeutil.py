@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utcnow() -> datetime:
@@ -7,4 +7,4 @@ def utcnow() -> datetime:
     datetime.utcnow() は Python 3.12 で非推奨のため置き換え。
     既存テーブルのスキーマを変えないよう、naive な UTC として扱う。
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)

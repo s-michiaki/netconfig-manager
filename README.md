@@ -419,6 +419,14 @@ pytest
 docker compose run --rm backend sh -c "pip install -r requirements-dev.txt && pytest"
 ```
 
+リンター（ruff。設定は `backend/ruff.toml`）:
+
+```bash
+cd backend
+ruff check .          # 指摘の確認
+ruff check --fix .    # 自動で直せるものを修正
+```
+
 ---
 
 ## RHEL 10 本番設定
@@ -473,6 +481,7 @@ netconfig-manager/
 │   ├── alembic.ini              # DBマイグレーション設定
 │   ├── migrations/versions/     # マイグレーション
 │   ├── tests/                   # pytest
+│   ├── ruff.toml                # リンター（ruff）の設定
 │   └── app/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
 │       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック）

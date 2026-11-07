@@ -26,16 +26,17 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.services.activity import SYSTEM_ACTOR, record
+from app.services.audit import purge_old
+from app.services.compliance import recheck_expired_exceptions as _recheck_expired
+from app.services.compliance import run_checks
 from app.services.config_service import (
     CollectResult,
     DeviceConnectionInfo,
     collect_config_sync,
 )
-from app.services.activity import SYSTEM_ACTOR, record
-from app.services.audit import purge_old
-from app.services.compliance import recheck_expired_exceptions as _recheck_expired, run_checks
-from app.services.notify import notify_change, notify_failure, notify_violations, wants_any
 from app.services.connection import load_connection_info
+from app.services.notify import notify_change, notify_failure, notify_violations, wants_any
 
 logger = logging.getLogger(__name__)
 

@@ -3,13 +3,14 @@ import time
 import uuid
 
 import fake_sshd
-from app.services import config_service as cs
 from test_device_auth import admin, client, dev  # noqa: F401 - fixture を再利用
+
+from app.services import config_service as cs
 
 
 def test_slow_panos_prompt_succeeds_with_default():
     # Netmiko 既定ではログイン後のプロンプト待ちが 20 秒固定のため失敗していたケース
-    port, state, _ = fake_sshd.start(mode="panos", login_delay=23)
+    port, _state, _ = fake_sshd.start(mode="panos", login_delay=23)
     r = cs.collect_config_sync(dev(port, platform="paloalto_panos"))
     assert r.success and r.commit_hash, r
 

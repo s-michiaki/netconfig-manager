@@ -1,7 +1,12 @@
-import json, uuid
+import json
+import uuid
+from pathlib import Path
+
 import fake_sshd
+
 from app.core.config import settings
 from app.services import config_service as cs
+
 
 def dev(port, pw="pw"):
     return cs.DeviceConnectionInfo(id=str(uuid.uuid4()), name="r1", hostname="127.0.0.1", platform="cisco_ios", port=port, username="admin", password=pw, enable_secret=None)
@@ -12,14 +17,14 @@ def test_collect_and_hostkey_tofu():
     r = cs.collect_config_sync(d); assert r.success and r.commit_hash, r
     content = cs.get_config_content(d.id, r.commit_hash)
     assert content == "hostname R1\ninterface Gi0/1\n description 日本語の説明\nend\n", repr(content)
-    assert f"[127.0.0.1]:{port}" in open(settings.SSH_KNOWN_HOSTS).read()
+    assert f"[127.0.0.1]:{port}" in Path(settings.SSH_KNOWN_HOSTS).read_text()
     assert cs.collect_config_sync(d).commit_hash is None  # タイムスタンプ行が変わっても差分なし
     assert cs.collect_config_sync(dev(port, "bad")).error == "認証失敗"
     sock.close()
     # 同じポートで別の鍵を持つサーバー → ホスト鍵不一致で拒否
-    port2, _, s2 = fake_sshd.start()
-    lines = open(settings.SSH_KNOWN_HOSTS).read().replace(f"[127.0.0.1]:{port} ", f"[127.0.0.1]:{port2} ")
-    open(settings.SSH_KNOWN_HOSTS, "w").write(lines)  # 別鍵を登録済みにする
+    port2, _, _s2 = fake_sshd.start()
+    lines = Path(settings.SSH_KNOWN_HOSTS).read_text().replace(f"[127.0.0.1]:{port} ", f"[127.0.0.1]:{port2} ")
+    Path(settings.SSH_KNOWN_HOSTS).write_text(lines)  # 別鍵を登録済みにする
     r = cs.collect_config_sync(dev(port2)); assert not r.success and "一致しません" in r.error, r
 
 def test_strict_policy(monkeypatch):
@@ -29,6 +34,7 @@ def test_strict_policy(monkeypatch):
 
 def test_terminal_end_to_end():
     from fastapi.testclient import TestClient
+
     from app.main import app
     port, state, _ = fake_sshd.start()
     with TestClient(app) as c:

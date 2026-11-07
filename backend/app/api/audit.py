@@ -134,7 +134,8 @@ async def export_logs(
                                   "since": since.isoformat() if since else None,
                                   "until": until.isoformat() if until else None})
     await db.commit()
-    header = [f"日時（{settings.TIMEZONE}）", "ユーザー", "操作", "操作コード", "対象の種類", "対象", "対象ID", "詳細", "接続元IP", "結果"]
+    header = [f"日時（{settings.TIMEZONE}）", "ユーザー", "操作", "操作コード", "対象の種類", "対象", "対象ID", "詳細",
+              "接続元IP", "結果"]
     data = [[r.at, r.username, ACTIONS.get(r.action, r.action), r.action, r.target_type, r.target_name, r.target_id,
              r.detail, r.ip, "成功" if r.success else "失敗"] for r in rows]
     return csv_response(header, data, export_name("audit_logs"))
@@ -224,7 +225,9 @@ async def get_recording(session_id: str, db: AsyncSession = Depends(get_db), aud
     try:
         text = await run_in_threadpool(read_recording, p)
     except InvalidToken as e:
-        raise HTTPException(status_code=500, detail="記録を復号できません（DEVICE_ENCRYPTION_KEY が記録時と違う可能性があります）") from e
+        raise HTTPException(
+            status_code=500, detail="記録を復号できません（DEVICE_ENCRYPTION_KEY が記録時と違う可能性があります）"
+        ) from e
     # 記録を見たこと自体も残す（機器の画面には機密情報が含まれ得るため）
     audit("audit.view_recording", target_type="terminal_session", target_id=s.id,
           target_name=f"{s.username}@{s.device_name}")

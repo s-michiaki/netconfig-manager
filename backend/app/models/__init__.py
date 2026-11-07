@@ -18,7 +18,8 @@ from app.models.topology import TopologyMap
 from app.models.user import User
 
 __all__ = [
-    "ActivityLog", "AuditLog", "Base", "CollectLog", "ComplianceException", "ComplianceResult", "ComplianceRule", "ConfigSnapshot", "Device", "DeviceGroup",
+    "ActivityLog", "AuditLog", "Base", "CollectLog", "ComplianceException", "ComplianceResult", "ComplianceRule",
+    "ConfigSnapshot", "Device", "DeviceGroup",
     "JumpHost", "NotificationSetting", "PingTarget", "Schedule", "TerminalSession", "TopologyMap", "User",
     "UserGroup", "UserGroupMember",
 ]

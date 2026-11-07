@@ -5,16 +5,15 @@ import uuid
 from datetime import timedelta
 from unittest import mock
 
+import fake_sshd
 import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
-import fake_sshd
 from app import worker
 from app.core.database import AsyncSessionLocal
 from app.core.timeutil import utcnow
 from app.main import app
-from app.models.activity import ActivityLog
 from app.services import notify
 from app.services.activity import make_activity
 from app.services.audit import purge_old
@@ -122,7 +121,7 @@ def test_compliance_transitions(ctx):
     }, headers=admin)
     assert rule.status_code in (200, 201), rule.text
     rule = rule.json()
-    v = [x for x in logs(c, view, device_id=d["id"], category="compliance")]
+    v = list(logs(c, view, device_id=d["id"], category="compliance"))
     assert v and v[0]["event"] == "compliance.violation" and rule["name"] in v[0]["message"]
     assert v[0]["actor"] == "admin" and "高" in v[0]["message"]
     # ルールを変えて違反が解消
