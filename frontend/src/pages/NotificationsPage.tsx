@@ -3,7 +3,7 @@ import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 
 /**
- * コンフィグ変更の通知（Discord / Slack）
+ * 通知（Discord / Slack）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗
  * - 自分の通知: 所属グループの設定を使う / 個別に設定する / 通知しない
  * - ユーザーグループ（管理者）: メンバーとグループの通知先・対象
  */
@@ -18,6 +18,9 @@ interface Notification {
   all_devices: boolean;
   device_group_ids: string[];
   include_ungrouped: boolean;
+  on_change: boolean;
+  on_violation: boolean;
+  on_failure: boolean;
   last_sent_at: string | null;
   last_error: string | null;
 }
@@ -44,6 +47,18 @@ function targetText(n: Notification, groups: DeviceGroup[]): string {
   return names.length ? names.join("・") : "（なし）";
 }
 
+type EventKey = "on_change" | "on_violation" | "on_failure";
+const EVENT_OPTIONS: [EventKey, string, string][] = [
+  ["on_change", "コンフィグの変更", "収集で設定の変更が見つかったとき"],
+  ["on_violation", "コンプライアンス違反の発生", "新しく違反になったとき（同時に多数の機器が違反になったときは1通にまとめます）"],
+  ["on_failure", "収集の失敗", "再試行しても収集できなかったとき"],
+];
+
+function eventsText(n: Notification): string {
+  const t = EVENT_OPTIONS.filter(([k]) => n[k] ?? (k === "on_change")).map(([, label]) => label);
+  return t.length ? t.join("・") : "（なし）";
+}
+
 function channelText(n: Notification): string {
   const c = [n.has_discord && "Discord", n.has_slack && "Slack"].filter(Boolean);
   return c.length ? c.join("・") : "（未登録）";
@@ -55,12 +70,14 @@ interface FormState {
   discord: string; clearDiscord: boolean;
   slack: string; clearSlack: boolean;
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
+  on_change: boolean; on_violation: boolean; on_failure: boolean;
 }
 
 function initForm(n: Notification | null): FormState {
   return {
     discord: "", clearDiscord: false, slack: "", clearSlack: false,
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
+    on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false,
   };
 }
 
@@ -73,6 +90,7 @@ function toPayload(mode: Mode, f: FormState) {
     all_devices: f.all_devices,
     device_group_ids: f.all_devices ? [] : f.device_group_ids,
     include_ungrouped: f.all_devices ? false : f.include_ungrouped,
+    on_change: f.on_change, on_violation: f.on_violation, on_failure: f.on_failure,
   };
 }
 
@@ -108,6 +126,15 @@ function TargetForm({
           </div>
         );
       })}
+      <div className="form-group">
+        <span className="form-label">通知する内容</span>
+        {EVENT_OPTIONS.map(([k, label, hint]) => (
+          <label key={k} className="form-check">
+            <input type="checkbox" checked={form[k]} onChange={(e) => set(k, e.target.checked)} />
+            {label}<span className="ntf-muted" style={{ marginLeft: 6 }}>{hint}</span>
+          </label>
+        ))}
+      </div>
       <div className="form-group">
         <span className="form-label">通知する機器</span>
         <label className="form-check">
@@ -201,7 +228,7 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const activeGroups = data.groups.filter((g) => g.notification.mode === "custom");
   return (
     <div className="card ntf-card">
-      <p className="ntf-lead">機器のコンフィグに変更があったとき、Discord / Slack に要約と画面へのリンクを送ります（差分の中身は送りません）。</p>
+      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗を、Discord / Slack に要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
       <div className="ntf-modes" role="radiogroup">
         {([
           ["inherit", "所属グループの設定を使う", "管理者が設定したユーザーグループの通知先・対象で通知します"],
@@ -221,13 +248,14 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
             <p className="ntf-muted">所属しているユーザーグループがないため、通知は届きません。個別に設定するか、管理者にグループへの追加を依頼してください。</p>
           ) : (
             <table className="data-table">
-              <thead><tr><th>所属グループ</th><th>状態</th><th>通知先</th><th>対象</th></tr></thead>
+              <thead><tr><th>所属グループ</th><th>状態</th><th>通知先</th><th>内容</th><th>対象</th></tr></thead>
               <tbody>
                 {data.groups.map((g) => (
                   <tr key={g.id}>
                     <td>{g.name}</td>
                     <td>{g.notification.mode === "custom" ? <span className="badge badge-success">有効</span> : <span className="badge badge-neutral">無効</span>}</td>
                     <td>{channelText(g.notification)}</td>
+                    <td>{eventsText(g.notification)}</td>
                     <td>{targetText(g.notification, deviceGroups)}</td>
                   </tr>
                 ))}
@@ -333,6 +361,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const [error, setError] = useState("");
   const [tests, setTests] = useState<Record<string, Record<string, string>>>({});
   const [previewGroup, setPreviewGroup] = useState("");
+  const [previewEvent, setPreviewEvent] = useState("change");
   const [preview, setPreview] = useState<PreviewItem[] | null>(null);
 
   const load = useCallback(async () => {
@@ -361,7 +390,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   };
   const runPreview = async () => {
     try {
-      setPreview((await api.get<PreviewItem[]>("/notifications/preview", { params: previewGroup ? { device_group_id: previewGroup } : {} })).data);
+      setPreview((await api.get<PreviewItem[]>("/notifications/preview", { params: { device_group_id: previewGroup || undefined, event: previewEvent } })).data);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -395,6 +424,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
             <dl className="ntf-kv">
               <dt>メンバー</dt><dd>{g.members.length ? g.members.map((m) => m.username).join("、") : "（なし）"}</dd>
               <dt>通知先</dt><dd>{channelText(g.notification)}</dd>
+              <dt>内容</dt><dd>{eventsText(g.notification)}</dd>
               <dt>対象</dt><dd>{targetText(g.notification, deviceGroups)}</dd>
             </dl>
             <LastResult n={g.notification} />
@@ -404,11 +434,16 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
       </div>
 
       <div className="card ntf-card" style={{ marginTop: 16 }}>
-        <p className="ntf-lead"><b>通知先の確認</b> — 機器のグループを選ぶと、その機器に変更があったときの送信先を表示します（全ユーザーの設定を反映）</p>
+        <p className="ntf-lead"><b>通知先の確認</b> — 機器のグループと内容を選ぶと、その機器で起きたときの送信先を表示します（全ユーザーの設定を反映）</p>
         <div style={{ display: "flex", gap: 8 }}>
           <select value={previewGroup} onChange={(e) => { setPreviewGroup(e.target.value); setPreview(null); }} style={{ maxWidth: 320 }}>
             <option value="">未分類の機器</option>
             {deviceGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <select value={previewEvent} onChange={(e) => { setPreviewEvent(e.target.value); setPreview(null); }} style={{ maxWidth: 240 }} aria-label="通知する内容">
+            <option value="change">コンフィグの変更</option>
+            <option value="violation">コンプライアンス違反の発生</option>
+            <option value="failure">収集の失敗</option>
           </select>
           <button className="btn" onClick={runPreview}>確認</button>
         </div>

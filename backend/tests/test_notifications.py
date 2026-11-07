@@ -252,3 +252,79 @@ def test_send_webhook_retry_and_errors(monkeypatch):
     assert "Webhook が無効" in notify.send_webhook("discord", url, {})
     seq[:] = [urllib.error.URLError("Name or service not known")]
     assert notify.send_webhook("discord", url, {}).startswith("送信できません")
+
+
+def test_violation_and_failure_notifications(ctx, sent):
+    """通知する内容の選択（違反の発生・収集の失敗）。変更通知だけの設定には送らない"""
+    c, admin = ctx["c"], ctx["admin"]
+    uname = f"ntf-ev-{uid()}"
+    c.post("/api/users/", json={"username": uname, "password": "password-1234", "role": "viewer"}, headers=admin)
+    h = login(c, uname, "password-1234")
+    hook = D.format(901, uid())
+    # 内容を1つも選ばないとエラー
+    bad = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False}, headers=h)
+    assert bad.status_code == 422 and "通知する内容" in bad.json()["detail"]
+    r = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False,
+                                              "on_violation": True, "on_failure": True}, headers=h)
+    assert r.status_code == 200, r.text
+    me = c.get("/api/notifications/me", headers=h).json()
+    assert (me["on_change"], me["on_violation"], me["on_failure"]) == (False, True, True)
+    assert ("discord", hook) not in resolve(ctx["g1"])  # 変更の通知先には含まれない
+    pv = c.get("/api/notifications/preview", params={"device_group_id": ctx["g1"], "event": "violation"}, headers=admin)
+    assert any(uname in " ".join(x["via"]) for x in pv.json())
+
+    devs = []
+    for _ in range(2):
+        d = c.post("/api/devices/", json=dict(name=f"nv-{uid()}", hostname="10.8.0.1", platform="cisco_ios",
+                                              username="u", password="p", group_id=ctx["g1"]), headers=admin).json()
+        cs.save_config(d["id"], "hostname X\nip http server\n", "test")
+        devs.append(d)
+    run_now = lambda task: mock.patch.object(task, "delay", side_effect=lambda *a: task.apply(args=a).get())  # noqa: E731
+
+    def flush(m):
+        """API のリクエスト中に投入されたタスクを、リクエストの後で実行する"""
+        for call in m.call_args_list:
+            worker.send_violation_notification.apply(args=call.args).get()
+        m.reset_mock()
+
+    with mock.patch.object(worker.send_violation_notification, "delay") as v:
+        rule = c.post("/api/compliance/rules", json={"name": f"HTTP禁止-{uid()}", "match_type": "contains",
+                                                     "expect": "absent", "pattern": "ip http server", "severity": "high",
+                                                     "platforms": ["cisco_ios"]}, headers=admin).json()
+        assert v.call_count == 1
+        flush(v)
+    mine = [p for k, u, p in sent if u == hook]
+    # ルールの追加で2台が同時に違反 → この通知先へは1通にまとめる
+    assert len(mine) == 1
+    emb = mine[0]["embeds"][0]
+    assert emb["title"].startswith("コンプライアンス違反:") and "台" in emb["title"]
+    assert all(d["name"] in emb["description"] for d in devs)
+
+    # 1台だけ違反 → 機器名・ルール・重要度を載せる
+    sent.clear()
+    cs.save_config(devs[0]["id"], "hostname X\n", "test")
+    with mock.patch.object(worker.send_violation_notification, "delay") as v:
+        c.post("/api/compliance/run", headers=admin)
+        assert not v.called  # 解消は通知しない
+        cs.save_config(devs[0]["id"], "hostname X\nip http server\n", "test")
+        c.post("/api/compliance/run", headers=admin)
+        flush(v)
+    one = [p for k, u, p in sent if u == hook]
+    assert len(one) == 1 and one[0]["embeds"][0]["title"] == f"コンプライアンス違反: {devs[0]['name']}"
+    assert "重要度: 高" in json.dumps(one[0], ensure_ascii=False)
+
+    # 収集の失敗（認証失敗はリトライしない）
+    sent.clear()
+    port, _, _ = fake_sshd.start()
+    bad_dev = c.post("/api/devices/", json=dict(name=f"nf-{uid()}", hostname="127.0.0.1", port=port, platform="cisco_ios",
+                                                username="admin", password="wrong", group_id=ctx["g1"]), headers=admin).json()
+    with mock.patch.object(worker, "_redis", return_value=fakeredis.FakeRedis()), \
+            run_now(worker.send_failure_notification):
+        worker.collect_device_config.apply(args=(bad_dev["id"], "manual", "admin", "ref-nf")).get()
+    fail = [p for k, u, p in sent if u == hook]
+    assert len(fail) == 1 and fail[0]["embeds"][0]["title"] == f"収集失敗: {bad_dev['name']}"
+    assert "認証" in json.dumps(fail[0], ensure_ascii=False)
+    acts = c.get("/api/activity/logs", params={"ref": "ref-nf", "event": "notify.sent"}, headers=admin).json()["items"]
+    assert acts and "収集の失敗を通知しました" in acts[0]["message"]
+    c.delete(f"/api/compliance/rules/{rule['id']}", headers=admin)
+    c.put("/api/notifications/me", json={"mode": "inherit"}, headers=h)

@@ -5,6 +5,7 @@ Celeryワーカー定義
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
+- send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 収集に成功したら、その機器のコンプライアンスチェックも行う。
 収集の結果・スケジュールの実行などはアクティビティログに記録する（ref で同じ実行の記録をまとめる）
 """
@@ -33,7 +34,7 @@ from app.services.config_service import (
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired, run_checks
-from app.services.notify import notify_change
+from app.services.notify import notify_change, notify_failure, notify_violations, wants_any
 from app.services.connection import load_connection_info
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,12 @@ def collect_device_config(
                 _run_async(_check_compliance(device_id, actor, ref))
             except Exception:  # noqa: BLE001 - 検査の失敗で収集を失敗扱いにしない
                 logger.exception("コンプライアンスチェックに失敗しました device=%s", device_id)
+        if not result.success and not will_retry:
+            try:
+                if _run_async(_wants("failure")):
+                    send_failure_notification.delay(device_id, result.error or "", triggered_by, ref)
+            except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
+                logger.exception("収集失敗の通知を投入できませんでした device=%s", device_id)
         if result.success and result.commit_hash and not result.first:
             # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
             send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
@@ -226,6 +233,39 @@ def send_change_notification(device_id: str, commit_hash: str, added: int, remov
         return _run_async(run())
     except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
         logger.exception("変更通知に失敗しました device=%s", device_id)
+        return {"error": True}
+
+
+async def _wants(event: str) -> bool:
+    async with _sessionmaker()() as db:
+        return await wants_any(db, event)
+
+
+@celery_app.task
+def send_violation_notification(items: list, ref: str | None = None):
+    """コンプライアンス違反の発生の通知。items: [[機器ID, [[ルール名, 重要度], ...]], ...]"""
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_violations(db, [(i, [tuple(r) for r in rules]) for i, rules in items], ref=ref)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001
+        logger.exception("違反の通知に失敗しました")
+        return {"error": True}
+
+
+@celery_app.task
+def send_failure_notification(device_id: str, error: str, triggered_by: str, ref: str | None = None):
+    """収集の失敗（リトライしても失敗したとき）の通知"""
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_failure(db, device_id, error, triggered_by, ref=ref)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001
+        logger.exception("収集失敗の通知に失敗しました device=%s", device_id)
         return {"error": True}
 
 
