@@ -427,10 +427,19 @@ ruff check .          # 指摘の確認
 ruff check --fix .    # 自動で直せるものを修正
 ```
 
+画面テスト（Playwright。`frontend/e2e/`）: backend を SQLite で起動し、初期データ（`e2e/seed.py`）を入れてから Chromium で操作します（ログイン・権限・グループ・世代管理・コンプライアンスの例外・構成図の編集と書き出し・監査ログの CSV など）。
+
+```bash
+cd frontend
+npx playwright install chromium   # 初回のみ
+PYTHON=python3 npm run e2e         # backend の依存パッケージが入った Python を指定
+```
+
 GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
 
 - backend: ruff と pytest（Python 3.12）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
+- e2e: 画面テスト（失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
 ---
 
@@ -547,6 +556,7 @@ netconfig-manager/
     ├── package-lock.json
     ├── tsconfig.json
     ├── vite.config.ts
+    ├── e2e/                     # 画面テスト（Playwright の設定・初期データ・テスト）
     └── src/
         ├── main.tsx
         ├── App.tsx              # ルーティング・ログインガード・画面の遅延読み込み
