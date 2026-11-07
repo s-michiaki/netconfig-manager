@@ -786,7 +786,7 @@ export default function CompliancePage() {
         {tab === "exceptions" && (
           <>
             <p className="topo-muted topo-small" style={{ marginBottom: 8 }}>
-              承認済みの逸脱です。登録・削除すると対象を再検査します。期限切れの例外は次の検査（収集・再検査）から使われません。
+              承認済みの逸脱です。登録・削除すると対象を再検査します。期限が切れた例外は使われなくなり、5分以内に自動で再検査します。
               追加は「違反一覧」の「例外にする」か、「ルール」の「例外」から行います。
             </p>
             <div className="table-scroll">

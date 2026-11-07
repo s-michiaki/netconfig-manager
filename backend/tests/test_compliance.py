@@ -271,8 +271,18 @@ def test_exception_api(ctx):
             await db.commit()
     asyncio.run(expire())
     assert c.get("/api/compliance/exceptions", headers=view).json()[0]["expired"] is True
-    c.post("/api/compliance/run", headers=op)
+    # 定期処理が期限切れを見つけて再検査する（1回だけ）
+    from app.services.compliance import recheck_expired_exceptions
+
+    async def recheck():
+        async with AsyncSessionLocal() as db:
+            return await recheck_expired_exceptions(db)
+    assert asyncio.run(recheck()) == 1
     assert status_of(r1) == "fail"
+    assert asyncio.run(recheck()) == 0
+    acts = c.get("/api/activity/logs", params={"device_id": r1, "category": "compliance"}, headers=view).json()["items"]
+    assert {"compliance.exception_expired", "compliance.violation"} <= {x["event"] for x in acts[:2]}
+    assert "予備ポート" in next(x for x in acts if x["event"] == "compliance.exception_expired")["message"]
 
     # 全機器 × 箇所の例外 → 削除すると違反に戻る。監査ログに残る
     e2 = c.post("/api/compliance/exceptions", json={**body, "device_id": None}, headers=op).json()

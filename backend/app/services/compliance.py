@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
+from app.services.activity import SYSTEM_ACTOR
 from app.services.activity import record as record_activity
 from app.services.config_service import CONFIG_FILENAME, repo_path
 
@@ -221,6 +222,48 @@ def evaluate_with_exceptions(spec: RuleSpec, config_text: str, exceptions: list[
 
 def active_exception(e: ComplianceException, now) -> bool:
     return e.expires_at is None or e.expires_at > now
+
+
+async def recheck_expired_exceptions(db: AsyncSession) -> int:
+    """期限が切れた例外の対象（ルール × 機器）を再検査する。定期処理から呼ぶ。再検査した例外の数を返す
+
+    期限切れの例外は検査で使われなくなるが、次の検査まで結果は「除外」のまま残るため、ここで反映する
+    """
+    now = utcnow()
+    expired = (await db.execute(select(ComplianceException).where(
+        ComplianceException.expires_at.is_not(None), ComplianceException.expires_at <= now,
+        ComplianceException.expiry_handled.is_(False)))).scalars().all()
+    if not expired:
+        return 0
+    rules = {r.id: r for r in (await db.execute(select(ComplianceRule).where(
+        ComplianceRule.id.in_({e.rule_id for e in expired})))).scalars()}
+    devices = {d.id: d for d in (await db.execute(select(Device).where(
+        Device.id.in_({e.device_id for e in expired if e.device_id})))).scalars()}
+    for e in expired:
+        e.expiry_handled = True
+        rule = rules.get(e.rule_id)
+        if rule is None:
+            continue
+        device = devices.get(e.device_id) if e.device_id else None
+        record_activity(db, "compliance.exception_expired",
+                        f"ルール「{rule.name}」の例外（{device.name if device else '全機器'}・理由: {e.reason}）の期限が切れたため再検査しました",
+                        device_id=device.id if device else None, device_name=device.name if device else None,
+                        detail={"rule": rule.name, "ignore_pattern": e.ignore_pattern}, actor=SYSTEM_ACTOR)
+    await db.commit()
+    # ルールごとにまとめて再検査（全機器の例外があれば全機器、なければ該当機器だけ）
+    targets: dict[str, set[str] | None] = {}
+    for e in expired:
+        if e.rule_id not in rules:
+            continue
+        if e.device_id is None or targets.get(e.rule_id, set()) is None:
+            targets[e.rule_id] = None
+        else:
+            targets.setdefault(e.rule_id, set()).add(e.device_id)
+    for rule_id, device_ids in targets.items():
+        await run_checks(db, device_ids=list(device_ids) if device_ids is not None else None,
+                         rule_ids=[rule_id], actor=SYSTEM_ACTOR)
+    await db.commit()
+    return len(expired)
 
 
 # ---------------------------------------------------------------- コンフィグの読み込み

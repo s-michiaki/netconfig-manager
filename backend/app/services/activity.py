@@ -23,6 +23,7 @@ EVENTS: dict[str, tuple[str, str]] = {
     "compliance.violation": ("違反の発生", "warning"),
     "compliance.resolved": ("違反の解消", "info"),
     "compliance.exempted": ("違反の除外（例外）", "info"),
+    "compliance.exception_expired": ("例外の期限切れ", "info"),
     "compliance.summary": ("検査結果の変化", "info"),
     "compliance.run": ("コンプライアンスチェックの実行", "info"),
     "notify.sent": ("通知の送信", "info"),
