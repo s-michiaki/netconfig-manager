@@ -361,10 +361,30 @@ async def run_checks(
                 commit_hash=commit, checked_at=now,
             ))
             checked += 1
-    _record_transitions(db, transitions, {r.id: r for r in rules}, actor, ref)
+    rule_map = {r.id: r for r in rules}
+    _record_transitions(db, transitions, rule_map, actor, ref)
+    await _enqueue_violation_notice(db, transitions, rule_map, ref)
     return {"devices": len(devices), "rules": len(rules), "checked": checked,
             "new_violations": sum(1 for t in transitions if t[0] == "violation"),
             "resolved": sum(1 for t in transitions if t[0] == "resolved")}
+
+
+async def _enqueue_violation_notice(db: AsyncSession, transitions: list[tuple], rules: dict, ref: str | None) -> None:
+    """新しく違反になったものを通知する（通知する設定がある場合だけ、送信は worker のタスクで）"""
+    by_device: dict[str, list[tuple[str, str]]] = {}
+    for kind, d, rid, _ in transitions:
+        if kind == "violation" and rid in rules:
+            by_device.setdefault(d.id, []).append((rules[rid].name, rules[rid].severity))
+    if not by_device:
+        return
+    from app.services.notify import wants_any  # 循環 import を避ける
+    try:
+        if not await wants_any(db, "violation"):
+            return
+        from app.worker import send_violation_notification
+        send_violation_notification.delay([[k, v] for k, v in by_device.items()], ref)
+    except Exception:  # noqa: BLE001 - 通知の投入に失敗しても検査は続ける
+        logger.exception("違反の通知を投入できませんでした")
 
 
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}

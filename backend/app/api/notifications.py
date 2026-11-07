@@ -41,6 +41,10 @@ class NotificationIn(BaseModel):
     all_devices: bool = True
     device_group_ids: list[str] = Field(default_factory=list, max_length=500)
     include_ungrouped: bool = False
+    # 通知する内容（省略時はコンフィグの変更だけ）
+    on_change: bool = True
+    on_violation: bool = False
+    on_failure: bool = False
 
 
 class NotificationOut(BaseModel):
@@ -52,6 +56,9 @@ class NotificationOut(BaseModel):
     all_devices: bool = True
     device_group_ids: list[str] = []
     include_ungrouped: bool = False
+    on_change: bool = True
+    on_violation: bool = False
+    on_failure: bool = False
     last_sent_at: datetime | None = None
     last_error: str | None = None
 
@@ -108,6 +115,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         all_devices=s.all_devices,
         device_group_ids=s.group_ids,
         include_ungrouped=s.include_ungrouped,
+        on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure,
         last_sent_at=s.last_sent_at,
         last_error=s.last_error,
     )
@@ -149,7 +157,11 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     s.all_devices = p.all_devices
     s.device_group_ids = json.dumps(ids)
     s.include_ungrouped = p.include_ungrouped
-    changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped)
+    s.on_change, s.on_violation, s.on_failure = p.on_change, p.on_violation, p.on_failure
+    changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped,
+                   on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure)
+    if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure):
+        raise HTTPException(status_code=422, detail="通知する内容（変更・違反・収集の失敗）を1つ以上選んでください")
     if p.mode == "custom" and not (s.discord_webhook or s.slack_webhook):
         raise HTTPException(status_code=422, detail="通知先（Discord または Slack の Webhook URL）を1つ以上登録してください")
     if p.mode == "custom" and not p.all_devices and not ids and not p.include_ungrouped:
@@ -316,7 +328,8 @@ async def test_group_notification(group_id: str, db: AsyncSession = Depends(get_
 
 
 @router.get("/preview", response_model=list[PreviewItem], dependencies=[Depends(require(Perm.USER_ADMIN))])
-async def preview(device_group_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    """指定した機器グループ（未指定なら未分類）の機器に変更があったとき、どこへ通知されるか"""
-    dests = await resolve_destinations(db, device_group_id or None)
+async def preview(device_group_id: str | None = None, event: Literal["change", "violation", "failure"] = "change",
+                  db: AsyncSession = Depends(get_db)):
+    """指定した機器グループ（未指定なら未分類）の機器で event が起きたとき、どこへ通知されるか"""
+    dests = await resolve_destinations(db, device_group_id or None, event)
     return [PreviewItem(kind=d.kind, webhook=mask_webhook(d.url) or "", via=sorted(d.via)) for d in dests]
