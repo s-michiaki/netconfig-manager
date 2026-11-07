@@ -427,7 +427,7 @@ ruff check .          # 指摘の確認
 ruff check --fix .    # 自動で直せるものを修正
 ```
 
-画面テスト（Playwright。`frontend/e2e/`）: backend を SQLite で起動し、初期データ（`e2e/seed.py`）を入れてから Chromium で操作します（ログイン・権限・グループ・世代管理・コンプライアンスの例外・構成図の編集と書き出し・監査ログの CSV など）。
+画面テスト（Playwright。`frontend/e2e/`）: backend を SQLite で起動し、初期データ（`e2e/seed.py`）を入れてから Chromium で操作します（全画面を開けるか・ログイン・権限・グループ・世代管理・コンプライアンスの例外・構成図の編集と書き出し・監査ログの CSV など）。
 
 ```bash
 cd frontend
