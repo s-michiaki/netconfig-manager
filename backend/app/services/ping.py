@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 MAX_CONCURRENCY = 200  # 同時に送る PING の数（大量の対象でもソケットを使い切らないように）
 
-HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
+HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+)
 
 
 class PingUnavailable(Exception):

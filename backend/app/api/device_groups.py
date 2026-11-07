@@ -100,7 +100,10 @@ async def reorder_groups(payload: GroupOrder, db: AsyncSession = Depends(get_db)
     """グループの表示順を変える（デバイス管理・各画面の絞り込みなどの並び）"""
     groups = {g.id: g for g in (await db.execute(select(DeviceGroup))).scalars()}
     if len(set(payload.ids)) != len(payload.ids) or set(payload.ids) != set(groups):
-        raise HTTPException(status_code=422, detail="すべてのグループを1回ずつ指定してください（他の人が追加・削除した可能性があります。再読み込みしてください）")
+        raise HTTPException(
+            status_code=422,
+            detail="すべてのグループを1回ずつ指定してください（他の人が追加・削除した可能性があります。再読み込みしてください）",
+        )
     for i, gid in enumerate(payload.ids, 1):
         groups[gid].sort_order = i
     audit("device_group.reorder", target_type="device_group",

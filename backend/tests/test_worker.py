@@ -1,13 +1,22 @@
-import asyncio, os, sqlite3, uuid
+import asyncio
+import os
+import sqlite3
+import uuid
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
-import fakeredis, git, pytest
-from conftest import TMP
+
 import fake_sshd
+import fakeredis
+import git
+import pytest
+from conftest import TMP
 from fastapi.testclient import TestClient
-from app.main import app
+
 from app import worker
+from app.main import app
+
 
 @pytest.fixture
 def r():
@@ -63,13 +72,15 @@ def test_legacy_migration():
     db.execute("insert into devices(id,name,hostname,platform,port,username,password,enable_secret,is_active,created_at,updated_at) values(?,?,?,?,?,?,?,?,1,'2025-01-01','2025-01-01')",
                (did, "legacy-sw", "1.2.3.4", "cisco_ios", 22, "u", "plainpw", "plainen")); db.commit()
     legacy = os.path.join(settings.GIT_REPO_PATH, "legacy-sw"); os.makedirs(legacy)
-    repo = git.Repo.init(legacy); open(f"{legacy}/running-config.txt", "w").write("x\n")
+    repo = git.Repo.init(legacy)
+    Path(f"{legacy}/running-config.txt").write_text("x\n")
     repo.index.add(["running-config.txt"]); repo.index.commit("old")
     with TestClient(app):  # 起動時の移行処理を実行させる
         pass
     pw, en = db.execute("select password, enable_secret from devices where id=?", (did,)).fetchone()
     assert pw.startswith("enc:") and en.startswith("enc:")
-    from app.core.crypto import decrypt; assert decrypt(pw) == "plainpw"
+    from app.core.crypto import decrypt
+    assert decrypt(pw) == "plainpw"
     assert os.path.isdir(os.path.join(settings.GIT_REPO_PATH, did, ".git")) and not os.path.exists(legacy)
 
 def test_compliance_schedule(r):

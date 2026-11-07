@@ -4,11 +4,11 @@ import json
 import uuid
 from unittest import mock
 
+import fake_sshd
 import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
-import fake_sshd
 from app import worker
 from app.core.database import AsyncSessionLocal
 from app.main import app
@@ -161,7 +161,7 @@ def test_change_notification_end_to_end(ctx, sent, monkeypatch):
     c.put("/api/notifications/me", json={"mode": "custom", "slack_webhook": slack_hook, "discord_webhook": ""},
           headers=u["ntf-b"]["h"])
 
-    port, state, _ = fake_sshd.start()
+    port, _state, _ = fake_sshd.start()
     d = c.post("/api/devices/", json=dict(name=f"N-SW-{uid()}", hostname="127.0.0.1", port=port, platform="cisco_ios",
                                           username="admin", password="pw", group_id=g1), headers=admin).json()
     fr = fakeredis.FakeRedis()

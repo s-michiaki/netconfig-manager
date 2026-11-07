@@ -216,7 +216,7 @@ def evaluate_with_exceptions(spec: RuleSpec, config_text: str, exceptions: list[
     if ev.status == "pass" and ev.ignored:
         return Evaluation("exempt", [f"例外: {reasons}"] + [f"除外: {x}" for x in ev.ignored], ev.ignored)
     if ev.status == "fail" and any(not e.ignore_pattern for e in exceptions):
-        return Evaluation("exempt", [f"例外（機器単位）: {reasons}"] + ev.details, ev.ignored)
+        return Evaluation("exempt", [f"例外（機器単位）: {reasons}", *ev.details], ev.ignored)
     return ev
 
 
@@ -246,7 +246,8 @@ async def recheck_expired_exceptions(db: AsyncSession) -> int:
             continue
         device = devices.get(e.device_id) if e.device_id else None
         record_activity(db, "compliance.exception_expired",
-                        f"ルール「{rule.name}」の例外（{device.name if device else '全機器'}・理由: {e.reason}）の期限が切れたため再検査しました",
+                        f"ルール「{rule.name}」の例外（{device.name if device else '全機器'}・理由: {e.reason}）"
+                        "の期限が切れたため再検査しました",
                         device_id=device.id if device else None, device_name=device.name if device else None,
                         detail={"rule": rule.name, "ignore_pattern": e.ignore_pattern}, actor=SYSTEM_ACTOR)
     await db.commit()

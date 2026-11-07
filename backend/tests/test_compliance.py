@@ -39,7 +39,7 @@ def test_parse_sections():
     secs = parse_sections(IOS.splitlines())
     heads = [h for _, h, _ in secs]
     assert "interface GigabitEthernet0/1" in heads and "line vty 5 15" in heads
-    body = dict((h, b) for _, h, b in secs)["interface GigabitEthernet0/1"]
+    body = {h: b for _, h, b in secs}["interface GigabitEthernet0/1"]
     assert [line.strip() for _, line in body] == ["description uplink", "ip address 10.0.0.1 255.255.255.0"]
 
 

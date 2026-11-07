@@ -135,7 +135,9 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
         v = getattr(p, f"{kind}_webhook")
         if v and not valid_webhook(kind, v):
             example = "https://discord.com/api/webhooks/…" if kind == "discord" else "https://hooks.slack.com/services/…"
-            raise HTTPException(status_code=422, detail=f"{kind.capitalize()} の Webhook URL の形式が正しくありません（{example}）")
+            raise HTTPException(
+                status_code=422, detail=f"{kind.capitalize()} の Webhook URL の形式が正しくありません（{example}）"
+            )
     ids = list(dict.fromkeys(p.device_group_ids))
     if ids:
         found = set((await db.execute(select(DeviceGroup.id).where(DeviceGroup.id.in_(ids)))).scalars())

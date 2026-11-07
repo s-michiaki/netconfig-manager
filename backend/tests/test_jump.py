@@ -5,14 +5,14 @@ import socket
 import uuid
 from unittest import mock
 
+import fake_jump
+import fake_sshd
 import paramiko
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from fastapi.testclient import TestClient
 
-import fake_jump
-import fake_sshd
 from app.core.ssh_jump import JumpHostInfo, PrivateKeyError, load_private_key
 from app.core.ssh_jump import test_jump_host as run_jump_test
 from app.main import app
@@ -152,7 +152,7 @@ def _login_as(client, admin, role):
 
 
 def test_jump_host_api(client, admin):
-    pkey, text = ed25519_openssh("pp-123")
+    _pkey, text = ed25519_openssh("pp-123")
     base = {"name": f"jh-{uuid.uuid4().hex[:6]}", "hostname": "127.0.0.1", "port": 2200, "username": "u"}
     assert client.post("/api/jump-hosts/", json=base, headers=admin).status_code == 422  # 認証情報なし
     r = client.post("/api/jump-hosts/", json={**base, "private_key": text}, headers=admin)
@@ -231,7 +231,6 @@ def test_jump_test_endpoint_and_terminal(client, admin):
 
     # 踏み台の認証失敗はターミナルにも分かる形で表示される
     client.put(f"/api/jump-hosts/{jh['id']}", json={"password": "wrong"}, headers=admin)
-    with mock.patch("app.api.terminal.logger"):
-        with client.websocket_connect(f"/api/terminal/ws/{dev['id']}") as ws:
-            ws.send_text(json.dumps({"type": "auth", "token": token}))
-            assert "踏み台サーバ「" in ws.receive_text()
+    with mock.patch("app.api.terminal.logger"), client.websocket_connect(f"/api/terminal/ws/{dev['id']}") as ws:
+        ws.send_text(json.dumps({"type": "auth", "token": token}))
+        assert "踏み台サーバ「" in ws.receive_text()

@@ -300,7 +300,9 @@ class ExceptionIn(BaseModel):
         if self.ignore_pattern:
             validate_ignore_pattern(self.ignore_pattern)
         elif not self.device_id:
-            raise ValueError("全機器を対象にする場合は、除外する箇所（正規表現）を指定してください（ルールを無効にするのと同じになるため）")
+            raise ValueError(
+                "全機器を対象にする場合は、除外する箇所（正規表現）を指定してください（ルールを無効にするのと同じになるため）"
+            )
         if self.expires_at is not None:
             if self.expires_at.tzinfo is not None:
                 self.expires_at = self.expires_at.astimezone(UTC).replace(tzinfo=None)
@@ -365,7 +367,10 @@ async def create_exception(
         if device is None:
             raise HTTPException(status_code=404, detail="Device not found")
     if payload.ignore_pattern and not pattern_allowed(spec_of(rule)):
-        raise HTTPException(status_code=422, detail="このルール（コンフィグ全体に必要な行）では箇所の除外は使えません。機器単位で除外してください")
+        raise HTTPException(
+            status_code=422,
+            detail="このルール（コンフィグ全体に必要な行）では箇所の除外は使えません。機器単位で除外してください",
+        )
     e = ComplianceException(
         rule_id=rule.id, device_id=payload.device_id, ignore_pattern=payload.ignore_pattern,
         reason=payload.reason, expires_at=payload.expires_at, created_by=user.username,

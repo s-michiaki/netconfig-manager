@@ -9,7 +9,7 @@ import difflib
 import logging
 import re
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import git
@@ -397,7 +397,7 @@ def save_config(device_id: str, config_text: str, triggered_by: str) -> CollectR
     added, removed = count_changes(current, config_text)
     config_file.write_text(config_text, encoding="utf-8")
     repo.index.add([CONFIG_FILENAME])
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     commit = repo.index.commit(f"Collect ({triggered_by}) {ts}  +{added} -{removed}")
     return CollectResult(success=True, commit_hash=commit.hexsha, added=added, removed=removed, first=not current)
 
@@ -520,7 +520,8 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
                 msg = f"機器の応答待ちがタイムアウトしました（{effective_read_timeout(device)}秒）。" \
                     "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を延ばしてください"
             else:
-                msg = "機器の応答待ちがタイムアウトしました。応答が遅い機器の場合はデバイス設定の「応答待ち時間」を指定してください"
+                msg = ("機器の応答待ちがタイムアウトしました。"
+                       "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を指定してください")
             return CollectResult(success=False, error=msg, retryable=True)
         if isinstance(e, NetmikoTimeoutException):
             return CollectResult(success=False, error="タイムアウトまたは接続不可", retryable=True)
@@ -557,7 +558,7 @@ def get_config_history(device_id: str, limit: int = 50) -> list[dict]:
             "full_hash": c.hexsha,
             "message": c.message.strip(),
             # タイムゾーン付きで返す（ブラウザ側でローカル時刻に正しく変換される）
-            "date": datetime.fromtimestamp(c.committed_date, tz=timezone.utc).isoformat(),
+            "date": datetime.fromtimestamp(c.committed_date, tz=UTC).isoformat(),
             "author": c.author.name,
         }
         for c in commits

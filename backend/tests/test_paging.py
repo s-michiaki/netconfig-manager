@@ -1,11 +1,11 @@
 """ページング（--More--）が無効化できていない機器の検出テスト"""
 import time
 
-import pytest
-
 import fake_sshd
-from app.services import config_service as cs
+import pytest
 from test_device_auth import dev
+
+from app.services import config_service as cs
 
 
 @pytest.mark.parametrize("pager", [" --More-- ", "  ---- More ----", "---(more 45%)---"])

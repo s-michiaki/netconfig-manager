@@ -1,10 +1,12 @@
 from unittest import mock
+
 import pytest
-from fastapi.testclient import TestClient
 from conftest import TMP
+from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import config_service as cs
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -57,7 +59,8 @@ def test_configs_and_injection(client, auth):
     assert "+hostname b" in r.json()["diff"]
     r = client.get(f"/api/configs/{did}/diff", params={"from_hash": f"--output={TMP}/pwn", "to_hash": c2.commit_hash}, headers=auth)
     assert r.status_code == 422
-    import os; assert not os.path.exists(f"{TMP}/pwn")
+    import os
+    assert not os.path.exists(f"{TMP}/pwn")
     assert client.get(f"/api/configs/{did}/content/{c1.commit_hash}", headers=auth).text == "hostname a\n!\n!\n"
     assert client.get(f"/api/configs/{did}/content/{'0'*40}", headers=auth).status_code == 404
     assert client.get("/api/configs/..%2F..%2Fetc/history", headers=auth).status_code == 404
@@ -76,6 +79,7 @@ def test_schedules(client, auth):
 def test_is_due():
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     from app.worker import is_due
     tz = ZoneInfo("Asia/Tokyo")
     assert is_due("0 9 * * *", datetime(2026,10,28,9,0,0,tzinfo=tz))
@@ -95,7 +99,7 @@ def test_ws_auth(client, auth):
         assert e.value.code == 4401
     # 正しいトークン + SSH接続失敗（存在しないホスト）→ エラーメッセージ
     token = auth["Authorization"].split()[1]
-    with mock.patch("app.api.terminal.SSHTerminal.connect", side_effect=TimeoutError("timed out")):
-        with client.websocket_connect(f"/api/terminal/ws/{pytest.device_id}") as ws:
-            ws.send_text(f'{{"type":"auth","token":"{token}"}}')
-            assert "タイムアウト" in ws.receive_text()
+    with mock.patch("app.api.terminal.SSHTerminal.connect", side_effect=TimeoutError("timed out")), \
+            client.websocket_connect(f"/api/terminal/ws/{pytest.device_id}") as ws:
+        ws.send_text(f'{{"type":"auth","token":"{token}"}}')
+        assert "タイムアウト" in ws.receive_text()

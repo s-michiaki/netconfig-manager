@@ -16,7 +16,6 @@ import asyncio
 import codecs
 import json
 import logging
-import socket
 import threading
 import uuid
 
@@ -137,7 +136,7 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     try:
         first = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SEC))
         user = await authenticate_token(str(first.get("token", ""))) if first.get("type") == "auth" else None
-    except (asyncio.TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
+    except (TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
         user = None
     if user is None:
         await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
@@ -210,7 +209,7 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
             while not stop.is_set():
                 try:
                     data = session.channel.recv(4096)
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 if not data:  # リモート側がシェルを閉じた（こちらから閉じた場合は stop が立っている）
                     if not stop.is_set():

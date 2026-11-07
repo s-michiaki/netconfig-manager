@@ -10,11 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
-from app.services.audit import Audit, get_audit
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import Device, DeviceGroup, Schedule
+from app.services.audit import Audit, get_audit
 
 router = APIRouter()
 

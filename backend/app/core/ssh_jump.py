@@ -20,6 +20,7 @@ from app.core.ssh_keys import (  # noqa: F401 - 既存の import 元との互換
     normalize_private_key,
 )
 
+
 @dataclass
 class JumpHostInfo:
     name: str

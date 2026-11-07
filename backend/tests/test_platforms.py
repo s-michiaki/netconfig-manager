@@ -1,11 +1,11 @@
 """対応プラットフォームのテスト（FortiGate・AlliedWare Plus は疑似機器で収集まで確認）"""
 import uuid
 
+import fake_sshd
 import pytest
 from fastapi.testclient import TestClient
 from netmiko.ssh_dispatcher import CLASS_MAPPER
 
-import fake_sshd
 from app.main import app
 from app.services import config_service as cs
 
@@ -73,7 +73,7 @@ def test_awplus_auto_enable_without_password():
 
 
 def test_awplus_enable_with_password():
-    port, state, _ = fake_sshd.start(mode="awplus", enable_password="en-secret")
+    port, _state, _ = fake_sshd.start(mode="awplus", enable_password="en-secret")
     assert cs.collect_config_sync(dev(port, "allied_telesis_awplus", enable_secret="en-secret")).success
     # パスワードが違えば失敗する（リトライしても解決しない種類ではないが、失敗として返る）
     r = cs.collect_config_sync(dev(port, "allied_telesis_awplus", enable_secret="wrong"))

@@ -2,14 +2,14 @@
 import json
 import uuid
 
-import pytest
-from fastapi.testclient import TestClient
-
 import fake_jump
 import fake_sshd
+import pytest
+from fastapi.testclient import TestClient
+from test_jump import ed25519_openssh, jinfo, rsa_pem
+
 from app.main import app
 from app.services import config_service as cs
-from test_jump import ed25519_openssh, jinfo, rsa_pem
 
 
 def dev(port, platform="cisco_ios", password="pw", private_key=None, key_passphrase=None, jump=None):
@@ -98,7 +98,7 @@ def admin(client):
 
 
 def test_device_api_key_auth(client, admin):
-    pkey, text = ed25519_openssh("pp-2")
+    _pkey, text = ed25519_openssh("pp-2")
     base = dict(name=f"k-{uuid.uuid4().hex[:6]}", hostname="10.1.1.1", platform="paloalto_panos", username="admin")
     assert client.post("/api/devices/", json=base, headers=admin).status_code == 422          # 認証情報なし
     r = client.post("/api/devices/", json={**base, "private_key": text}, headers=admin)

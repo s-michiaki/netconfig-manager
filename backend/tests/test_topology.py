@@ -3,10 +3,10 @@ import sqlite3
 import uuid
 
 import pytest
+from conftest import TMP
 from fastapi.testclient import TestClient
 
 from app.main import app
-from conftest import TMP
 
 
 def login(client, username, password):

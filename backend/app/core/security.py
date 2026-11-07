@@ -1,6 +1,6 @@
 """パスワードハッシュとJWT"""
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
@@ -36,7 +36,7 @@ def password_fingerprint(hashed_password: str) -> str:
 
 def create_access_token(user_id: str, hashed_password: str) -> str:
     """ロールはトークンに入れず、リクエストごとにDBから読む（ロール変更を即時反映するため）"""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": user_id,
         "pwv": password_fingerprint(hashed_password),
