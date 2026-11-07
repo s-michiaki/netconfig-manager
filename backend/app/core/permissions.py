@@ -31,11 +31,12 @@ class Perm(str, Enum):
     PING_WRITE = "ping:write"  # Ping監視の対象IPの追加・変更・削除
     ACTIVITY_READ = "activity:read"  # アクティビティログ（収集の結果・違反の発生など）の閲覧
     NOTIFY_SELF = "notify:self"  # 自分の通知設定（コンフィグ変更の通知先・対象）の編集
+    MONITOR_READ = "monitor:read"  # モニタリング（FW ルールのヒット数・帯域）の閲覧
 
 
 _VIEWER = {
     Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ, Perm.PING_USE,
-    Perm.NOTIFY_SELF, Perm.ACTIVITY_READ,
+    Perm.NOTIFY_SELF, Perm.ACTIVITY_READ, Perm.MONITOR_READ,
 }
 _OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE}
 _ADMIN = set(Perm)

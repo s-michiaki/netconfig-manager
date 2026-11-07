@@ -70,6 +70,9 @@ ACTIONS = {
     "user_group.delete": "ユーザーグループ削除",
     "audit.view_recording": "ターミナル記録の閲覧",
     "audit.export": "監査ログの CSV 出力",
+    "monitor.snmp_update": "SNMP の設定",
+    "monitor.snmp_delete": "SNMP の設定の削除",
+    "monitor.fw_collect": "FW ヒット数の取得",
     "activity.export": "アクティビティログの CSV 出力",
 }
 

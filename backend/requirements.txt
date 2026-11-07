@@ -17,3 +17,4 @@ croniter==3.0.3
 python-multipart==0.0.12
 websockets==13.1
 icmplib==3.0.4
+pysnmp==7.1.28

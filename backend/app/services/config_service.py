@@ -406,6 +406,33 @@ def save_config(device_id: str, config_text: str, triggered_by: str) -> CollectR
 
 
 def fetch_config(device: DeviceConnectionInfo) -> str:
+    """機器に接続してコンフィグを取得する（生の出力。normalize_config の前）"""
+    def work(conn, spec: PlatformSpec, read_timeout: int) -> str:
+        output = []
+        for cmd in spec.commands:
+            output.append(_send(conn, cmd, read_timeout))
+        if spec.config_mode_commands:
+            conn.config_mode()
+            try:
+                for cmd in spec.config_mode_commands:
+                    output.append(_send(conn, cmd, read_timeout))
+            finally:
+                conn.exit_config_mode()
+        return "\n".join(output)
+
+    return _with_session(device, work)
+
+
+def run_commands(device: DeviceConnectionInfo, commands: list[str]) -> list[str]:
+    """機器に接続して運用コマンドを実行し、それぞれの出力を返す（モニタリングのヒット数取得など）
+
+    収集用の準備コマンド（prep_commands）は実行しない
+    """
+    return _with_session(device, lambda conn, spec, rt: [_send(conn, c, rt) for c in commands], prep=False)
+
+
+def _with_session(device: DeviceConnectionInfo, work, prep: bool = True):
+    """接続（踏み台・鍵認証・ホスト鍵検証・enable）してから work(conn, spec, read_timeout) を実行し、必ず切断する"""
     spec = PLATFORMS.get(device.platform)
     if spec is None:
         raise ValueError(f"未対応のプラットフォームです: {device.platform}")
@@ -459,19 +486,10 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
         conn._open()
         if spec.supports_enable and (device.enable_secret or spec.auto_enable):
             conn.enable()
-        for cmd in spec.prep_commands:
-            _send(conn, cmd, read_timeout)
-        output = []
-        for cmd in spec.commands:
-            output.append(_send(conn, cmd, read_timeout))
-        if spec.config_mode_commands:
-            conn.config_mode()
-            try:
-                for cmd in spec.config_mode_commands:
-                    output.append(_send(conn, cmd, read_timeout))
-            finally:
-                conn.exit_config_mode()
-        return "\n".join(output)
+        if prep:
+            for cmd in spec.prep_commands:
+                _send(conn, cmd, read_timeout)
+        return work(conn, spec, read_timeout)
     finally:
         try:
             conn.disconnect()
@@ -492,43 +510,44 @@ def _host_key_error(e: BaseException) -> BaseException | None:
     return None
 
 
+def describe_failure(e: BaseException, device: DeviceConnectionInfo) -> tuple[str, bool]:
+    """接続・コマンド実行の失敗を、画面に出す説明と「再試行で直る見込みがあるか」にする"""
+    if isinstance(e, JumpHostError):
+        return str(e), e.retryable
+    if isinstance(e, PrivateKeyError):
+        return f"機器の秘密鍵: {e}", False
+    if isinstance(e, PagingNotDisabledError):
+        # 権限不足などでページング無効化コマンドが効いていない。リトライしても解決しない
+        return (f"「{e.command}」の出力が --More-- 等で止まりました。ページングを無効化できていません"
+                "（ログインユーザーの権限で terminal length 0 / screen-length 等が実行できるか確認してください）"), False
+    if isinstance(e, NetmikoAuthenticationException):
+        return "認証失敗" + ("（機器）" if device.jump else ""), False
+    hk = _host_key_error(e)
+    if hk is not None:
+        # 鍵不一致・未登録はリトライしても解決しない
+        return describe_ssh_error(hk), False
+    if isinstance(e, ReadTimeout):
+        spec = PLATFORMS.get(device.platform)
+        if device.read_timeout or (spec and spec.slow_device):
+            return (f"機器の応答待ちがタイムアウトしました（{effective_read_timeout(device)}秒）。"
+                    "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を延ばしてください"), True
+        return ("機器の応答待ちがタイムアウトしました。"
+                "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を指定してください"), True
+    if isinstance(e, NetmikoTimeoutException):
+        return "タイムアウトまたは接続不可", True
+    if isinstance(e, ValueError):
+        return str(e), False
+    logger.exception("機器の操作に失敗: %s", device.name)
+    return describe_ssh_error(e), True
+
+
 def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manual") -> CollectResult:
     """同期的にコンフィグを収集する（Celeryワーカーから呼び出す）"""
     try:
         raw = fetch_config(device)
-    except JumpHostError as e:
-        return CollectResult(success=False, error=str(e), retryable=e.retryable)
-    except PrivateKeyError as e:
-        return CollectResult(success=False, error=f"機器の秘密鍵: {e}")
-    except PagingNotDisabledError as e:
-        # 権限不足などでページング無効化コマンドが効いていない。リトライしても解決しない
-        return CollectResult(
-            success=False,
-            error=f"「{e.command}」の出力が --More-- 等で止まりました。ページングを無効化できていません"
-            "（ログインユーザーの権限で terminal length 0 / screen-length 等が実行できるか確認してください）",
-        )
-    except NetmikoAuthenticationException:
-        return CollectResult(success=False, error="認証失敗" + ("（機器）" if device.jump else ""))
     except Exception as e:  # noqa: BLE001
-        hk = _host_key_error(e)
-        if hk is not None:
-            # 鍵不一致・未登録はリトライしても解決しない
-            return CollectResult(success=False, error=describe_ssh_error(hk))
-        if isinstance(e, ReadTimeout):
-            spec = PLATFORMS.get(device.platform)
-            if device.read_timeout or (spec and spec.slow_device):
-                msg = f"機器の応答待ちがタイムアウトしました（{effective_read_timeout(device)}秒）。" \
-                    "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を延ばしてください"
-            else:
-                msg = ("機器の応答待ちがタイムアウトしました。"
-                       "応答が遅い機器の場合はデバイス設定の「応答待ち時間」を指定してください")
-            return CollectResult(success=False, error=msg, retryable=True)
-        if isinstance(e, NetmikoTimeoutException):
-            return CollectResult(success=False, error="タイムアウトまたは接続不可", retryable=True)
-        if isinstance(e, ValueError):
-            return CollectResult(success=False, error=str(e))
-        logger.exception("コンフィグ取得に失敗: %s", device.name)
-        return CollectResult(success=False, error=describe_ssh_error(e), retryable=True)
+        msg, retryable = describe_failure(e, device)
+        return CollectResult(success=False, error=msg, retryable=retryable)
 
     config_text = normalize_config(raw, device.platform)
     if not config_text.strip():

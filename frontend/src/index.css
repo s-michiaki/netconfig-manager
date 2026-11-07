@@ -716,3 +716,45 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-export-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 180px; display: flex; flex-direction: column; padding: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); }
 .topo-export-menu button { text-align: left; background: none; border: none; color: var(--color-text); padding: 7px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
 .topo-export-menu button:hover { background: var(--color-surface2); }
+
+/* ---- モニタリング（試験導入） ---- */
+.mon-bar-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.mon-util { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+.mon-bar { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: var(--color-surface2); overflow: hidden; }
+.mon-bar-fill { display: block; height: 100%; background: var(--color-accent); border-radius: 3px; }
+.mon-bar-mid { background: var(--color-warning); }
+.mon-bar-high { background: var(--color-danger); }
+.data-table tr.mon-row-active td { background: var(--color-accent-dim); }
+.data-table tr.clickable { cursor: pointer; }
+.mon-series { margin-top: 16px; padding: 14px 16px; }
+.mon-series-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.mon-series-head > div:first-child { flex: 1; min-width: 200px; }
+.mon-legend { display: flex; gap: 16px; font-size: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+.mon-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.mon-key-dash { height: 0; border-top: 3px dashed; background: none !important; }
+.mon-chart { position: relative; }
+.mon-chart svg { width: 100%; height: auto; display: block; }
+.mon-grid { stroke: var(--color-border); stroke-width: 1; opacity: 0.6; }
+.mon-axis { fill: var(--color-muted); font-size: 11px; }
+.mon-speed { stroke: var(--color-muted); stroke-dasharray: 2 4; stroke-width: 1; }
+.mon-cross { stroke: var(--color-muted); stroke-width: 1; }
+.mon-dot { stroke: var(--color-surface); stroke-width: 2; }
+.mon-tip {
+  position: absolute; top: 8px; transform: translateX(-50%); pointer-events: none;
+  background: var(--color-bg); border: 1px solid var(--color-border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.mon-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--color-muted); font-size: 13px; text-align: center; padding: 0 20px; }
+.mon-stats { margin-top: 10px; max-width: 520px; }
+.mon-fw-devices { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.mon-fw-card {
+  display: flex; flex-direction: column; gap: 3px; align-items: flex-start; min-width: 170px; text-align: left;
+  background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px;
+  color: var(--color-text); cursor: pointer;
+}
+.mon-fw-card:hover { border-color: var(--color-accent); }
+.mon-fw-card.active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+.mon-warn { color: var(--color-warning); }
+.mon-err { color: var(--color-danger); display: inline-block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.mon-raw { width: min(900px, 94vw); }
+.mon-raw pre { max-height: 60vh; overflow: auto; background: var(--color-bg); padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre; }

@@ -15,6 +15,7 @@ from app.api import (
     device_groups,
     devices,
     jump_hosts,
+    monitoring,
     notifications,
     ping,
     schedules,
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.25.0",
+    version="1.26.0",
     lifespan=lifespan,
 )
 
@@ -109,6 +110,7 @@ app.include_router(compliance.router, prefix="/api/compliance", tags=["complianc
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependencies=protected)
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"], dependencies=protected)
 app.include_router(ping.router, prefix="/api/ping", tags=["ping"], dependencies=protected)
+app.include_router(monitoring.router, prefix="/api/monitoring", tags=["monitoring"], dependencies=protected)
 app.include_router(
     notifications.router, prefix="/api/notifications", tags=["notifications"], dependencies=protected
 )
@@ -121,4 +123,6 @@ app.include_router(ping.ws_router, prefix="/api/ping", tags=["ping"])
 @app.get("/api/health")
 async def health():
     # 画面のサイドバーに表示するバージョンもここから取る（version は上の FastAPI(...) の1か所で管理）
-    return {"status": "ok", "version": app.version}
+    return {"status": "ok", "version": app.version,
+            # 試験導入中の機能（画面のメニューの表示に使う）
+            "features": {"monitoring": settings.MONITORING_ENABLED}}

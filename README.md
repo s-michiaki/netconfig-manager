@@ -15,6 +15,7 @@
 | 世代管理 | GitPython | コンフィグ差分・履歴 |
 | DBマイグレーション | Alembic | 起動時に自動でスキーマを最新化 |
 | Ping監視 | icmplib + WebSocket | 登録機器・指定IPへの死活監視（deadman 風） |
+| モニタリング（試験導入） | pysnmp + Netmiko | SNMP による帯域の使用率・FW ルールのヒット数（既定は無効） |
 | タスクキュー | Celery + Redis | 非同期収集・定期収集・定期コンプライアンスチェック（beat が毎分スケジュールを確認） |
 | データベース | PostgreSQL 16 | デバイス情報・ユーザー・ログ |
 | コンテナ | Podman / Docker | サービス管理 |
@@ -290,6 +291,45 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - `.env` の `PING_TIMEOUT`（1回の応答待ち、既定 1 秒）・`PING_MAX_TARGETS`（同時に監視できる対象数、既定 300）で調整できます
 - 利用は閲覧者以上、IP の追加・編集・削除はオペレーター以上。追加・変更・削除は監査ログに残ります
 
+## モニタリング（試験導入）
+
+インタフェースの帯域の使用率と、FW のルール（ポリシー）のヒット数を確認する画面です。**試験導入のため既定では無効**で、メニューにも表示されません。運用で問題がないことを確かめたうえで、既定を有効に切り替える予定です。
+
+### 有効にする
+
+1. `.env` に `MONITORING_ENABLED=true` を追加する（`.env.example` 参照）
+2. `bash scripts/setup.sh` でコンテナを作り直す（メニューに「モニタリング」が表示されます）
+3. 「モニタリング」→「SNMP 設定」で、帯域を見たい機器ごとに SNMP を設定する
+
+無効に戻すときは `MONITORING_ENABLED=false` にしてコンテナを作り直します。記録したデータは残り、再度有効にすると続きから使えます（不要なら機器ごとに「SNMP 設定」から削除）。
+
+### インタフェース（帯域の使用率）
+
+- SNMP（IF-MIB の 64bit カウンタ `ifHCInOctets` / `ifHCOutOctets`、速度は `ifHighSpeed`）で `MONITOR_INTERVAL_SEC`（既定 5 分）ごとに取得し、前回との差から bps と使用率を計算します（**2回目の取得から**値が出ます）
+- 一覧: 使用率の高いインタフェース（全機器）、または機器ごとのインタフェース（名前・説明・状態・速度・入力/出力の bps と使用率）。使用率 50% 以上は黄、80% 以上は赤
+- 行を選ぶと推移のグラフ（1時間〜30日）。長い期間はきりのよい間隔（30分など）の平均で表示し、ツールチップに区間の最大値を出します。取得できなかった時間は線を切ります
+- 記録は稼働中（up）のインタフェースだけ、`MONITOR_RETENTION_DAYS`（既定 30 日）保存します（1,000 インタフェースで約 860 万行が目安）
+- SNMP v2c（コミュニティ名）と v3（認証 SHA / SHA-256 / MD5・暗号化 AES-128 / AES-256 / DES）に対応。コミュニティ名・パスワードは `DEVICE_ENCRYPTION_KEY` で暗号化して保存します
+- SNMP は**サーバーから機器へ UDP 161 で直接**届く必要があります（踏み台経由の機器は不可）。機器側で SNMP を有効にし、サーバーのアドレスからの読み取りを許可してください
+- 「保存して接続確認」で sysName / sysDescr を取得して疎通を確認できます。「今すぐ取得」で次の定期取得を待たずに取得します
+
+### FW ルール（ヒット数）
+
+- 対象: Palo Alto（PAN-OS）・Fortinet（FortiGate）として登録した機器。コンフィグ収集と同じ認証情報で SSH ログインし、`MONITOR_FW_INTERVAL_MIN`（既定 60 分）ごとに取得します（踏み台経由も可）
+  - PAN-OS: `show rule-hit-count vsys vsys-name <MONITOR_PANOS_VSYS> rule-base security rules all`
+  - FortiGate: `show firewall policy`（ID と名前）と `diagnose firewall iprope list 100004`（ヒット数・パケット・バイト・初回/最終ヒット）
+- 表示: ルールの順・名前・ヒット数・前回の取得からの増加・最終/初回ヒット（FortiGate はパケット/バイトも）。**一度もヒットしていない、または最終ヒットが 30 日以上前**のルールに「未使用」の印を付け、絞り込めます（ルールの棚卸し用）
+- 取得に失敗したときは前回の結果を残したままエラーを表示し、アクティビティに「FW ヒット数の取得失敗」を記録します
+- 機種や OS のバージョンで出力が違い正しく読めない場合は、「取得した出力」（管理者）で機器の出力を確認できます。試験導入中に合わない出力があれば、その内容をもとに読み取りを調整します
+- 現時点の制限: FortiGate の VDOM（複数 VDOM 構成）、PAN-OS の複数 vsys の同時取得、Panorama 経由の取得には対応していません
+
+### 権限
+
+- 閲覧（インタフェース・FW ルール）: 閲覧者以上
+- 「今すぐ取得」: オペレーター以上
+- SNMP の設定・削除・接続確認、「取得した出力」の表示: 管理者（機器の登録・編集と同じ権限）
+- SNMP 設定の変更・削除、FW ヒット数の手動取得は監査ログに残ります
+
 ## 通知（Discord / Slack）
 
 コンフィグの変更・コンプライアンス違反の発生・収集の失敗を、Discord・Slack の Webhook に通知します。「通知設定」画面で設定します。
@@ -361,14 +401,15 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 | 構成図の閲覧 | ✓ | ✓ | ✓ |
 | コンプライアンスの結果・ルールの閲覧 | ✓ | ✓ | ✓ |
 | Ping監視の利用 | ✓ | ✓ | ✓ |
+| モニタリング（帯域・FW ルールのヒット数）の閲覧 ※試験導入 | ✓ | ✓ | ✓ |
 | 変更通知（自分の通知設定） | ✓ | ✓ | ✓ |
 | アクティビティ（収集の結果・違反の発生など）の閲覧 | ✓ | ✓ | ✓ |
-| 収集の実行 | | ✓ | ✓ |
+| 収集の実行（モニタリングの「今すぐ取得」を含む） | | ✓ | ✓ |
 | SSHターミナル | | ✓ | ✓ |
 | 構成図の作成・編集・削除 | | ✓ | ✓ |
 | コンプライアンスのルール編集・例外の登録・再検査 | | ✓ | ✓ |
 | Ping監視の対象 IP の追加・編集・削除 | | ✓ | ✓ |
-| デバイス登録・編集・削除 | | | ✓ |
+| デバイス登録・編集・削除（モニタリングの SNMP 設定を含む） | | | ✓ |
 | スケジュール編集 | | | ✓ |
 | ユーザー管理・ユーザーグループ（変更通知のチーム）の管理 | | | ✓ |
 | 監査ログの閲覧・CSV 出力 | | | ✓ |
@@ -499,7 +540,7 @@ netconfig-manager/
 │   ├── ruff.toml                # リンター（ruff）の設定
 │   └── app/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
-│       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック）
+│       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック・モニタリングの定期取得）
 │       ├── tools/
 │       │   └── encrypt_recordings.py  # 既存の平文のターミナル記録を暗号化（podman exec で実行）
 │       ├── core/
@@ -523,6 +564,7 @@ netconfig-manager/
 │       │   ├── audit.py         # AuditLog（操作履歴）/ TerminalSession（ターミナルの記録）
 │       │   ├── notification.py  # UserGroup / UserGroupMember / NotificationSetting（通知）
 │       │   ├── ping.py          # PingTarget（Ping監視で追加した IP）
+│       │   ├── monitoring.py    # SnmpSetting / MonInterface / IfSample / FwRuleHit / FwHitStatus（モニタリング）
 │       │   └── user.py          # User
 │       ├── api/
 │       │   ├── deps.py          # 認証・権限チェック（require）
@@ -540,6 +582,7 @@ netconfig-manager/
 │       │   ├── audit.py         # 監査ログの閲覧・CSV 出力（管理者のみ）
 │       │   ├── notifications.py # 通知設定（自分）・ユーザーグループ・通知先の確認
 │       │   ├── ping.py          # Ping監視の対象 CRUD・WebSocket で結果を配信
+│       │   ├── monitoring.py    # モニタリング（SNMP 設定・帯域・FW ヒット数。MONITORING_ENABLED のときだけ有効）
 │       │   └── schedules.py     # スケジュール CRUD
 │       └── services/
 │           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
@@ -548,6 +591,8 @@ netconfig-manager/
 │           ├── audit.py         # 操作履歴の記録・ターミナルの記録（asciicast）・保持期間
 │           ├── notify.py        # 通知（変更・違反・収集失敗）の宛先の決定・Discord / Slack への送信
 │           ├── ping.py          # ICMP 送信（icmplib）・名前解決・一定間隔の実行
+│           ├── monitoring.py    # SNMP（pysnmp）での帯域の取得・bps の計算・記録の保存と削除
+│           ├── fw_hits.py       # FW ルールのヒット数の取得と読み取り（PAN-OS・FortiGate）
 │           └── connection.py    # 接続情報（踏み台含む）の読み出し
 └── frontend/
     ├── Dockerfile               # dev / prod マルチステージ
@@ -580,6 +625,7 @@ netconfig-manager/
             ├── ActivityPage.tsx # アクティビティ（システムで起きたこと）
             ├── AuditPage.tsx    # 監査ログ（操作履歴・ターミナルの記録の再生）
             ├── PingPage.tsx     # Ping監視（deadman 風）
+            ├── MonitoringPage.tsx # モニタリング（帯域のグラフ・FW ルールのヒット数・SNMP 設定）※試験導入
             ├── NotificationsPage.tsx # 通知設定（自分・ユーザーグループ）
             └── UsersPage.tsx    # ユーザー管理
 ```
@@ -596,3 +642,4 @@ netconfig-manager/
 - **Ping監視の拡張**: 結果の履歴保存・グラフ、応答なしが続いたときの通知、踏み台経由の PING、構成図への死活状態の表示
 - **対応プラットフォーム**: 旧 CentreCOM（AlliedWare）・NEC IX・ALAXALA など Netmiko にドライバーの無い機種（独自ドライバーの追加が必要）
 - **構成図の自動生成**: LLDP / CDP の隣接情報から接続線を自動作成（現在は手動作成）
+- **モニタリング（試験導入）の本採用**: 既定を有効に切り替え。使用率のしきい値超えの通知、構成図の接続線への使用率の表示、FortiGate の VDOM・PAN-OS の複数 vsys 対応、他機種（Cisco ASA など）のヒット数

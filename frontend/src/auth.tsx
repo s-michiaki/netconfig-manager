@@ -20,6 +20,7 @@ export const PERM = {
   PING_WRITE: "ping:write",
   NOTIFY_SELF: "notify:self",
   ACTIVITY_READ: "activity:read",
+  MONITOR_READ: "monitor:read",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 

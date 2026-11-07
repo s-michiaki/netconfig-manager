@@ -24,3 +24,12 @@ test("すべての画面をエラーなく開ける", async ({ page }) => {
   await expect(page.locator(".react-flow__node-device").first()).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("試験導入中のモニタリングは既定では表示されない", async ({ page }) => {
+  // MONITORING_ENABLED=false（既定）ではメニューに出ず、API も 404 を返す
+  await login(page);
+  await expect(page.locator('a[href="/devices"]').first()).toBeVisible();
+  await expect(page.locator('a[href="/monitoring"]')).toHaveCount(0);
+  const res = await page.request.get("/api/health");
+  expect((await res.json()).features?.monitoring).toBe(false);
+});

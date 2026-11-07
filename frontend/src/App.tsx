@@ -38,13 +38,16 @@ const SchedulePage = lazyPage(() => import("./pages/SchedulePage"));
 const TerminalPage = lazyPage(() => import("./pages/TerminalPage"));
 const TopologyPage = lazyPage(() => import("./pages/TopologyPage"));
 const UsersPage = lazyPage(() => import("./pages/UsersPage"));
+const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
 
-const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
+const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
   { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
   { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
   { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
   { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
+  // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
+  { path: "/monitoring", label: "モニタリング", icon: "📈", perm: PERM.MONITOR_READ, feature: "monitoring" },
   { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
@@ -110,8 +113,12 @@ function Layout() {
   const { me, can } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [version, setVersion] = useState("");
+  const [features, setFeatures] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    api.get<{ version?: string }>("/health").then((r) => setVersion(r.data.version ?? "")).catch(() => undefined);
+    api.get<{ version?: string; features?: Record<string, boolean> }>("/health").then((r) => {
+      setVersion(r.data.version ?? "");
+      setFeatures(r.data.features ?? {});
+    }).catch(() => undefined);
   }, []);
 
   const logout = () => {
@@ -127,7 +134,7 @@ function Layout() {
           <span className="sidebar-logo">⬡ NetConfig</span>
         </div>
         <nav className="sidebar-nav">
-          {NAV_ITEMS.filter((item) => can(item.perm)).map((item) => (
+          {NAV_ITEMS.filter((item) => can(item.perm) && (!item.feature || features[item.feature])).map((item) => (
             <Link
               key={item.path}
               to={item.path}
@@ -167,6 +174,7 @@ function Layout() {
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/ping" element={<RequirePerm perm={PERM.PING_USE}><PingPage /></RequirePerm>} />
+          <Route path="/monitoring" element={<RequirePerm perm={PERM.MONITOR_READ}><MonitoringPage /></RequirePerm>} />
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
           <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />
           <Route path="/notifications" element={<RequirePerm perm={PERM.NOTIFY_SELF}><NotificationsPage /></RequirePerm>} />
