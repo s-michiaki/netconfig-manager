@@ -427,6 +427,11 @@ ruff check .          # 指摘の確認
 ruff check --fix .    # 自動で直せるものを修正
 ```
 
+GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
+
+- backend: ruff と pytest（Python 3.12）
+- frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
+
 ---
 
 ## RHEL 10 本番設定
@@ -464,6 +469,7 @@ sudo firewall-cmd --reload
 
 ```
 netconfig-manager/
+├── .github/workflows/ci.yml     # GitHub Actions（テスト・ビルドの自動実行）
 ├── docker-compose.yml           # 開発用
 ├── docker-compose.prod.yml      # 本番用（nginx 配信）
 ├── .env.example
