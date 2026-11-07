@@ -81,8 +81,18 @@ async def login(
     request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
 ):
     ip = client_ip(request)
-    # 失敗が続いている接続元は、パスワードを照合せずに止める（存在しないユーザー名でも同じ応答）
-    wait = await login_limit.locked(form_data.username, ip)
+    # 照合の前に試行を数え、上限を超えたらパスワードを照合せずに止める（存在しないユーザー名でも同じ応答）。
+    # 照合の後に数えると、同時に送られた大量のリクエストがすべて照合まで進んでしまう
+    wait, newly = await login_limit.begin_attempt(form_data.username, ip)
+    if newly:
+        await record_now(
+            db,
+            make_log(
+                "auth.login_locked", username=form_data.username[:64], ip=ip, success=False,
+                detail={"unit": "接続元" if newly == ["ip"] else "ユーザー名と接続元" if newly == ["user"] else "両方",
+                        "minutes": settings.LOGIN_LOCK_MIN},
+            ),
+        )
     if wait:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -103,16 +113,6 @@ async def login(
                 detail={"reason": reason}, success=False,
             ),
         )
-        newly = await login_limit.record_failure(form_data.username, ip)
-        if newly:
-            await record_now(
-                db,
-                make_log(
-                    "auth.login_locked", username=form_data.username[:64], ip=ip, success=False,
-                    detail={"unit": "接続元" if newly == ["ip"] else "ユーザー名と接続元" if newly == ["user"] else "両方",
-                            "minutes": settings.LOGIN_LOCK_MIN},
-                ),
-            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="ユーザー名またはパスワードが正しくありません",

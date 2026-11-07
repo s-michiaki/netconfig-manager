@@ -53,7 +53,9 @@ OID_OPER = "1.3.6.1.2.1.2.2.1.8"
 OID_SYSNAME = "1.3.6.1.2.1.1.5.0"
 OID_SYSDESCR = "1.3.6.1.2.1.1.1.0"
 MAX_CONCURRENT = 20  # 同時に問い合わせる機器の数
-MIN_SAMPLE_SEC = 60  # これより短い間隔の読み取りでは bps を計算しない
+# 前回の読み取りからの間隔が「取得間隔 × この割合」より短いときは bps を計算しない（「今すぐ取得」の直後など）。
+# 固定の秒数にすると、取得間隔と同じ値のとき読み取り時刻の揺れ（数百ミリ秒〜数秒）で約半分が記録されなくなる
+MIN_SAMPLE_RATIO = 0.5
 
 
 class SnmpError(Exception):
@@ -194,7 +196,7 @@ async def store_readings(db: AsyncSession, device_id: str, readings: list[IfRead
         in_bps = out_bps = None
         if i.last_at is not None:
             secs = (now - i.last_at).total_seconds()
-            if secs < MIN_SAMPLE_SEC:
+            if secs < settings.MONITOR_INTERVAL_SEC * MIN_SAMPLE_RATIO:
                 # 前回の取得から短すぎる（「今すぐ取得」の直後など）。誤差が大きいので値は更新せず、前回を基準に残す
                 continue
             in_bps = _rate(i.last_in_octets, r.in_octets, secs)
