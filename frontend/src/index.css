@@ -637,6 +637,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .grp-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--color-surface2); border-radius: var(--radius-sm); }
 .grp-row-body { flex: 1; min-width: 0; }
 .grp-row-name { font-weight: 600; font-size: 13px; }
+.grp-move { display: flex; flex-direction: column; gap: 2px; }
+.grp-move .btn { padding: 0 6px; font-size: 9px; line-height: 14px; }
 .grp-edit { border-top: 1px solid var(--color-border); padding-top: 12px; }
 
 /* ===== Ping監視 ===== */

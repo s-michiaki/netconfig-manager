@@ -140,3 +140,24 @@ def test_group_collect_and_schedule(ctx):
     sch = next(x for x in c.get("/api/schedules/", headers=admin).json() if x["id"] == s.json()["id"])
     assert sch["is_active"] is False
     c.delete(f"/api/schedules/{sch['id']}", headers=admin)
+
+
+def test_group_order(ctx):
+    c, admin, op = ctx["c"], ctx["admin"], ctx["op"]
+    a = c.post("/api/device-groups/", json={"name": f"ZZ-{uuid.uuid4().hex[:4]}"}, headers=admin).json()
+    b = c.post("/api/device-groups/", json={"name": f"AA-{uuid.uuid4().hex[:4]}"}, headers=admin).json()
+    ids = [g["id"] for g in c.get("/api/device-groups/", headers=op).json()]
+    # 新しいグループは名前に関係なく末尾
+    assert ids[-2:] == [a["id"], b["id"]]
+    new = [b["id"], *[i for i in ids if i not in (a["id"], b["id"])], a["id"]]
+    assert c.put("/api/device-groups/order", json={"ids": new}, headers=op).status_code == 403
+    # すべてのグループを1回ずつでないとエラー
+    assert c.put("/api/device-groups/order", json={"ids": new[:-1]}, headers=admin).status_code == 422
+    assert c.put("/api/device-groups/order", json={"ids": [*new, new[0]]}, headers=admin).status_code == 422
+    r = c.put("/api/device-groups/order", json={"ids": new}, headers=admin)
+    assert r.status_code == 200 and [g["id"] for g in r.json()] == new
+    assert [g["id"] for g in c.get("/api/device-groups/", headers=op).json()] == new
+    log = c.get("/api/audit/logs", params={"action": "device_group.reorder"}, headers=admin).json()["items"][0]
+    assert b["name"] in log["detail"]
+    # Ping監視の見出しもこの順
+    assert [g["id"] for g in c.get("/api/ping/targets", headers=admin).json()["groups"]] == new

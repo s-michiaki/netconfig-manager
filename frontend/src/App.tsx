@@ -1,4 +1,4 @@
-import { ComponentType, lazy, Suspense, useState } from "react";
+import { ComponentType, lazy, Suspense, useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
@@ -109,6 +109,10 @@ function Layout() {
   const location = useLocation();
   const { me, can } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    api.get<{ version?: string }>("/health").then((r) => setVersion(r.data.version ?? "")).catch(() => undefined);
+  }, []);
 
   const logout = () => {
     clearToken();
@@ -146,7 +150,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">v1.11.0 · RHEL 10</span>
+          <span className="version-tag">{version ? `v${version} · ` : ""}RHEL 10</span>
         </div>
       </aside>
 

@@ -116,7 +116,7 @@ async def _get_or_404(db: AsyncSession, target_id: str) -> PingTarget:
 @router.get("/targets", response_model=TargetList, dependencies=[Depends(require(Perm.PING_USE))])
 async def list_targets(db: AsyncSession = Depends(get_db)):
     """監視できる対象（登録機器と追加IP）とグループ"""
-    groups = (await db.execute(select(DeviceGroup).order_by(DeviceGroup.name))).scalars().all()
+    groups = (await db.execute(select(DeviceGroup).order_by(DeviceGroup.sort_order, DeviceGroup.name))).scalars().all()
     devices = (await db.execute(select(Device).order_by(Device.name))).scalars().all()
     customs = (await db.execute(select(PingTarget).order_by(PingTarget.name))).scalars().all()
     targets = [
