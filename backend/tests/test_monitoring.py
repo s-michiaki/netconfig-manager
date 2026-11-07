@@ -168,7 +168,7 @@ def test_snmp_poll(ctx, enabled, snmp_agent):
     first = asyncio.run(poll())
     assert first["ok"] >= 1 and first["samples"] == 0  # 1回目はカウンタを覚えるだけ
     time.sleep(1.5)
-    with mock.patch.object(monitoring, "MIN_SAMPLE_SEC", 1):
+    with mock.patch.object(settings, "MONITOR_INTERVAL_SEC", 2):
         second = asyncio.run(poll())
     assert second["samples"] >= 1
     ifs = {i["name"]: i for i in c.get("/api/monitoring/interfaces", params={"device_id": d["id"]}, headers=view).json()}
@@ -189,7 +189,7 @@ def test_snmp_poll(ctx, enabled, snmp_agent):
     with mock.patch.object(settings, "SNMP_TIMEOUT", 0.5), mock.patch.object(settings, "SNMP_RETRIES", 0):
         third = asyncio.run(poll())
     assert third["failed"] == 1 and third["ok"] >= 1
-    # 前回から短すぎる取得（MIN_SAMPLE_SEC 未満）では記録せず、値も変えない
+    # 前回から短すぎる取得（取得間隔の半分未満）では記録せず、値も変えない
     assert third["samples"] == 0
     again = {i["name"]: i for i in c.get("/api/monitoring/interfaces", params={"device_id": d["id"]}, headers=view).json()}
     assert again["Gi1/0/1"]["in_bps"] == up["in_bps"]
@@ -200,6 +200,30 @@ def test_snmp_poll(ctx, enabled, snmp_agent):
     # 機器を削除するとモニタリングのデータも消える
     c.delete(f"/api/devices/{d2['id']}", headers=admin)
     assert d2["id"] not in {x["device_id"] for x in c.get("/api/monitoring/snmp", headers=view).json()}
+
+
+@pytest.mark.parametrize("gap, recorded", [(59, True), (31, True), (29, False), (20, False)])
+def test_min_sample_gap_follows_interval(ctx, monkeypatch, gap, recorded):
+    """前回との差が取得間隔の半分以上なら記録する（間隔 60 秒で 59 秒の読み取りが抜けない。#12）"""
+    from sqlalchemy import func, select
+    monkeypatch.setattr(settings, "MONITOR_INTERVAL_SEC", 60)
+    d = device(ctx["c"], ctx["admin"])
+    t0 = utcnow()
+
+    def reading(octets):
+        return [monitoring.IfReading(1, "ge-0/0/1", None, 1000, True, octets, octets)]
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await monitoring.store_readings(db, d["id"], reading(0), t0)
+            n = await monitoring.store_readings(db, d["id"], reading(gap * 1_000_000 // 8), t0 + timedelta(seconds=gap))
+            await db.commit()
+            cnt = (await db.execute(select(func.count()).select_from(IfSample).join(MonInterface)
+                                    .where(MonInterface.device_id == d["id"]))).scalar_one()
+            return n, cnt
+
+    n, cnt = asyncio.run(run())
+    assert (n == 1 and cnt == 1) if recorded else (n == 0 and cnt == 0)
 
 
 def test_rate_and_downsample(ctx, enabled):
