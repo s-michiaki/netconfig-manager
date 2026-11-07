@@ -333,6 +333,24 @@ function GroupManagerModal({
     }
   };
 
+  /** 1つ上・下へ動かす（並び順はすべての画面のグループの表示に使う） */
+  const move = async (index: number, delta: number) => {
+    const ids = groups.map((g) => g.id);
+    const j = index + delta;
+    if (j < 0 || j >= ids.length) return;
+    [ids[index], ids[j]] = [ids[j], ids[index]];
+    setBusy(true);
+    setError("");
+    try {
+      await api.put("/device-groups/order", { ids });
+      onChanged();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async (g: DeviceGroup) => {
     const msg = g.device_count
       ? `グループ「${g.name}」を削除しますか？\n所属している${g.device_count}台は「未分類」に戻ります（機器は削除されません）。`
@@ -353,9 +371,18 @@ function GroupManagerModal({
         {groups.length === 0 && !editing && (
           <p className="topo-muted" style={{ marginBottom: 12 }}>グループはまだありません。拠点や用途ごとに作ると、機器をまとめて表示できます。</p>
         )}
+        {groups.length > 1 && !editing && (
+          <p className="topo-muted topo-small" style={{ marginBottom: 8 }}>▲▼ で並び順を変えられます（デバイス管理・各画面のグループの選択肢などに共通）</p>
+        )}
         <ul className="grp-list">
-          {groups.map((g) => (
+          {groups.map((g, i) => (
             <li key={g.id} className="grp-row">
+              <span className="grp-move">
+                <button className="btn btn-sm" disabled={busy || i === 0} onClick={() => move(i, -1)}
+                  title="上へ" aria-label={`${g.name} を上へ`}>▲</button>
+                <button className="btn btn-sm" disabled={busy || i === groups.length - 1} onClick={() => move(i, 1)}
+                  title="下へ" aria-label={`${g.name} を下へ`}>▼</button>
+              </span>
               <span className="grp-dot" style={{ background: g.color ?? "#7c82a3" }} />
               <div className="grp-row-body">
                 <div className="grp-row-name">{g.name}<span className="topo-muted topo-small">　{g.device_count}台</span></div>

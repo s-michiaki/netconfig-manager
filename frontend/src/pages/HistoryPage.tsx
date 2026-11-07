@@ -27,8 +27,14 @@ export default function HistoryPage() {
   const [view, setView] = useState<"diff" | "content">("diff");
   const [error, setError] = useState("");
 
+  const [groupOrder, setGroupOrder] = useState<string[]>([]);
+  const rank = (name: string) => {
+    const i = groupOrder.indexOf(name);
+    return i < 0 ? groupOrder.length : i;
+  };
   useEffect(() => {
     api.get("/devices/").then((r) => setDevices(r.data)).catch((e) => setError(errorMessage(e)));
+    api.get<{ name: string }[]>("/device-groups/").then((r) => setGroupOrder(r.data.map((g) => g.name))).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -98,9 +104,9 @@ export default function HistoryPage() {
             onChange={(e) => setSelectedDevice(e.target.value)}
           >
             <option value="">デバイスを選択...</option>
-            {/* グループごとにまとめる（未分類は最後） */}
+            {/* グループごとにまとめる（グループの並び順。未分類は最後） */}
             {[...new Set(devices.map((d) => d.group_name ?? ""))]
-              .sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "ja")))
+              .sort((a, b) => (a === "" ? 1 : b === "" ? -1 : rank(a) - rank(b) || a.localeCompare(b, "ja")))
               .map((g) => (
                 <optgroup key={g || "__none__"} label={g || "未分類"}>
                   {devices.filter((d) => (d.group_name ?? "") === g).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}

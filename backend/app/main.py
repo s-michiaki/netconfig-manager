@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.18.0",
+    version="1.19.0",
     lifespan=lifespan,
 )
 
@@ -120,4 +120,5 @@ app.include_router(ping.ws_router, prefix="/api/ping", tags=["ping"])
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    # 画面のサイドバーに表示するバージョンもここから取る（version は上の FastAPI(...) の1か所で管理）
+    return {"status": "ok", "version": app.version}

@@ -38,6 +38,7 @@ ACTIONS = {
     "device.delete": "機器削除",
     "device_group.create": "グループ作成",
     "device_group.update": "グループ変更",
+    "device_group.reorder": "グループの並び替え",
     "device_group.delete": "グループ削除",
     "jump_host.create": "踏み台登録",
     "jump_host.update": "踏み台変更",

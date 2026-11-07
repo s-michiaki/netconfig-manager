@@ -71,7 +71,7 @@ async def _commit_or_409(db: AsyncSession) -> None:
 
 @router.get("/", response_model=list[GroupOut], dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def list_groups(db: AsyncSession = Depends(get_db)):
-    groups = (await db.execute(select(DeviceGroup).order_by(DeviceGroup.name))).scalars().all()
+    groups = (await db.execute(select(DeviceGroup).order_by(DeviceGroup.sort_order, DeviceGroup.name))).scalars().all()
     counts = await _counts(db)
     return [_out(g, counts.get(g.id, 0)) for g in groups]
 
@@ -81,12 +81,33 @@ async def list_groups(db: AsyncSession = Depends(get_db)):
     dependencies=[Depends(require(Perm.DEVICE_WRITE))],
 )
 async def create_group(payload: GroupIn, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    # 新しいグループは末尾に並べる
+    last = (await db.execute(select(func.max(DeviceGroup.sort_order)))).scalar() or 0
     g = DeviceGroup(id=str(uuid.uuid4()), name=payload.name, description=payload.description or None,
-                    color=payload.color)
+                    color=payload.color, sort_order=last + 1)
     db.add(g)
     audit("device_group.create", target_type="device_group", target_id=g.id, target_name=g.name)
     await _commit_or_409(db)
     return _out(g)
+
+
+class GroupOrder(BaseModel):
+    ids: list[str] = Field(max_length=1000)  # 並べたい順のグループ ID（すべて）
+
+
+@router.put("/order", response_model=list[GroupOut], dependencies=[Depends(require(Perm.DEVICE_WRITE))])
+async def reorder_groups(payload: GroupOrder, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    """グループの表示順を変える（デバイス管理・各画面の絞り込みなどの並び）"""
+    groups = {g.id: g for g in (await db.execute(select(DeviceGroup))).scalars()}
+    if len(set(payload.ids)) != len(payload.ids) or set(payload.ids) != set(groups):
+        raise HTTPException(status_code=422, detail="すべてのグループを1回ずつ指定してください（他の人が追加・削除した可能性があります。再読み込みしてください）")
+    for i, gid in enumerate(payload.ids, 1):
+        groups[gid].sort_order = i
+    audit("device_group.reorder", target_type="device_group",
+          detail={"order": [groups[gid].name for gid in payload.ids]})
+    await db.commit()
+    counts = await _counts(db)
+    return [_out(groups[gid], counts.get(gid, 0)) for gid in payload.ids]
 
 
 @router.put("/{group_id}", response_model=GroupOut, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
