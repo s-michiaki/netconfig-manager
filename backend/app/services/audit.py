@@ -67,6 +67,7 @@ ACTIONS = {
     "user_group.delete": "ユーザーグループ削除",
     "audit.view_recording": "ターミナル記録の閲覧",
     "audit.export": "監査ログの CSV 出力",
+    "activity.export": "アクティビティログの CSV 出力",
 }
 
 MAX_DETAIL_LENGTH = 4000
