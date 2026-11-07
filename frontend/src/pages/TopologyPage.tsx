@@ -347,13 +347,52 @@ function Editor(props: EditorProps) {
 
   // ---------------------------------------------------------------- 変更
   const resizingRef = useRef(false);
+  // グループ枠（area）をドラッグしたときに一緒に動かすノード。ドラッグ開始時の枠の中にあるもの
+  const carryRef = useRef<{ areaId: string; members: Set<string> } | null>(null);
+  const onNodeDragStart = useCallback((e: MouseEvent | TouchEvent, node: TopoNode) => {
+    checkpoint();
+    // Alt（Option）を押しながらなら枠だけを動かす。複数選択でまとめて動かすときは React Flow に任せる
+    if (node.type !== "area" || e.altKey || nodesRef.current.filter((n) => n.selected).length > 1) {
+      carryRef.current = null;
+      return;
+    }
+    const w = node.measured?.width ?? node.width ?? 0;
+    const h = node.measured?.height ?? node.height ?? 0;
+    const inside = (n: TopoNode) => {
+      const cx = n.position.x + (n.measured?.width ?? n.width ?? 0) / 2;
+      const cy = n.position.y + (n.measured?.height ?? n.height ?? 0) / 2;
+      return cx >= node.position.x && cx <= node.position.x + w && cy >= node.position.y && cy <= node.position.y + h;
+    };
+    const members = new Set(nodesRef.current.filter((n) => n.id !== node.id && inside(n)).map((n) => n.id));
+    carryRef.current = members.size ? { areaId: node.id, members } : null;
+  }, [checkpoint]);
+  const onNodeDragStop = useCallback(() => {
+    carryRef.current = null;
+  }, []);
+
   const onNodesChange = useCallback((changes: NodeChange<TopoNode>[]) => {
     // ドラッグの開始は onNodeDragStart、サイズ変更は開始時の1回だけ記録する
     if (changes.some((c) => c.type === "remove")) checkpoint();
     const resizing = changes.some((c) => c.type === "dimensions" && c.resizing === true);
     if (resizing && !resizingRef.current) checkpoint();
     if (changes.some((c) => c.type === "dimensions" && c.resizing !== undefined)) resizingRef.current = resizing;
-    setNodes((nds) => applyNodeChanges(changes, nds));
+    const carry = carryRef.current;
+    const areaMove = carry && changes.find((c): c is Extract<NodeChange<TopoNode>, { type: "position" }> =>
+      c.type === "position" && c.id === carry.areaId && !!c.position);
+    if (carry && areaMove) {
+      setNodes((nds) => {
+        const before = nds.find((n) => n.id === carry.areaId);
+        const next = applyNodeChanges(changes, nds);
+        if (!before || !areaMove.position) return next;
+        const dx = areaMove.position.x - before.position.x;
+        const dy = areaMove.position.y - before.position.y;
+        if (!dx && !dy) return next;
+        return next.map((n) => (carry.members.has(n.id)
+          ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } } : n));
+      });
+    } else {
+      setNodes((nds) => applyNodeChanges(changes, nds));
+    }
     // 選択や初回の大きさ計測は「変更」に数えない
     if (changes.some((c) => c.type === "position" || c.type === "remove" || c.type === "add"
       || (c.type === "dimensions" && c.resizing !== undefined))) {
@@ -714,7 +753,8 @@ function Editor(props: EditorProps) {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onConnectEnd={onConnectEnd}
-              onNodeDragStart={() => checkpoint()}
+              onNodeDragStart={onNodeDragStart}
+              onNodeDragStop={onNodeDragStop}
               onSelectionDragStart={() => checkpoint()}
               isValidConnection={(c) => c.source !== c.target}
               connectionMode={ConnectionMode.Loose}
@@ -840,6 +880,7 @@ function MapInfoPanel({
           {editing ? (
             <>
               <li>機器の縁の ● から別の機器へドラッグ: 線を引く</li>
+              <li>グループ枠をドラッグ: 中の機器も一緒に移動（Alt を押しながらで枠だけ）</li>
               {view === "logical" && (
                 <>
                   <li>セグメントへ線を引くと、線上に垂直につながります</li>
