@@ -32,7 +32,7 @@ from app.services.config_service import (
 )
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
-from app.services.compliance import run_checks
+from app.services.compliance import recheck_expired_exceptions as _recheck_expired, run_checks
 from app.services.notify import notify_change
 from app.services.connection import load_connection_info
 
@@ -55,6 +55,10 @@ celery_app.conf.update(
         "dispatch-due-schedules": {
             "task": "app.worker.dispatch_due_schedules",
             "schedule": 60.0,
+        },
+        "recheck-expired-exceptions": {
+            "task": "app.worker.recheck_expired_exceptions",
+            "schedule": 300.0,
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -229,6 +233,20 @@ async def _check_compliance(device_id: str, actor: str | None = None, ref: str |
     async with _sessionmaker()() as db:
         await run_checks(db, device_ids=[device_id], actor=actor, ref=ref)
         await db.commit()
+
+
+async def _recheck_expired_exceptions() -> int:
+    async with _sessionmaker()() as db:
+        return await _recheck_expired(db)
+
+
+@celery_app.task
+def recheck_expired_exceptions() -> int:
+    """期限が切れたコンプライアンスの例外を反映する（5分ごと）"""
+    n = _run_async(_recheck_expired_exceptions())
+    if n:
+        logger.info("期限切れの例外 %d 件を反映して再検査しました", n)
+    return n
 
 
 async def _purge() -> dict:

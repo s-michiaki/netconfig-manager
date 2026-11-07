@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, false as sa_false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.timeutil import utcnow
@@ -70,5 +70,7 @@ class ComplianceException(Base):
     ignore_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)  # 正規表現
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 期限切れ後の再検査を済ませたか（定期処理が1回だけ再検査するため）
+    expiry_handled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
