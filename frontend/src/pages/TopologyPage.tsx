@@ -541,6 +541,83 @@ function Editor(props: EditorProps) {
     [nodes]
   );
 
+  /**
+   * 物理構成の配置を論理構成へコピーする（論理構成の編集中のみ）。保存済みの物理構成を使う
+   * - 物理にあって論理に無い機器を同じ位置に追加（非管理機器・雲は同じ種類・名前のものが無ければ追加）
+   * - moveExisting: 論理に既にある機器も物理と同じ位置へ動かす
+   * - links: コピー・対応づけた機器どうしの線もコピーする（同じ2台の間に線が無いときだけ）
+   */
+  const copyFromPhysical = async (opts: { moveExisting: boolean; others: boolean; links: boolean }) => {
+    if (!detail) return;
+    const phys = toFlow(detail.data);
+    const keyOf = (n: TopoNode): string | null => {
+      if (n.type === "device") return `d:${(n as DeviceNode).data.deviceId}`;
+      if (opts.others && (n.type === "unmanaged" || n.type === "cloud")) return `${n.type}:${(n.data as { label?: string }).label ?? ""}`;
+      return null;
+    };
+    const existing = new Map<string, TopoNode>();
+    nodes.forEach((n) => {
+      const k = keyOf(n);
+      if (k && !existing.has(k)) existing.set(k, n);
+    });
+    const idMap = new Map<string, string>(); // 物理のノード ID → 論理のノード ID
+    const added: TopoNode[] = [];
+    const moved = new Map<string, { x: number; y: number }>();
+    for (const n of phys.nodes) {
+      const k = keyOf(n);
+      if (!k) continue;
+      const cur = existing.get(k);
+      if (cur) {
+        idMap.set(n.id, cur.id);
+        if (opts.moveExisting && (cur.position.x !== n.position.x || cur.position.y !== n.position.y)) {
+          moved.set(cur.id, n.position);
+        }
+      } else {
+        const id = newId(n.type === "device" ? "d" : n.type === "cloud" ? "c" : "u");
+        idMap.set(n.id, id);
+        added.push({ ...n, id, selected: true } as TopoNode);
+      }
+    }
+    const linked = new Set(edges.map((e) => [e.source, e.target].sort().join("|")));
+    const newEdges: LinkEdge[] = [];
+    if (opts.links) {
+      for (const e of phys.edges) {
+        const s2 = idMap.get(e.source);
+        const t2 = idMap.get(e.target);
+        if (!s2 || !t2) continue;
+        const key = [s2, t2].sort().join("|");
+        if (linked.has(key)) continue;
+        linked.add(key);
+        newEdges.push({ ...e, id: newId("e"), source: s2, target: t2, selected: false });
+      }
+    }
+    if (!added.length && !moved.size && !newEdges.length) {
+      setNotice("コピーするものはありません（物理構成の機器はすべて同じ位置に配置済みです）");
+      return;
+    }
+    checkpoint();
+    setNodes((nds) => [
+      ...nds.map((n) => {
+        const p = moved.get(n.id);
+        return p ? { ...n, position: p, selected: true } : n.selected ? { ...n, selected: false } : n;
+      }),
+      ...added,
+    ]);
+    setEdges((eds) => [...eds.map((e) => (e.selected ? { ...e, selected: false } : e)), ...newEdges]);
+    setDirty(true);
+    setNotice(`物理構成から ${added.length} 個を追加・${moved.size} 個を移動・線 ${newEdges.length} 本をコピーしました（保存で確定）`);
+    const ids = added.filter((n): n is DeviceNode => n.type === "device").map((n) => n.data.deviceId)
+      .filter((id) => !statuses[id]);
+    if (ids.length) {
+      try {
+        const r = await api.post<Record<string, DeviceStatus>>("/topology/device-status", ids);
+        setStatuses((prev) => ({ ...prev, ...r.data }));
+      } catch {
+        /* 次の定期更新で取得される */
+      }
+    }
+  };
+
   const addDevice = async (deviceId: string, pos?: { x: number; y: number }) => {
     if (placedDeviceIds.has(deviceId)) return;
     const c = pos ?? viewCenter();
@@ -827,7 +904,7 @@ function Editor(props: EditorProps) {
           {editing && (
             <Palette
               view={view} devices={devices} placed={placedDeviceIds}
-              onAddDevice={(id) => addDevice(id)} onAddDecoration={addDecoration}
+              onAddDevice={(id) => addDevice(id)} onAddDecoration={addDecoration} onCopyPhysical={copyFromPhysical}
             />
           )}
         </aside>
@@ -1255,11 +1332,13 @@ function MultiPanel({ count, editing, onDelete }: { count: number; editing: bool
 }
 
 function Palette({
-  view, devices, placed, onAddDevice, onAddDecoration,
+  view, devices, placed, onAddDevice, onAddDecoration, onCopyPhysical,
 }: {
   view: ViewKind; devices: DeviceItem[]; placed: Set<string>;
   onAddDevice: (id: string) => void; onAddDecoration: (k: AddKind, shape?: ShapeKind) => void;
+  onCopyPhysical: (opts: { moveExisting: boolean; others: boolean; links: boolean }) => void;
 }) {
+  const [copyOpts, setCopyOpts] = useState({ moveExisting: false, others: true, links: false });
   const [q, setQ] = useState("");
   const [group, setGroup] = useState("");
   // 未配置の機器があるグループだけを選択肢にする（"" = すべて、"__none__" = 未分類）
@@ -1279,6 +1358,26 @@ function Palette({
           <button className="btn" onClick={() => onAddDecoration("area")}>グループ枠</button>
         </div>
       </Section>
+      {view === "logical" && (
+        <Section title="物理構成からコピー">
+          <p className="topo-muted topo-small" style={{ marginBottom: 6 }}>
+            保存済みの物理構成の機器を、同じ位置に配置します。
+          </p>
+          <label className="form-check topo-small">
+            <input type="checkbox" checked={copyOpts.others} onChange={(e) => setCopyOpts({ ...copyOpts, others: e.target.checked })} />
+            非管理機器・雲も含める
+          </label>
+          <label className="form-check topo-small">
+            <input type="checkbox" checked={copyOpts.moveExisting} onChange={(e) => setCopyOpts({ ...copyOpts, moveExisting: e.target.checked })} />
+            配置済みの機器も物理構成の位置へ移動
+          </label>
+          <label className="form-check topo-small">
+            <input type="checkbox" checked={copyOpts.links} onChange={(e) => setCopyOpts({ ...copyOpts, links: e.target.checked })} />
+            接続線もコピー
+          </label>
+          <button className="btn" style={{ marginTop: 6, width: "100%" }} onClick={() => onCopyPhysical(copyOpts)}>物理構成から配置をコピー</button>
+        </Section>
+      )}
       {view === "logical" && (
         <Section title="作図">
           <div className="topo-shape-buttons">
