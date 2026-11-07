@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     TERMINAL_LOG_PATH: str = "/data/terminal-logs"
     # 1セッションの記録の上限（バイト）。超えた分は記録しない（ディスクの圧迫を防ぐ）
     TERMINAL_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
+    # 記録を DEVICE_ENCRYPTION_KEY で暗号化して保存する（.cast.enc）。false で従来どおり平文（.cast）
+    TERMINAL_LOG_ENCRYPT: bool = True
     # 保持日数（0 なら削除しない）。毎日1回、古いものを削除する
     AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
     TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)

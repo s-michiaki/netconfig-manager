@@ -335,6 +335,9 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - **ターミナルの記録**: SSH ターミナルの画面出力をセッションごとに記録し、画面上で再生できます（asciicast v2 形式。`.cast` としてダウンロードして asciinema でも再生可）
   - キー入力そのものは記録しません（enable のパスワードなど画面に表示されない入力が含まれるため）。入力したコマンドは機器のエコーとして画面出力に残ります
   - 記録は `terminal_logs` ボリューム（`/data/terminal-logs`）に保存。1セッションの上限は 20MB（`TERMINAL_LOG_MAX_BYTES`）
+  - 記録は `DEVICE_ENCRYPTION_KEY` で暗号化して保存します（`.cast.enc`。画面出力に show running-config の内容などが残るため）。閲覧・ダウンロード時にサーバーで復号します。`TERMINAL_LOG_ENCRYPT=false` で従来どおり平文（`.cast`）
+  - v1.23.0 より前の平文の記録は保持期間で消えるまでそのまま読めます。すぐ暗号化する場合は `sudo podman exec netconfig-manager_backend_1 python -m app.tools.encrypt_recordings`（コンテナ名は `podman ps` で確認）
+  - `DEVICE_ENCRYPTION_KEY` を変えると過去の記録は読めなくなります（機器のパスワードと同じ）
 - **CSV 出力**: 操作履歴・ターミナルの記録（接続の一覧）を、画面の絞り込み条件のまま CSV で出力できます（「CSV 出力」ボタン。新しい順に最大10万件）
   - Excel でそのまま開けるよう BOM 付き UTF-8。日時はサーバーのタイムゾーン（`TIMEZONE`）で出力します
   - `=` などで始まる値は、表計算ソフトで数式として実行されないよう先頭に `'` を付けます
@@ -468,6 +471,8 @@ netconfig-manager/
 │   └── app/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
 │       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック）
+│       ├── tools/
+│       │   └── encrypt_recordings.py  # 既存の平文のターミナル記録を暗号化（podman exec で実行）
 │       ├── core/
 │       │   ├── config.py        # 設定
 │       │   ├── database.py      # DB セッション
