@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import { CsvButton, downloadCsv } from "../components/CsvButton";
 
 interface AuditLog {
   id: string;
@@ -119,30 +120,6 @@ function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-/** 絞り込みと同じ条件で CSV をダウンロードする（認証ヘッダーが要るため blob で受け取る） */
-async function downloadCsv(path: string, params: Record<string, unknown>, fallback: string) {
-  const r = await api.get<Blob>(path, { params, responseType: "blob" });
-  const m = /filename="([^"]+)"/.exec(String(r.headers["content-disposition"] ?? ""));
-  const url = URL.createObjectURL(r.data);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = m ? m[1] : fallback;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-}
-
-function CsvButton({ onClick }: { onClick: () => Promise<void> }) {
-  const [busy, setBusy] = useState(false);
-  return (
-    <button className="btn" disabled={busy} title="今の絞り込み条件で出力します（最大10万件）"
-      onClick={async () => { setBusy(true); try { await onClick(); } finally { setBusy(false); } }}>
-      {busy ? "出力中..." : "CSV 出力"}
-    </button>
-  );
 }
 
 function Pager({ total, offset, onChange }: { total: number; offset: number; onChange: (o: number) => void }) {

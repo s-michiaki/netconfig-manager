@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import { CsvButton, downloadCsv } from "../components/CsvButton";
 
 /**
  * アクティビティログ: システムで起きたこと（収集の結果・スケジュールの実行・違反の発生・通知の送信など）
@@ -92,18 +93,24 @@ export default function ActivityPage() {
     api.get<DeviceItem[]>("/devices/").then((r) => setDevices(r.data)).catch(() => undefined);
   }, []);
 
+  const filters = () => ({
+    category: category || undefined, level: level || undefined, device_id: deviceId || undefined,
+    ref: ref || undefined, q: q.trim() || undefined,
+    since: since ? new Date(`${since}T00:00:00`).toISOString() : undefined,
+    until: until ? new Date(new Date(`${until}T00:00:00`).getTime() + 86400_000).toISOString() : undefined,
+  });
+  const exportCsv = async () => {
+    setError("");
+    try {
+      await downloadCsv("/activity/logs/export", filters(), "activity_logs.csv");
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
   const load = useCallback(async (o: number) => {
     setError("");
     try {
-      const r = await api.get<Page>("/activity/logs", {
-        params: {
-          category: category || undefined, level: level || undefined, device_id: deviceId || undefined,
-          ref: ref || undefined, q: q.trim() || undefined,
-          since: since ? new Date(`${since}T00:00:00`).toISOString() : undefined,
-          until: until ? new Date(new Date(`${until}T00:00:00`).getTime() + 86400_000).toISOString() : undefined,
-          limit: PAGE_SIZE, offset: o,
-        },
-      });
+      const r = await api.get<Page>("/activity/logs", { params: { ...filters(), limit: PAGE_SIZE, offset: o } });
       setPage(r.data);
       setOffset(o);
     } catch (e) {
@@ -180,6 +187,8 @@ export default function ActivityPage() {
           <>
             <div className="audit-bar act-bar">
               <span className="topo-muted topo-small">{page.total} 件{page.total > PAGE_SIZE && `中 ${offset + 1}–${Math.min(offset + PAGE_SIZE, page.total)}`}</span>
+              <span style={{ flex: 1 }} />
+              <CsvButton onClick={exportCsv} />
               {page.total > PAGE_SIZE && (
                 <span style={{ display: "flex", gap: 6 }}>
                   <button className="btn" disabled={offset === 0} onClick={() => load(Math.max(0, offset - PAGE_SIZE))}>前へ</button>

@@ -1,18 +1,16 @@
 """監査ログの閲覧 API（管理者のみ）"""
-import csv
-import io
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
 from app.core.config import settings
+from app.core.csv_export import MAX_EXPORT_ROWS, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.audit import AuditLog, TerminalSession
@@ -72,38 +70,6 @@ def _like(q: str) -> str:
 async def list_actions() -> dict[str, str]:
     """操作の種類と表示名"""
     return ACTIONS
-
-
-MAX_EXPORT_ROWS = 100_000  # CSV に出力する最大件数
-
-
-def _csv_cell(v) -> str:
-    """表計算ソフトで数式として解釈されないようにする（CSV インジェクション対策）"""
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return "はい" if v else "いいえ"
-    if isinstance(v, datetime):
-        return v.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(settings.TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
-    text = str(v)
-    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
-
-
-def _csv_response(header: list[str], rows: list[list], filename: str) -> Response:
-    buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\r\n")
-    w.writerow(header)
-    for r in rows:
-        w.writerow([_csv_cell(v) for v in r])
-    # Excel で文字化けしないよう BOM 付き UTF-8
-    return Response(
-        content="\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-def _export_name(kind: str) -> str:
-    return f"{kind}_{datetime.now(ZoneInfo(settings.TIMEZONE)).strftime('%Y%m%d-%H%M%S')}.csv"
 
 
 def _log_conditions(username, action, q, failed_only, since, until) -> list:
@@ -170,7 +136,7 @@ async def export_logs(
     header = [f"日時（{settings.TIMEZONE}）", "ユーザー", "操作", "操作コード", "対象の種類", "対象", "対象ID", "詳細", "接続元IP", "結果"]
     data = [[r.at, r.username, ACTIONS.get(r.action, r.action), r.action, r.target_type, r.target_name, r.target_id,
              r.detail, r.ip, "成功" if r.success else "失敗"] for r in rows]
-    return _csv_response(header, data, _export_name("audit_logs"))
+    return csv_response(header, data, export_name("audit_logs"))
 
 
 def _session_conditions(username, device, since, until) -> list:
@@ -240,7 +206,7 @@ async def export_terminal_sessions(
              int((r.ended_at - r.started_at).total_seconds()) if r.ended_at else None,
              r.username, r.device_name, r.device_host, r.via, r.ip, r.end_reason, r.bytes_out, r.truncated]
             for r in rows]
-    return _csv_response(header, data, _export_name("terminal_sessions"))
+    return csv_response(header, data, export_name("terminal_sessions"))
 
 
 @router.get(

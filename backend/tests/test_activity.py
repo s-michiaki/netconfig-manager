@@ -172,3 +172,25 @@ def test_purge_and_events(ctx):
     ev = c.get("/api/activity/events", headers=view).json()
     assert ev["events"]["collect.changed"] == "収集（変更あり）" and ev["categories"]["compliance"] == "コンプライアンス"
     assert c.get("/api/activity/logs").status_code == 401
+
+
+def test_csv_export(ctx):
+    import csv
+    import io
+    c, admin, view = ctx["c"], ctx["admin"], ctx["view"]
+
+    async def add():
+        async with AsyncSessionLocal() as db:
+            db.add(make_activity("collect.failed", "=HYPERLINK(\"x\") 失敗", ref="ref-csv", device_name="CSV-SW"))
+            await db.commit()
+    asyncio.run(add())
+    r = c.get("/api/activity/logs/export", params={"ref": "ref-csv"}, headers=view)  # 閲覧者も出力できる
+    assert r.status_code == 200, r.text
+    assert 'filename="activity_logs_' in r.headers["content-disposition"] and r.content.startswith("﻿".encode())
+    rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert rows[0][1] == "重要度" and len(rows) == 2
+    assert rows[1][1] == "エラー" and rows[1][2] == "収集" and rows[1][4] == "collect.failed"
+    assert rows[1][5] == "CSV-SW" and rows[1][6].startswith("'=HYPERLINK")
+    a = c.get("/api/audit/logs", params={"action": "activity.export"}, headers=admin).json()["items"][0]
+    assert json.loads(a["detail"])["rows"] == 1
+    assert c.get("/api/activity/logs/export").status_code == 401
