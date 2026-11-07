@@ -6,6 +6,7 @@ Celeryワーカー定義
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
+- poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
 収集の結果・スケジュールの実行などはアクティビティログに記録する（ref で同じ実行の記録をまとめる）
 """
@@ -26,6 +27,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.services import fw_hits, monitoring
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -61,6 +63,15 @@ celery_app.conf.update(
         "recheck-expired-exceptions": {
             "task": "app.worker.recheck_expired_exceptions",
             "schedule": 300.0,
+        },
+        # モニタリング（無効のときはタスク側で何もしない）
+        "monitor-poll-snmp": {
+            "task": "app.worker.poll_snmp",
+            "schedule": float(settings.MONITOR_INTERVAL_SEC),
+        },
+        "monitor-fw-hits": {
+            "task": "app.worker.collect_fw_hits_all",
+            "schedule": float(settings.MONITOR_FW_INTERVAL_MIN * 60),
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -235,6 +246,72 @@ def send_change_notification(device_id: str, commit_hash: str, added: int, remov
     except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
         logger.exception("変更通知に失敗しました device=%s", device_id)
         return {"error": True}
+
+
+# ---------------------------------------------------------------- モニタリング（試験導入）
+
+
+@celery_app.task
+def poll_snmp():
+    """SNMP を有効にした機器の帯域を取得する（MONITOR_INTERVAL_SEC ごと）"""
+    if not settings.MONITORING_ENABLED:
+        return {"disabled": True}
+
+    async def run():
+        async with _sessionmaker()() as db:
+            return await monitoring.poll_all(db)
+
+    result = _run_async(run())
+    if result.get("failed"):
+        logger.warning("SNMP の取得に失敗した機器があります: %s", result)
+    return result
+
+
+async def _fw_device_ids() -> list[str]:
+    async with _sessionmaker()() as db:
+        return list((await db.execute(select(Device.id).where(
+            Device.is_active.is_(True), Device.platform.in_(list(fw_hits.SUPPORTED))))).scalars())
+
+
+@celery_app.task
+def collect_fw_hits_all():
+    """FW（PAN-OS・FortiGate）のルールのヒット数を取得する（MONITOR_FW_INTERVAL_MIN ごと）"""
+    if not settings.MONITORING_ENABLED:
+        return {"disabled": True}
+    ids = _run_async(_fw_device_ids())
+    for device_id in ids:
+        collect_fw_hits_device.delay(device_id, SYSTEM_ACTOR)
+    return {"devices": len(ids)}
+
+
+@celery_app.task
+def collect_fw_hits_device(device_id: str, actor: str | None = None, ref: str | None = None):
+    """1台の FW のルールのヒット数を取得して保存する"""
+    lock = _redis().lock(f"netconfig:fwhits:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
+    if not lock.acquire(blocking=False):
+        return {"skipped": True}
+    try:
+        device = _run_async(_get_device(device_id))
+        if device is None:
+            return {"error": "not found"}
+        res = fw_hits.collect_fw_hits(device)
+
+        async def save():
+            async with _sessionmaker()() as db:
+                await monitoring.store_fw_result(db, device_id, res)
+                if res.error:
+                    record(db, "monitor.fw_failed", f"FW ルールのヒット数を取得できませんでした: {res.error}",
+                           device_id=device_id, device_name=device.name, detail={"error": res.error},
+                           actor=actor or SYSTEM_ACTOR, ref=ref)
+                    await db.commit()
+
+        _run_async(save())
+        return {"rules": len(res.rules), "error": res.error}
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
 
 
 async def _wants(event: str) -> bool:

@@ -18,6 +18,7 @@ export TERMINAL_LOG_PATH="$WORK/terminal-logs"
 export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-initial-pass-123}"
 export ALLOWED_ORIGINS=""
+export MONITORING_ENABLED=false  # 試験導入の機能は既定（無効）のまま確認する
 export REDIS_URL="redis://127.0.0.1:1/0"  # 使わない（収集などのタスクは投入しない画面だけを確認する）
 
 cd "$BACKEND"

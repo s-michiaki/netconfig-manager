@@ -12,14 +12,35 @@ from app.models.device import (
     JumpHost,
     Schedule,
 )
+from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface, SnmpSetting
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.ping import PingTarget
 from app.models.topology import TopologyMap
 from app.models.user import User
 
 __all__ = [
-    "ActivityLog", "AuditLog", "Base", "CollectLog", "ComplianceException", "ComplianceResult", "ComplianceRule",
-    "ConfigSnapshot", "Device", "DeviceGroup",
-    "JumpHost", "NotificationSetting", "PingTarget", "Schedule", "TerminalSession", "TopologyMap", "User",
-    "UserGroup", "UserGroupMember",
+    "ActivityLog",
+    "AuditLog",
+    "Base",
+    "CollectLog",
+    "ComplianceException",
+    "ComplianceResult",
+    "ComplianceRule",
+    "ConfigSnapshot",
+    "Device",
+    "DeviceGroup",
+    "FwHitStatus",
+    "FwRuleHit",
+    "IfSample",
+    "JumpHost",
+    "MonInterface",
+    "NotificationSetting",
+    "PingTarget",
+    "Schedule",
+    "SnmpSetting",
+    "TerminalSession",
+    "TopologyMap",
+    "User",
+    "UserGroup",
+    "UserGroupMember",
 ]

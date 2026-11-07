@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
+from app.api.monitoring import delete_device_monitoring
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
@@ -317,6 +318,7 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
     device = await _get_or_404(db, device_id)
     await db.execute(delete(ComplianceResult).where(ComplianceResult.device_id == device.id))
     await db.execute(delete(ComplianceException).where(ComplianceException.device_id == device.id))
+    await delete_device_monitoring(db, device.id)
     await db.delete(device)
     audit("device.delete", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname})

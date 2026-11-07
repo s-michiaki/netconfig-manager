@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）
     PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数
 
+    # --- モニタリング（試験導入中。既定は無効） ---
+    # FW ルールのヒット数（PAN-OS・FortiGate を SSH で取得）とインタフェースの帯域（SNMP）
+    MONITORING_ENABLED: bool = False
+    MONITOR_INTERVAL_SEC: int = Field(default=300, ge=60, le=3600)  # 帯域を取得する間隔
+    MONITOR_RETENTION_DAYS: int = Field(default=30, ge=1, le=400)  # 帯域の記録を残す日数
+    MONITOR_FW_INTERVAL_MIN: int = Field(default=60, ge=10, le=1440)  # FW ルールのヒット数を取得する間隔
+    MONITOR_UP_ONLY: bool = True  # 稼働中（up）のインタフェースだけ記録する（DB の増え方を抑える）
+    MONITOR_PANOS_VSYS: str = "vsys1"  # PAN-OS のヒット数を取得する vsys
+    SNMP_TIMEOUT: float = Field(default=3.0, gt=0, le=30)
+    SNMP_RETRIES: int = Field(default=1, ge=0, le=5)
+
     # --- 通知 ---
     # 利用者がブラウザで開く URL（例: https://netconfig.example.local）。通知に画面へのリンクを付けるのに使う。空ならリンクなし
     PUBLIC_URL: str = ""
