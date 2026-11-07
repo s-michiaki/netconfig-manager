@@ -710,3 +710,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .dev-group-bar { display: flex; align-items: center; gap: 8px; }
 .dev-group-bar .dev-group-head { flex: 1; min-width: 0; }
 .dev-group-bar > .btn { flex-shrink: 0; }
+
+/* 構成図の書き出しメニュー */
+.topo-export { position: relative; }
+.topo-export-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 180px; display: flex; flex-direction: column; padding: 4px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-sm); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4); }
+.topo-export-menu button { text-align: left; background: none; border: none; color: var(--color-text); padding: 7px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+.topo-export-menu button:hover { background: var(--color-surface2); }

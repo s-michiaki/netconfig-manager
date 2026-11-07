@@ -6,7 +6,7 @@ import {
   type Connection, type EdgeChange, type FinalConnectionState, type NodeChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { toBlob } from "html-to-image";
+import { toCanvas } from "html-to-image";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { usePlatforms } from "../platforms";
@@ -685,9 +685,9 @@ function Editor(props: EditorProps) {
     }
   };
 
-  const exportPng = async () => {
-    if (!detail || !nodes.length || !wrapper.current) return;
-    // 選択枠を画像に含めない
+  /** 構成図全体を画像にする（選択枠や接続用の ● は含めない）。light=true は白背景（印刷・PDF 向け） */
+  const renderImage = async (light: boolean): Promise<HTMLCanvasElement> => {
+    if (!wrapper.current) throw new Error("構成図がありません");
     setNodes((nds) => nds.map((n) => (n.selected ? { ...n, selected: false } : n)));
     setEdges((eds) => eds.map((e) => (e.selected ? { ...e, selected: false } : e)));
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -699,31 +699,112 @@ function Editor(props: EditorProps) {
     const width = Math.ceil((b.width + padX * 2) * zoom);
     const height = Math.ceil((b.height + padY * 2) * zoom);
     const el = wrapper.current.querySelector<HTMLElement>(".react-flow__viewport");
-    if (!el) return;
+    if (!el) throw new Error("構成図がありません");
+    const canvas = await toCanvas(el, {
+      // 白背景にするときは黒で描いて反転する（反転後に真っ白になるように）
+      backgroundColor: light ? "#000000" : "#0f1117",
+      // Web フォント（外部CSS）の埋め込みはしない（閉じたネットワークでは取得できず、エラーになるだけのため）
+      skipFonts: true,
+      width, height, pixelRatio: 2,
+      style: {
+        width: `${width}px`, height: `${height}px`,
+        transform: `translate(${(padX - b.x) * zoom}px, ${(padY - b.y) * zoom}px) scale(${zoom})`,
+      },
+      filter: (n) => !(n instanceof HTMLElement && (n.classList.contains("react-flow__handle")
+        || n.classList.contains("react-flow__resize-control"))),
+    });
+    if (!light) return canvas;
+    // 画面の配色（濃い背景）を反転して白背景にする。色相を 180° 戻して機器・線の色味は保つ
+    const out = document.createElement("canvas");
+    out.width = canvas.width;
+    out.height = canvas.height;
+    const ctx = out.getContext("2d")!;
+    ctx.filter = "invert(1) hue-rotate(180deg)";
+    ctx.drawImage(canvas, 0, 0);
+    return out;
+  };
+
+  const fileBase = () => `${(detail?.name ?? "topology").replace(/[\\/:*?"<>|]/g, "_")}_${VIEW_LABELS[view]}`;
+  const download = (blob: Blob, name: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+
+  const [exporting, setExporting] = useState(false);
+  const exportAs = async (kind: "png" | "pdf" | "print", light = true) => {
+    if (!detail || !nodes.length || exporting) return;
+    setExporting(true);
+    setError("");
     try {
-      const blob = await toBlob(el, {
-        backgroundColor: "#0f1117",
-        // Web フォント（外部CSS）の埋め込みはしない（閉じたネットワークでは取得できず、エラーになるだけのため）
-        skipFonts: true,
-        width, height, pixelRatio: 2,
-        style: {
-          width: `${width}px`, height: `${height}px`,
-          transform: `translate(${(padX - b.x) * zoom}px, ${(padY - b.y) * zoom}px) scale(${zoom})`,
-        },
-        filter: (n) => !(n instanceof HTMLElement && (n.classList.contains("react-flow__handle")
-          || n.classList.contains("react-flow__resize-control"))),
-      });
-      if (!blob) throw new Error("画像を生成できませんでした");
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${detail.name.replace(/[\\/:*?"<>|]/g, "_")}_${VIEW_LABELS[view]}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      const canvas = await renderImage(kind === "png" ? light : true);
+      const title = `${detail.name}（${VIEW_LABELS[view]}）`;
+      const stamp = new Date().toLocaleString("ja-JP");
+      if (kind === "png") {
+        const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+        if (!blob) throw new Error("画像を生成できませんでした");
+        download(blob, `${fileBase()}.png`);
+      } else if (kind === "pdf") {
+        // PDF ライブラリは出力するときだけ読み込む
+        const { jsPDF } = await import("jspdf");
+        const landscape = canvas.width >= canvas.height;
+        const pdf = new jsPDF({ orientation: landscape ? "landscape" : "portrait", unit: "mm", format: "a3" });
+        const pw = pdf.internal.pageSize.getWidth();
+        const ph = pdf.internal.pageSize.getHeight();
+        const margin = 10;
+        const header = 8;
+        // 日本語フォントを同梱していないため、題名と日時は画像にして載せる
+        const head = document.createElement("canvas");
+        head.width = 2400;
+        head.height = 60;
+        const hc = head.getContext("2d")!;
+        hc.fillStyle = "#ffffff";
+        hc.fillRect(0, 0, head.width, head.height);
+        hc.fillStyle = "#111111";
+        hc.font = "bold 34px sans-serif";
+        hc.textBaseline = "middle";
+        hc.fillText(title, 0, 30);
+        hc.font = "24px sans-serif";
+        hc.fillStyle = "#555555";
+        hc.textAlign = "right";
+        hc.fillText(`NetConfig Manager ・ ${stamp}`, head.width, 30);
+        pdf.addImage(head.toDataURL("image/png"), "PNG", margin, margin, pw - margin * 2, (pw - margin * 2) * head.height / head.width);
+        const aw = pw - margin * 2;
+        const ah = ph - margin * 2 - header - 2;
+        const scale = Math.min(aw / canvas.width, ah / canvas.height);
+        const w = canvas.width * scale;
+        const h = canvas.height * scale;
+        // 白背景の図は JPEG のほうがずっと小さい（PNG だと数 MB〜十数 MB になる）
+        pdf.addImage(canvas.toDataURL("image/jpeg", 0.92), "JPEG", margin + (aw - w) / 2, margin + header + 2, w, h);
+        download(pdf.output("blob"), `${fileBase()}.pdf`);
+      } else {
+        // 印刷用のページを別ウィンドウで開き、印刷ダイアログを出す（用紙の向きは図の縦横に合わせる）
+        const landscape = canvas.width >= canvas.height;
+        const w = window.open("", "_blank");
+        if (!w) throw new Error("ポップアップがブロックされました。ブラウザの設定で許可してください");
+        const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+        w.document.write(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>@page{size:A3 ${landscape ? "landscape" : "portrait"};margin:10mm}
+html,body{margin:0;background:#fff;color:#111;font-family:sans-serif}
+header{display:flex;justify-content:space-between;align-items:baseline;font-size:12pt;margin-bottom:4mm}
+header small{color:#555;font-size:9pt}
+img{display:block;max-width:100%;max-height:${landscape ? "250mm" : "370mm"};margin:0 auto;object-fit:contain}</style></head>
+<body><header><b>${esc(title)}</b><small>NetConfig Manager ・ ${esc(stamp)}</small></header>
+<img src="${canvas.toDataURL("image/png")}" alt=""></body></html>`);
+        w.document.close();
+        const img = w.document.querySelector("img")!;
+        const go = () => { w.focus(); w.print(); };
+        if (img.complete) go(); else img.onload = go;
+      }
     } catch (e) {
-      setError(`画像の出力に失敗しました: ${errorMessage(e)}`);
+      setError(`出力に失敗しました: ${errorMessage(e)}`);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -792,7 +873,7 @@ function Editor(props: EditorProps) {
               グリッドに吸着
             </label>
           )}
-          <button className="btn" onClick={exportPng} disabled={!nodes.length}>PNG出力</button>
+          <ExportMenu disabled={!nodes.length || exporting} busy={exporting} onExport={exportAs} />
           {canWrite && (
             editing ? (
               <>
@@ -1328,6 +1409,39 @@ function MultiPanel({ count, editing, onDelete }: { count: number; editing: bool
         </>
       )}
     </Section>
+  );
+}
+
+/** 書き出しメニュー（PNG は画面の配色・白背景、PDF・印刷は白背景） */
+function ExportMenu({ disabled, busy, onExport }: {
+  disabled: boolean; busy: boolean; onExport: (kind: "png" | "pdf" | "print", light?: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+  const pick = (kind: "png" | "pdf" | "print", light?: boolean) => {
+    setOpen(false);
+    onExport(kind, light);
+  };
+  return (
+    <div className="topo-export" ref={ref}>
+      <button className="btn" disabled={disabled} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
+        {busy ? "出力中..." : "書き出し ▾"}
+      </button>
+      {open && (
+        <div className="topo-export-menu" role="menu">
+          <button role="menuitem" onClick={() => pick("png", false)}>PNG（画面の配色）</button>
+          <button role="menuitem" onClick={() => pick("png", true)}>PNG（白背景）</button>
+          <button role="menuitem" onClick={() => pick("pdf")}>PDF（A3・白背景）</button>
+          <button role="menuitem" onClick={() => pick("print")}>印刷...</button>
+        </div>
+      )}
+    </div>
   );
 }
 
