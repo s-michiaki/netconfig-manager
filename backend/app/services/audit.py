@@ -10,12 +10,14 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from cryptography.fernet import InvalidToken
 from fastapi import Depends, Request
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import settings
+from app.core.crypto import decrypt_line, encrypt_line
 from app.core.database import get_db
 from app.core.timeutil import utcnow
 from app.models.activity import ActivityLog
@@ -171,10 +173,14 @@ class TerminalRecorder:
 
     キー入力は記録しない（enable のパスワードなど、画面に表示されない秘密の入力が含まれるため）。
     入力したコマンドは機器側のエコーとして画面出力に残る。
+
+    TERMINAL_LOG_ENCRYPT が有効なら、1行（1イベント）ずつ DEVICE_ENCRYPTION_KEY で暗号化して
+    .cast.enc に書く（show running-config の出力などがファイルのまま読めないように）。閲覧時に復号する
     """
 
     def __init__(self, session_id: str, started: datetime, cols: int, rows: int, title: str):
-        rel = Path(started.strftime("%Y/%m")) / f"{session_id}.cast"
+        self.encrypt = settings.TERMINAL_LOG_ENCRYPT
+        rel = Path(started.strftime("%Y/%m")) / f"{session_id}.cast{'.enc' if self.encrypt else ''}"
         self.rel_path = str(rel)
         self.path = Path(settings.TERMINAL_LOG_PATH) / rel
         self.start = time.monotonic()
@@ -186,11 +192,14 @@ class TerminalRecorder:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._f = open(self.path, "w", encoding="utf-8")
             header = {"version": 2, "width": cols, "height": rows, "timestamp": int(started.timestamp()), "title": title}
-            self._f.write(json.dumps(header, ensure_ascii=False) + "\n")
+            self._f.write(self._line(json.dumps(header, ensure_ascii=False)))
             self._f.flush()
         except OSError as e:
             logger.error("ターミナルの記録ファイルを作成できません (%s): %s", self.path, e)
             self._f = None
+
+    def _line(self, text: str) -> str:
+        return (encrypt_line(text) if self.encrypt else text) + "\n"
 
     @property
     def available(self) -> bool:
@@ -202,15 +211,15 @@ class TerminalRecorder:
         with self._lock:
             if self.truncated or self._f is None:
                 return
-            line = json.dumps([round(time.monotonic() - self.start, 3), kind, data], ensure_ascii=False) + "\n"
-            size = len(line.encode("utf-8"))
+            line = json.dumps([round(time.monotonic() - self.start, 3), kind, data], ensure_ascii=False)
+            size = len(line.encode("utf-8")) + 1  # 上限は暗号化前の大きさで数える
             if self.bytes + size > settings.TERMINAL_LOG_MAX_BYTES:
                 self.truncated = True
                 note = "\r\n[記録の上限に達したため、これ以降は記録していません]\r\n"
-                self._f.write(json.dumps([round(time.monotonic() - self.start, 3), "o", note], ensure_ascii=False) + "\n")
+                self._f.write(self._line(json.dumps([round(time.monotonic() - self.start, 3), "o", note], ensure_ascii=False)))
                 self._f.flush()
                 return
-            self._f.write(line)
+            self._f.write(self._line(line))
             self.bytes += size
             self._f.flush()
 
@@ -228,6 +237,39 @@ class TerminalRecorder:
                 except OSError:
                     pass
                 self._f = None
+
+
+def read_recording(path: Path) -> str:
+    """記録を asciicast v2 のテキストとして読む（.enc は1行ずつ復号する。壊れた行は飛ばす）"""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not path.name.endswith(".enc"):
+        return text
+    out = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(decrypt_line(line))
+        except InvalidToken:
+            logger.warning("ターミナルの記録を復号できない行があります（鍵が違うか壊れています）: %s", path)
+            if not out:
+                raise
+    return "\n".join(out) + "\n"
+
+
+def encrypt_existing_recordings(base: Path | None = None) -> list[tuple[str, str]]:
+    """平文の記録（.cast）を暗号化して .cast.enc に置き換える。[(旧相対パス, 新相対パス)] を返す（DB の更新は呼び出し側）"""
+    base = Path(base or settings.TERMINAL_LOG_PATH)
+    moved = []
+    for p in sorted(base.rglob("*.cast")):
+        enc = p.with_name(p.name + ".enc")
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        tmp = enc.with_name(enc.name + ".tmp")
+        tmp.write_text("".join(encrypt_line(line) + "\n" for line in lines if line.strip()), encoding="utf-8")
+        tmp.replace(enc)
+        p.unlink()
+        moved.append((str(p.relative_to(base)), str(enc.relative_to(base))))
+    return moved
 
 
 def recording_path(session: TerminalSession) -> Path | None:

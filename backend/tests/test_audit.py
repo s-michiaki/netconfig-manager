@@ -124,6 +124,10 @@ def test_terminal_session_is_recorded(ctx):
     assert "hostname R1" in out and "日本語の説明" in out
     assert any(e[1] == "r" and e[2] == "140x40" for e in events)
     assert all(e[1] != "i" for e in events)  # キー入力は記録しない
+    # ファイルは暗号化して保存している（そのままでは読めない）
+    f = next(Path(settings.TERMINAL_LOG_PATH).rglob(f"{item['id']}.cast.enc"))
+    raw = f.read_text(encoding="utf-8")
+    assert "hostname" not in raw and raw.startswith("gAAAA")
     acts = [x["action"] for x in logs(c, admin, q=f"tr-{port}")["items"]]
     assert "terminal.open" in acts and "terminal.close" in acts
     assert logs(c, admin, action="audit.view_recording")["total"] >= 1
@@ -151,7 +155,40 @@ def test_recording_limit(ctx, monkeypatch):
         r.output("x" * 100)
     r.close()
     assert r.truncated and r.bytes <= 2000
-    assert "記録の上限" in Path(r.path).read_text(encoding="utf-8")
+    from app.services.audit import read_recording
+    assert "記録の上限" in read_recording(Path(r.path)) and r.path.name.endswith(".cast.enc")
+
+
+def test_plain_recordings_and_encrypt_tool(ctx, monkeypatch):
+    """平文の記録（以前のバージョン・TERMINAL_LOG_ENCRYPT=false）も読め、ツールで暗号化できる"""
+    import asyncio
+
+    from app.core.database import AsyncSessionLocal
+    from app.models.audit import TerminalSession
+    from app.services.audit import TerminalRecorder
+    from app.tools import encrypt_recordings
+    c, admin = ctx["c"], ctx["admin"]
+    monkeypatch.setattr(settings, "TERMINAL_LOG_ENCRYPT", False)
+    sid = str(uuid.uuid4())
+    r = TerminalRecorder(sid, utcnow(), 80, 24, "plain")
+    r.output("show running-config\r\nhostname PLAIN\r\n")
+    r.close()
+    assert r.rel_path.endswith(f"{sid}.cast") and "hostname PLAIN" in Path(r.path).read_text(encoding="utf-8")
+
+    async def add():
+        async with AsyncSessionLocal() as db:
+            db.add(TerminalSession(id=sid, started_at=utcnow(), log_file=r.rel_path, bytes_out=10, truncated=False,
+                                   username="admin", device_name="plain-sw", device_host="10.0.0.1", ip="127.0.0.1"))
+            await db.commit()
+    asyncio.run(add())
+    assert "hostname PLAIN" in c.get(f"/api/audit/terminal-sessions/{sid}/recording", headers=admin).text
+    # 既存の平文の記録を暗号化（DB の参照も差し替わり、引き続き閲覧できる）
+    asyncio.run(encrypt_recordings.main())
+    assert not Path(r.path).exists()
+    enc = Path(str(r.path) + ".enc")
+    assert "hostname PLAIN" not in enc.read_text(encoding="utf-8")
+    rec = c.get(f"/api/audit/terminal-sessions/{sid}/recording", headers=admin)
+    assert rec.status_code == 200 and "hostname PLAIN" in rec.text and json.loads(rec.text.splitlines()[0])["title"] == "plain"
 
 
 def test_purge_old(ctx):

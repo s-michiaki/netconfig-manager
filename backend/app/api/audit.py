@@ -1,6 +1,7 @@
 """監査ログの閲覧 API（管理者のみ）"""
 from datetime import datetime
 
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
@@ -14,7 +15,7 @@ from app.core.csv_export import MAX_EXPORT_ROWS, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.audit import AuditLog, TerminalSession
-from app.services.audit import ACTIONS, Audit, get_audit, recording_path
+from app.services.audit import ACTIONS, Audit, get_audit, read_recording, recording_path
 
 router = APIRouter()
 
@@ -220,7 +221,10 @@ async def get_recording(session_id: str, db: AsyncSession = Depends(get_db), aud
     p = recording_path(s) if s else None
     if s is None or p is None or not p.is_file():
         raise HTTPException(status_code=404, detail="記録が見つかりません")
-    text = await run_in_threadpool(p.read_text, encoding="utf-8", errors="replace")
+    try:
+        text = await run_in_threadpool(read_recording, p)
+    except InvalidToken as e:
+        raise HTTPException(status_code=500, detail="記録を復号できません（DEVICE_ENCRYPTION_KEY が記録時と違う可能性があります）") from e
     # 記録を見たこと自体も残す（機器の画面には機密情報が含まれ得るため）
     audit("audit.view_recording", target_type="terminal_session", target_id=s.id,
           target_name=f"{s.username}@{s.device_name}")

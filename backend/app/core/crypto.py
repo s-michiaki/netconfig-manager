@@ -20,6 +20,15 @@ def decrypt(value: str) -> str:
     return _fernet.decrypt(value[len(_PREFIX):].encode()).decode()
 
 
+def encrypt_line(text: str) -> str:
+    """1行分のテキストを暗号化する（改行を含まない ASCII のトークンになる）。ターミナルの記録用"""
+    return _fernet.encrypt(text.encode()).decode()
+
+
+def decrypt_line(token: str) -> str:
+    return _fernet.decrypt(token.strip().encode()).decode()
+
+
 def is_encrypted(value: str) -> bool:
     return value.startswith(_PREFIX)
 
