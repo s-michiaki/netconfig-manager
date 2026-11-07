@@ -267,7 +267,8 @@ async def delete_rule(
     await db.commit()
 
 
-@router.post("/rules/test", response_model=RuleTestResult, dependencies=[Depends(require(Perm.COMPLIANCE_READ))])
+# ルールを作る人だけが使う（閲覧者が任意の正規表現を何度も評価させられないように）
+@router.post("/rules/test", response_model=RuleTestResult, dependencies=[Depends(require(Perm.COMPLIANCE_WRITE))])
 async def test_rule(payload: RuleTest, db: AsyncSession = Depends(get_db)):
     """保存せずに、指定した機器の現在のコンフィグでルールを試す"""
     d = await db.get(Device, payload.device_id)

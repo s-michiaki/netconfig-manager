@@ -24,6 +24,11 @@ x-backend-env: &backend-env
   PING_MAX_TARGETS: ${PING_MAX_TARGETS:-300}
   PUBLIC_URL: ${PUBLIC_URL:-}
   TERMINAL_LOG_ENCRYPT: ${TERMINAL_LOG_ENCRYPT:-true}
+  LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-5}
+  LOGIN_MAX_FAILURES_PER_IP: ${LOGIN_MAX_FAILURES_PER_IP:-20}
+  LOGIN_FAILURE_WINDOW_MIN: ${LOGIN_FAILURE_WINDOW_MIN:-10}
+  LOGIN_LOCK_MIN: ${LOGIN_LOCK_MIN:-15}
+  COMPLIANCE_REGEX_TIMEOUT: ${COMPLIANCE_REGEX_TIMEOUT:-2}
   # モニタリング（試験導入。既定は無効）
   MONITORING_ENABLED: ${MONITORING_ENABLED:-false}
   MONITOR_INTERVAL_SEC: ${MONITOR_INTERVAL_SEC:-300}
@@ -80,6 +85,8 @@ services:
       - ssh_data:/data/ssh
       - terminal_logs:/data/terminal-logs
     depends_on: *backend-depends
+    # 接続元 IP は nginx が付ける X-Forwarded-For（クライアントの値は nginx で上書き）から取る。
+    # backend のポートは外部に公開しないこと（公開すると X-Forwarded-For を直接送れてしまう）
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"
 
   worker:

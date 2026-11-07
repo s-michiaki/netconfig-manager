@@ -19,18 +19,27 @@
     コンフィグ全体で「あってはいけない」→ 一致する違反行
   外した結果すべて合格になれば「除外」とする
 期限切れの例外は使わない（次の検査から反映）
+
+正規表現（ルール・セクションの見出し・例外）の照合
+- 利用者が入力したパターンなので、壊滅的なバックトラックを起こすものも入り得る（ReDoS）
+- 標準の re は照合中に GIL を手放さず、打ち切る手段も無いため、API・worker 全体が止まる
+- そこで regex パッケージで照合し、1回の評価（ルール × 機器）あたりの合計時間を
+  COMPLIANCE_REGEX_TIMEOUT 秒に制限する。超えたら評価を「エラー」にして打ち切る
+  （concurrent=True で照合中も GIL を手放すので、ほかのリクエストは止まらない）
 """
 import asyncio
 import json
 import logging
-import re
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 import git
+import regex
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
@@ -67,6 +76,32 @@ class ExceptionSpec:
     ignore_pattern: str | None = None  # None なら機器単位の除外
 
 
+class RegexTimeout(Exception):
+    """正規表現の照合が制限時間を超えた"""
+
+
+def compile_pattern(pattern: str) -> regex.Pattern:
+    """利用者が入力した正規表現をコンパイルする（不正なら regex.error）"""
+    return regex.compile(pattern)
+
+
+class Deadline:
+    """1回の評価で正規表現の照合に使える残り時間"""
+
+    def __init__(self, seconds: float | None = None):
+        self.seconds = settings.COMPLIANCE_REGEX_TIMEOUT if seconds is None else seconds
+        self.end = time.monotonic() + self.seconds
+
+    def search(self, rx: regex.Pattern, text: str) -> bool:
+        left = self.end - time.monotonic()
+        if left <= 0:
+            raise RegexTimeout()
+        try:
+            return rx.search(text, timeout=left, concurrent=True) is not None
+        except TimeoutError as e:
+            raise RegexTimeout() from e
+
+
 def pattern_allowed(spec: RuleSpec) -> bool:
     """該当箇所単位の例外を使えるルールか（コンフィグ全体で「必要」なルールは外す箇所が無い）"""
     return spec.scope == "section" or spec.expect == "absent"
@@ -74,8 +109,8 @@ def pattern_allowed(spec: RuleSpec) -> bool:
 
 def validate_ignore_pattern(pattern: str) -> None:
     try:
-        re.compile(pattern)
-    except re.error as e:
+        compile_pattern(pattern)
+    except regex.error as e:
         raise ValueError(f"除外する箇所の正規表現が正しくありません: {e}") from e
 
 
@@ -102,14 +137,15 @@ def applies_to(spec: RuleSpec, platform: str) -> bool:
     return not spec.platforms or platform in spec.platforms
 
 
-def make_matcher(spec: RuleSpec) -> Callable[[str], bool]:
-    """1行を判定する関数。正規表現が不正なら ValueError"""
+def make_matcher(spec: RuleSpec, deadline: Deadline | None = None) -> Callable[[str], bool]:
+    """1行を判定する関数。正規表現が不正なら ValueError、照合が制限時間を超えたら RegexTimeout"""
     if spec.match_type == "regex":
         try:
-            rx = re.compile(spec.pattern)
-        except re.error as e:
+            rx = compile_pattern(spec.pattern)
+        except regex.error as e:
             raise ValueError(f"正規表現が正しくありません: {e}") from e
-        return lambda line: rx.search(line) is not None
+        dl = deadline or Deadline()
+        return lambda line: dl.search(rx, line)
     return lambda line: spec.pattern in line
 
 
@@ -119,8 +155,8 @@ def validate_spec(spec: RuleSpec) -> None:
         if not spec.section_pattern:
             raise ValueError("セクションごとに検査する場合は、セクションの見出し（正規表現）を指定してください")
         try:
-            re.compile(spec.section_pattern)
-        except re.error as e:
+            compile_pattern(spec.section_pattern)
+        except regex.error as e:
             raise ValueError(f"セクションの見出しの正規表現が正しくありません: {e}") from e
 
 
@@ -147,17 +183,27 @@ def _fmt(no: int, line: str) -> str:
     return f"{no}行目: {line.strip()}"
 
 
-def evaluate(spec: RuleSpec, config_text: str, ignore: list[re.Pattern] | None = None) -> Evaluation:
+def evaluate(spec: RuleSpec, config_text: str, ignore: list[regex.Pattern] | None = None) -> Evaluation:
     """ignore: 検査から外す箇所（違反行・セクションの見出しに一致する正規表現）"""
+    deadline = Deadline()
     try:
-        match = make_matcher(spec)
+        return _evaluate(spec, config_text, ignore or [], deadline)
+    except RegexTimeout:
+        return Evaluation("error", [
+            f"正規表現の照合に {deadline.seconds:g} 秒以上かかったため中止しました。"
+            "「(…+)+」のような量指定子の入れ子など、照合に時間のかかるパターンになっていないか見直してください"
+        ])
+
+
+def _evaluate(spec: RuleSpec, config_text: str, ignore: list[regex.Pattern], deadline: Deadline) -> Evaluation:
+    try:
+        match = make_matcher(spec, deadline)
     except ValueError as e:
         return Evaluation("error", [str(e)])
     lines = config_text.splitlines()
-    ignore = ignore or []
 
     def ignored(text: str) -> bool:
-        return any(rx.search(text) for rx in ignore)
+        return any(deadline.search(rx, text) for rx in ignore)
 
     skipped: list[str] = []
     if spec.scope != "section":
@@ -175,13 +221,13 @@ def evaluate(spec: RuleSpec, config_text: str, ignore: list[re.Pattern] | None =
         return Evaluation("fail", details, ignored=skipped[:MAX_DETAILS])
 
     try:
-        head_rx = re.compile(spec.section_pattern or "")
-    except re.error as e:
+        head_rx = compile_pattern(spec.section_pattern or "")
+    except regex.error as e:
         return Evaluation("error", [f"セクションの見出しの正規表現が正しくありません: {e}"])
     violations: list[str] = []
     count = 0
     for head_no, head, body in parse_sections(lines):
-        if not head_rx.search(head):
+        if not deadline.search(head_rx, head):
             continue
         hits = [(no, line) for no, line in body if match(line)]
         bad = (not hits) if spec.expect == "present" else bool(hits)
@@ -208,8 +254,8 @@ def evaluate_with_exceptions(spec: RuleSpec, config_text: str, exceptions: list[
     for e in exceptions:
         if e.ignore_pattern:
             try:
-                ignore.append(re.compile(e.ignore_pattern))
-            except re.error:
+                ignore.append(compile_pattern(e.ignore_pattern))
+            except regex.error:
                 continue  # 登録時に検証しているので通常は起きない
     ev = evaluate(spec, config_text, ignore if pattern_allowed(spec) else None)
     reasons = "・".join(dict.fromkeys(e.reason for e in exceptions))

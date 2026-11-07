@@ -168,7 +168,8 @@ def test_snmp_poll(ctx, enabled, snmp_agent):
     first = asyncio.run(poll())
     assert first["ok"] >= 1 and first["samples"] == 0  # 1回目はカウンタを覚えるだけ
     time.sleep(1.5)
-    second = asyncio.run(poll())
+    with mock.patch.object(monitoring, "MIN_SAMPLE_SEC", 1):
+        second = asyncio.run(poll())
     assert second["samples"] >= 1
     ifs = {i["name"]: i for i in c.get("/api/monitoring/interfaces", params={"device_id": d["id"]}, headers=view).json()}
     up, down = ifs["Gi1/0/1"], ifs["Gi1/0/2"]
@@ -188,6 +189,10 @@ def test_snmp_poll(ctx, enabled, snmp_agent):
     with mock.patch.object(settings, "SNMP_TIMEOUT", 0.5), mock.patch.object(settings, "SNMP_RETRIES", 0):
         third = asyncio.run(poll())
     assert third["failed"] == 1 and third["ok"] >= 1
+    # 前回から短すぎる取得（MIN_SAMPLE_SEC 未満）では記録せず、値も変えない
+    assert third["samples"] == 0
+    again = {i["name"]: i for i in c.get("/api/monitoring/interfaces", params={"device_id": d["id"]}, headers=view).json()}
+    assert again["Gi1/0/1"]["in_bps"] == up["in_bps"]
     rows = {x["device_id"]: x for x in c.get("/api/monitoring/snmp", headers=view).json()}
     assert rows[d2["id"]]["last_error"] and rows[d["id"]]["last_error"] is None
     assert c.post(f"/api/monitoring/snmp/{d2['id']}/test", headers=admin).status_code == 422
@@ -297,6 +302,11 @@ def test_parsers():
         res = fw_hits.collect_fw_hits(dev)
     assert res.error is None and [r.name for r in res.rules] == ["LAN-to-WAN", "DMZ-web", "ポリシー 7"]
     assert res.rules[2].hit_count == 0 and "diagnose firewall iprope" in res.raw
+    # iprope の統計を読めないとき（権限不足・VDOM の Command fail など）は、全ポリシーを 0 にせず失敗にする
+    for bad in ["Command fail. Return code -61", "", "Unknown action 0"]:
+        with mock.patch.object(fw_hits, "run_commands", return_value=[FORTI_SHOW, bad]):
+            res = fw_hits.collect_fw_hits(dev)
+        assert res.error and "iprope" in res.error and res.rules == [] and "LAN-to-WAN" in res.raw
     assert fw_hits.collect_fw_hits(mock.Mock(platform="cisco_ios")).error
     with mock.patch.object(fw_hits, "run_commands", side_effect=ValueError("接続できません")):
         assert fw_hits.collect_fw_hits(mock.Mock(platform="paloalto_panos", jump=None, read_timeout=None)).error

@@ -26,3 +26,21 @@ os.environ.update(
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+
+import fakeredis  # noqa: E402
+import pytest  # noqa: E402
+
+from app.services import login_limit  # noqa: E402
+
+
+def _fake_redis():
+    return fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer())
+
+
+# ログインの失敗回数は Redis で数える。テストでは偽の Redis を使い、テストごとに空にする
+login_limit._client = _fake_redis()
+
+
+@pytest.fixture(autouse=True)
+def _login_limit_redis(monkeypatch):
+    monkeypatch.setattr(login_limit, "_client", _fake_redis())

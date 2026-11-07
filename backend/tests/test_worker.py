@@ -44,7 +44,24 @@ def test_collect_task(r):
     lock.release()
     # 2回目の実行（別イベントループ）でもDBアクセスできる
     assert worker.collect_device_config.apply(args=(did,)).get()["success"]
+    # 同じ機器への別の SSH 処理（FW ヒット数の取得など）が終わらなければ、収集は待ったうえで再試行に回す
+    ssh = r.lock(f"netconfig:ssh:{did}", timeout=60); ssh.acquire()
+    with mock.patch.object(worker, "SSH_LOCK_WAIT", 0.3), \
+            mock.patch.object(worker.collect_device_config, "max_retries", 0):
+        res = worker.collect_device_config.apply(args=(did,)).get()
+    assert not res["success"] and "SSH" in res["error"]
+    # FW ヒット数の取得は、収集中（SSH ロック中）なら取らずに次回へ
+    assert worker.collect_fw_hits_device.apply(args=(did,)).get() == {"skipped": True}
+    ssh.release()
     c.__exit__(None, None, None)
+
+
+def test_snmp_poll_runs_one_at_a_time(r):
+    with mock.patch.object(worker.settings, "MONITORING_ENABLED", True):
+        lock = r.lock("netconfig:snmp-poll", timeout=60); lock.acquire()
+        assert worker.poll_snmp.apply().get() == {"skipped": True}
+        lock.release()
+        assert "skipped" not in worker.poll_snmp.apply().get()
 
 def test_dispatch(r):
     asyncio.run(_add_schedule("17 3 * * *"))  # 他のテストと重ならない時刻
