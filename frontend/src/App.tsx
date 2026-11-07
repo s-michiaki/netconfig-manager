@@ -1,21 +1,43 @@
-import { useState } from "react";
+import { ComponentType, lazy, Suspense, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
-import ActivityPage from "./pages/ActivityPage";
-import AuditPage from "./pages/AuditPage";
-import CollectPage from "./pages/CollectPage";
-import CompliancePage from "./pages/CompliancePage";
 import DevicesPage from "./pages/DevicesPage";
-import HistoryPage from "./pages/HistoryPage";
-import JumpHostsPage from "./pages/JumpHostsPage";
 import LoginPage from "./pages/LoginPage";
-import NotificationsPage from "./pages/NotificationsPage";
-import PingPage from "./pages/PingPage";
-import SchedulePage from "./pages/SchedulePage";
-import TerminalPage from "./pages/TerminalPage";
-import TopologyPage from "./pages/TopologyPage";
-import UsersPage from "./pages/UsersPage";
+
+/**
+ * 画面ごとに分割して必要なときだけ読み込む（初回表示を軽くする。構成図の React Flow・ターミナルの xterm.js など）
+ * 更新（再デプロイ）で古いファイルが消えていた場合は、一度だけ再読み込みして新しいものを取りに行く
+ */
+function lazyPage(load: () => Promise<{ default: ComponentType }>) {
+  return lazy(() =>
+    load()
+      .then((m) => {
+        sessionStorage.removeItem("chunk-reload");
+        return m;
+      })
+      .catch((e) => {
+        if (!sessionStorage.getItem("chunk-reload")) {
+          sessionStorage.setItem("chunk-reload", "1");
+          window.location.reload();
+          return new Promise<never>(() => undefined);
+        }
+        throw e;
+      }),
+  );
+}
+const ActivityPage = lazyPage(() => import("./pages/ActivityPage"));
+const AuditPage = lazyPage(() => import("./pages/AuditPage"));
+const CollectPage = lazyPage(() => import("./pages/CollectPage"));
+const CompliancePage = lazyPage(() => import("./pages/CompliancePage"));
+const HistoryPage = lazyPage(() => import("./pages/HistoryPage"));
+const JumpHostsPage = lazyPage(() => import("./pages/JumpHostsPage"));
+const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"));
+const PingPage = lazyPage(() => import("./pages/PingPage"));
+const SchedulePage = lazyPage(() => import("./pages/SchedulePage"));
+const TerminalPage = lazyPage(() => import("./pages/TerminalPage"));
+const TopologyPage = lazyPage(() => import("./pages/TopologyPage"));
+const UsersPage = lazyPage(() => import("./pages/UsersPage"));
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm }[] = [
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
@@ -129,6 +151,7 @@ function Layout() {
       </aside>
 
       <main className="main-content">
+        <Suspense fallback={<div className="page"><div className="page-body topo-muted">読み込み中...</div></div>}>
         <Routes>
           <Route path="/" element={<Navigate to="/devices" replace />} />
           <Route path="/devices" element={<RequirePerm perm={PERM.DEVICE_READ}><DevicesPage /></RequirePerm>} />
@@ -148,6 +171,7 @@ function Layout() {
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
           <Route path="*" element={<Navigate to="/devices" replace />} />
         </Routes>
+        </Suspense>
       </main>
     </div>
   );

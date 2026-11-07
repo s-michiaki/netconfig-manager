@@ -6,7 +6,7 @@
 
 | コンポーネント | 技術 | 役割 |
 |---|---|---|
-| フロントエンド | React + Vite + xterm.js | UI・SSHターミナル |
+| フロントエンド | React + Vite + xterm.js | UI・SSHターミナル（画面ごとにファイルを分け、開いたときに読み込む） |
 | バックエンドAPI | FastAPI (Python 3.12) | REST API / WebSocket |
 | 認証・認可 | JWT (PyJWT) + bcrypt + RBAC | ログイン・ロール別の権限制御 |
 | コンフィグ収集 | Netmiko | マルチベンダーSSH収集 |
@@ -519,7 +519,7 @@ netconfig-manager/
     ├── vite.config.ts
     └── src/
         ├── main.tsx
-        ├── App.tsx              # ルーティング・ログインガード
+        ├── App.tsx              # ルーティング・ログインガード・画面の遅延読み込み
         ├── index.css
         ├── auth.tsx             # ログインユーザー・権限（useAuth / RequirePerm）
         ├── platforms.ts         # 対応プラットフォーム一覧の取得（usePlatforms）
