@@ -493,7 +493,7 @@ GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
 - e2e: 画面テスト（失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
-あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit`、frontend は `npm audit --omit=dev --audit-level=high`）。
+あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit`、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `deps-smoke` は、本番と同じく `requirements.txt` だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため）。
 
 ---
 

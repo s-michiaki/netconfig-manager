@@ -7,6 +7,9 @@ alembic==1.13.3
 pydantic==2.9.2
 pydantic-settings==2.5.2
 celery==5.4.0
+# kombu は celery の依存。5.7.0 は Redis 用のモジュールが packaging を使うのに依存として宣言しておらず、
+# 本番のイメージ（開発用パッケージなし）では Celery が Redis に接続できなくなる（収集の受け付けが 500、スケジュールが動かない）
+kombu==5.6.2
 redis==5.1.1
 netmiko==4.4.0
 paramiko==3.5.1
