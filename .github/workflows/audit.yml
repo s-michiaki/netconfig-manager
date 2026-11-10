@@ -1,7 +1,9 @@
-# 依存パッケージの既知の脆弱性を確認する（本番で使うパッケージだけ）
+# 依存パッケージの確認（本番で使うパッケージだけ）
 #   backend : pip-audit（backend/requirements.txt）
+#   backend : 本番の依存だけを入れた環境で起動できるか（deps-smoke）
 #   frontend: npm audit（devDependencies を除く。high 以上で失敗）
-# push・プルリクエストのほか、新しく公開された脆弱性に気づけるよう毎週月曜にも実行する
+# push・プルリクエストのほか、新しく公開された脆弱性や、固定していない依存の新しい版による不具合に
+# 気づけるよう毎週月曜にも実行する
 name: Audit
 
 on:
@@ -34,6 +36,43 @@ jobs:
         #   PYSEC-2026-2858 paramiko: ssh-rsa（SHA-1 署名）を許可している。修正版（5.0）は ssh-rsa を廃止しており、
         #                    ssh-rsa しか使えない古いネットワーク機器へ接続できなくなるため、3.5 系のまま使う
         run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-2858
+
+  deps-smoke:
+    # テストのジョブは開発用パッケージ（pytest など）も入れるため、本番のイメージにだけ無いパッケージに
+    # 依存する不具合（例: kombu 5.7.0 が packaging を宣言していない）を見逃す。本番と同じく
+    # requirements.txt だけを入れ、worker の読み込みとタスクの登録（Redis への送信）まで確かめる
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      SECRET_KEY: ci-smoke-secret-key-0123456789abcdefghijklmnop
+      DEVICE_ENCRYPTION_KEY: Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=
+      DATABASE_URL: postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused
+      REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"  # 本番のコンテナ（python:3.12-slim）と合わせる
+      - name: 本番の依存だけをインストール
+        run: |
+          python -m venv /tmp/prod
+          /tmp/prod/bin/pip install -r requirements.txt
+      - name: API・worker の読み込みとタスクの登録
+        run: |
+          /tmp/prod/bin/python -c "
+          import kombu.transport.redis
+          from app.main import app
+          from app.worker import celery_app, collect_device_config
+          r = collect_device_config.delay('smoke-test', 'ci', 'ci')
+          print('ok', r.id)
+          "
 
   npm-audit:
     runs-on: ubuntu-24.04
