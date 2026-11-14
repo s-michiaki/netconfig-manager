@@ -3,13 +3,33 @@
 # NetConfig Manager 自動セットアップ（AlmaLinux / RHEL 10 系・Podman）
 #
 # 使い方（一般ユーザー + sudo、または root で実行）:
-#   bash setup.sh                 # 対話形式でセットアップ（[ ] 内は Enter でそのまま採用）
+#   bash setup.sh                 # 初回: 対話形式でセットアップ（[ ] 内は Enter でそのまま採用）
+#                                 # 2回目以降: 何も聞かずに更新する
+#   bash setup.sh --reconfigure   # 2回目以降でも設定（ポート・IP アドレスなど）を聞き直す
 #
 # 2回目以降に実行すると「更新」として動作する:
 #   - ソースを git pull し、コンテナを再ビルドして再起動
-#   - 既存の .env（暗号化キー等）はそのまま使う（再生成しない）
+#   - 既存の .env（暗号化キー等）はそのまま使う（再生成しない）。ポートも .env の値を使う
+#   - git pull でこのスクリプト自身が変わったときは、新しい内容で最初からやり直す
 # =============================================================================
 set -euo pipefail
+
+# 全体を関数に入れてあるのは、bash がスクリプトを最後まで読み込んでから実行するようにするため
+# （実行中に git pull でこのファイルが書き換わっても、読み込み済みの内容で動く）。
+# 行数の差分を増やさないよう、中は字下げしていない
+main() {
+RECONFIGURE=0
+for arg in "$@"; do
+  case "$arg" in
+    --reconfigure|-r) RECONFIGURE=1 ;;
+    -h|--help)
+      echo "使い方: bash setup.sh [--reconfigure]"
+      echo "  初回は対話形式でセットアップし、2回目以降は .env の設定のまま更新します。"
+      echo "  --reconfigure  2回目以降でも設定（ポート・IP アドレスなど）を聞き直す"
+      exit 0 ;;
+    *) echo "不明なオプションです: $arg（--help で使い方を表示）"; exit 1 ;;
+  esac
+done
 
 # ===========================
 # sudo Password Enter Please
@@ -54,10 +74,64 @@ ADMIN_USERNAME="admin"
 SSH_HOST_KEY_POLICY="tofu"
 COMPOSE_FILE="docker-compose.prod.yml"
 
+# リポジトリの所有者として git pull する（root 以外が所有するリポジトリを sudo git で
+# 操作すると "dubious ownership" エラーになるため）
+PULLED_DIR=""
+pull_source() { # $1 = リポジトリ
+  local owner
+  owner=$(stat -c %U "$1")
+  # 「pull_source ... || 対処」の形で呼ぶと関数の中では set -e が効かないため、失敗は明示的に返す
+  if [ "$owner" = "$(id -un)" ]; then
+    git -C "$1" pull --ff-only || return 1
+  else
+    sudo -u "$owner" git -C "$1" pull --ff-only || return 1
+  fi
+  PULLED_DIR="$1"
+}
+file_hash() { sha256sum "$1" 2>/dev/null | cut -d" " -f1 || true; }
+
 # =========================
-# 設定値入力
+# 更新時: 先にソースを更新し、このスクリプトが変わっていたら新しい内容でやり直す
 # =========================
-read -r -p "INSTALL_DIR Please Enter [${INSTALL_DIR}]: " Red_INSTALL_DIR
+# .env があれば導入済み（更新）。更新では質問をせず、.env の設定をそのまま使う
+ASK=1
+if [ -f "$INSTALL_DIR/.env" ] && [ -d "$INSTALL_DIR/.git" ] && [ "$RECONFIGURE" -eq 0 ]; then ASK=0; fi
+
+REPO_SCRIPT="$INSTALL_DIR/scripts/setup.sh"
+if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALL_DIR/.env" ] && [ "${NETCONFIG_SETUP_REEXEC:-0}" != "1" ]; then
+  command -v git >/dev/null || { echo "git が見つかりません"; exit 1; }
+  SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+  BEFORE=$(file_hash "$SELF")
+  echo "[INFO] Updating source ($INSTALL_DIR)..."
+  pull_source "$INSTALL_DIR" || {
+    echo ""
+    echo "❌ ソースを更新できませんでした（git pull に失敗）。ネットワークと、$INSTALL_DIR に手で変更したファイルが無いかを確認してください"
+    exit 1
+  }
+  # 実行中のスクリプトと、更新後のリポジトリのスクリプトが違えば、新しいほうで最初からやり直す
+  # （リポジトリの外に置いた setup.sh から実行した場合も、リポジトリのものに切り替わる）
+  if [ -f "$REPO_SCRIPT" ] && [ "$BEFORE" != "$(file_hash "$REPO_SCRIPT")" ]; then
+    echo "[INFO] setup.sh が更新されました。新しい内容でやり直します"
+    echo ""
+    NETCONFIG_SETUP_REEXEC=1 exec bash "$REPO_SCRIPT" "$@"
+  fi
+elif [ "${NETCONFIG_SETUP_REEXEC:-0}" = "1" ]; then
+  PULLED_DIR="$INSTALL_DIR"  # やり直す前に更新済み
+fi
+
+# =========================
+# 設定値入力（初回と --reconfigure のときだけ）
+# =========================
+# ASK=0 のときは read の代わりに既定値をそのまま採用する
+ask() { # $1 = 表示する文言, $2 = 結果を入れる変数名
+  if [ "$ASK" -eq 1 ]; then
+    read -r -p "$1" "$2"
+  else
+    printf -v "$2" '%s' ""
+  fi
+}
+
+ask "INSTALL_DIR Please Enter [${INSTALL_DIR}]: " Red_INSTALL_DIR
 if [ -n "${Red_INSTALL_DIR}" ]; then INSTALL_DIR="${Red_INSTALL_DIR}" ; fi
 
 if [ ! -d "$INSTALL_DIR/.git" ]; then
@@ -68,7 +142,7 @@ if [ ! -d "$INSTALL_DIR/.git" ]; then
   if [ -n "${Red_BRANCH}" ]; then BRANCH="${Red_BRANCH}" ; fi
 fi
 
-read -r -p "IP Address Please Enter [${IPADD}]: " Red_IPADD
+ask "IP Address Please Enter [${IPADD}]: " Red_IPADD
 if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
 
 # 2回目以降は .env の値を既定にする（Enter だけで今のポートを維持）
@@ -77,13 +151,13 @@ if [ -f "$INSTALL_DIR/.env" ]; then
   v=$(sudo sed -n 's/^HTTPS_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTPS_PORT="$v"
 fi
 
-read -r -p "HTTP_PORT Please Enter [${HTTP_PORT}]: " Red_HTTP_PORT
+ask "HTTP_PORT Please Enter [${HTTP_PORT}]: " Red_HTTP_PORT
 if [ -n "${Red_HTTP_PORT}" ]; then HTTP_PORT="${Red_HTTP_PORT}" ; fi
 [[ "$HTTP_PORT" =~ ^[0-9]+$ ]] && [ "$HTTP_PORT" -ge 1 ] && [ "$HTTP_PORT" -le 65535 ] \
   || { echo "HTTP_PORT が不正です: $HTTP_PORT"; exit 1; }
 
 # HTTPS は certs/ に証明書を置いたときだけ有効（scripts/import_cert.sh）。ポートは先に決めておく
-read -r -p "HTTPS_PORT Please Enter [${HTTPS_PORT}]: " Red_HTTPS_PORT
+ask "HTTPS_PORT Please Enter [${HTTPS_PORT}]: " Red_HTTPS_PORT
 if [ -n "${Red_HTTPS_PORT}" ]; then HTTPS_PORT="${Red_HTTPS_PORT}" ; fi
 [[ "$HTTPS_PORT" =~ ^[0-9]+$ ]] && [ "$HTTPS_PORT" -ge 1 ] && [ "$HTTPS_PORT" -le 65535 ] \
   || { echo "HTTPS_PORT が不正です: $HTTPS_PORT"; exit 1; }
@@ -104,6 +178,10 @@ if [ "$FIRST_INSTALL" -eq 1 ]; then
   case "$SSH_HOST_KEY_POLICY" in tofu|strict) ;; *) echo "tofu か strict を指定してください"; exit 1 ;; esac
 else
   echo "[INFO] 既存の $INSTALL_DIR/.env を使用します（暗号化キー・パスワードは変更しません）"
+  if [ "$ASK" -eq 0 ]; then
+    echo "[INFO] 更新モード: HTTP_PORT=${HTTP_PORT} / HTTPS_PORT=${HTTPS_PORT}（.env の設定のまま更新します）"
+    echo "       ポートなどを変えるときは: bash $INSTALL_DIR/scripts/setup.sh --reconfigure"
+  fi
 fi
 
 ENV_BACKUP_DIR="/root/netconfig-manager-backup"
@@ -138,16 +216,11 @@ fi
 # =========================
 # ソース取得（初回: clone / 2回目以降: pull）
 # =========================
-if [ -d "$INSTALL_DIR/.git" ]; then
+if [ "$PULLED_DIR" = "$INSTALL_DIR" ]; then
+  echo "[INFO] Source is up to date ($(git -C "$INSTALL_DIR" log -1 --format='%h %s' 2>/dev/null || sudo git -C "$INSTALL_DIR" log -1 --format='%h %s' 2>/dev/null || echo "$INSTALL_DIR"))"
+elif [ -d "$INSTALL_DIR/.git" ]; then
   echo "[INFO] Updating source ($INSTALL_DIR)..."
-  # リポジトリの所有者として git を実行する（root 以外が所有するリポジトリを sudo git で
-  # 操作すると "dubious ownership" エラーになるため）
-  REPO_OWNER=$(stat -c %U "$INSTALL_DIR")
-  if [ "$REPO_OWNER" = "$(id -un)" ]; then
-    git -C "$INSTALL_DIR" pull --ff-only
-  else
-    sudo -u "$REPO_OWNER" git -C "$INSTALL_DIR" pull --ff-only
-  fi
+  pull_source "$INSTALL_DIR"
 else
   echo "[INFO] Cloning $REPO_URL ($BRANCH) into $INSTALL_DIR..."
   echo "       （プライベートリポジトリの場合、Password には GitHub の Personal Access Token を入力）"
@@ -383,7 +456,11 @@ echo ""
 echo "✅ 完了"
 echo ""
 echo "■ アクセスURL"
-if [ "$HTTPS_ENABLED" -eq 1 ]; then
+SHOW_URL=$(sudo sed -n 's/^PUBLIC_URL=//p' "$INSTALL_DIR/.env" | tail -1)
+if [ "$ASK" -eq 0 ] && [ -n "$SHOW_URL" ]; then
+  # 更新では IP アドレスを聞かないので、.env の PUBLIC_URL（通知のリンク先）を表示する
+  echo "${SHOW_URL%/}/"
+elif [ "$HTTPS_ENABLED" -eq 1 ]; then
   if [ "$HTTPS_PORT" = "443" ]; then echo "https://${IPADD}/"; else echo "https://${IPADD}:${HTTPS_PORT}/"; fi
   echo "（HTTP は HTTPS へ転送されます）"
 else
@@ -423,3 +500,6 @@ echo "cd $INSTALL_DIR && sudo podman-compose -f $COMPOSE_FILE down"
 echo ""
 echo "■ 動作確認"
 echo "curl -kL $HEALTH_URL"
+}
+
+main "$@"
