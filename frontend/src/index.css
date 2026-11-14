@@ -774,3 +774,29 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .nav-alert.error { background: var(--color-danger); }
 .sys-card a, .sys-note a { color: var(--color-accent); }
 .sys-card a:hover, .sys-note a:hover { text-decoration: underline; }
+
+/* ---- ダッシュボード ---- */
+.dash-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.dash-tile { display: flex; flex-direction: column; gap: 2px; padding: 14px 16px; color: var(--color-text); text-decoration: none; border-top: 3px solid var(--color-border); }
+.dash-tile:hover { border-color: var(--color-accent); }
+.dash-tile.dash-bad { border-top-color: var(--color-danger); }
+.dash-tile.dash-warn { border-top-color: var(--color-warning); }
+.dash-tile.dash-good { border-top-color: var(--color-success); }
+.dash-tile-label { font-size: 12px; color: var(--color-muted); }
+.dash-tile-value { font-size: 30px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.dash-tile-sub { font-size: 11px; color: var(--color-muted); }
+.dash-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; align-items: start; }
+.dash-panel { padding: 14px 16px; }
+.dash-panel h3 { font-size: 13px; margin-bottom: 10px; }
+.dash-panel a { color: var(--color-accent); text-decoration: none; }
+.dash-panel a:hover { text-decoration: underline; }
+.dash-row { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-top: 1px solid var(--color-border); font-size: 13px; }
+.dash-row:first-of-type { border-top: none; }
+.dash-row-main { flex: 1; min-width: 0; }
+.dash-row-sub { font-size: 12px; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-diff { margin-left: 8px; font-family: var(--font-mono, monospace); font-size: 12px; }
+.dash-add { color: var(--color-success); }
+.dash-del { color: var(--color-danger); }
+.dash-banner { display: block; padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; text-decoration: none; }
+.dash-banner-error { background: var(--color-danger-dim); color: var(--color-danger); }
+.dash-banner-warn { background: var(--color-warning-dim, rgba(250, 204, 21, 0.12)); color: var(--color-warning); }

@@ -12,5 +12,9 @@ export async function login(page: Page, user: { name: string; password: string }
   await page.locator("input").nth(0).fill(user.name);
   await page.locator('input[type="password"]').fill(user.password);
   await page.locator("button.btn-primary").click();
+  // ログイン後はダッシュボードが開く。各テストはデバイス管理から始める
+  await expect(page).toHaveURL(/\/dashboard/);
+  await expect(page.locator(".dash-tile").first()).toBeVisible();
+  await page.locator('a[href="/devices"]').first().click();
   await expect(page).toHaveURL(/\/devices/);
 }
