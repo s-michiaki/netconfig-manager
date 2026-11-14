@@ -77,8 +77,9 @@ export default function ActivityPage() {
   const ref = params.get("ref") ?? "";
   const [labels, setLabels] = useState<Labels | null>(null);
   const [devices, setDevices] = useState<DeviceItem[]>([]);
-  const [category, setCategory] = useState("");
-  const [level, setLevel] = useState("");
+  // ダッシュボードなどからの絞り込み付きのリンク（?category=collect / ?level=error）
+  const [category, setCategory] = useState(params.get("category") ?? "");
+  const [level, setLevel] = useState(params.get("level") ?? "");
   const [deviceId, setDeviceId] = useState(params.get("device") ?? "");
   const [q, setQ] = useState("");
   const [since, setSince] = useState("");

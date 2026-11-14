@@ -40,8 +40,10 @@ const TopologyPage = lazyPage(() => import("./pages/TopologyPage"));
 const UsersPage = lazyPage(() => import("./pages/UsersPage"));
 const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
 const SystemPage = lazyPage(() => import("./pages/SystemPage"));
+const DashboardPage = lazyPage(() => import("./pages/DashboardPage"));
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
+  { path: "/dashboard", label: "ダッシュボード", icon: "🏠", perm: PERM.DEVICE_READ },
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
   { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
   { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
@@ -182,7 +184,8 @@ function Layout() {
       <main className="main-content">
         <Suspense fallback={<div className="page"><div className="page-body topo-muted">読み込み中...</div></div>}>
         <Routes>
-          <Route path="/" element={<Navigate to="/devices" replace />} />
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<RequirePerm perm={PERM.DEVICE_READ}><DashboardPage /></RequirePerm>} />
           <Route path="/devices" element={<RequirePerm perm={PERM.DEVICE_READ}><DevicesPage /></RequirePerm>} />
           <Route path="/topology" element={<RequirePerm perm={PERM.TOPOLOGY_READ}><TopologyPage /></RequirePerm>} />
           <Route path="/topology/:mapId" element={<RequirePerm perm={PERM.TOPOLOGY_READ}><TopologyPage /></RequirePerm>} />
@@ -200,7 +203,7 @@ function Layout() {
           <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
           <Route path="/system" element={<RequirePerm perm={PERM.SYSTEM_READ}><SystemPage /></RequirePerm>} />
-          <Route path="*" element={<Navigate to="/devices" replace />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
         </Suspense>
       </main>

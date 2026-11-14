@@ -18,7 +18,7 @@ export default function LoginPage() {
       await login(username, password);
       const next = params.get("next");
       // 外部サイトへのリダイレクトを防ぐため、同一サイト内のパスのみ許可
-      navigate(next && next.startsWith("/") && !next.startsWith("//") ? next : "/devices", { replace: true });
+      navigate(next && next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard", { replace: true });
     } catch (err) {
       setError(errorMessage(err, "ログインに失敗しました"));
     } finally {
