@@ -19,6 +19,7 @@ from app.api import (
     notifications,
     ping,
     schedules,
+    system,
     tasks,
     terminal,
     topology,
@@ -31,6 +32,7 @@ from app.core.database import AsyncSessionLocal, engine
 from app.core.migrate import run_migrations
 from app.core.permissions import Perm
 from app.models import Device
+from app.services import system as system_service
 from app.services.config_service import migrate_legacy_repo
 
 logging.basicConfig(level=logging.INFO)
@@ -73,14 +75,18 @@ async def lifespan(app: FastAPI):
     await _migrate_legacy_repos()
     async with AsyncSessionLocal() as db:
         await auth.ensure_initial_admin(db)
+    # worker・スケジューラーの停止などを検出して通知する（API のプロセスで動かす）
+    watchdog = asyncio.create_task(system_service.watchdog_loop()) if settings.SYSTEM_WATCHDOG_ENABLED else None
     yield
+    if watchdog:
+        watchdog.cancel()
     await engine.dispose()
 
 
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.27.2",
+    version="1.28.0",
     lifespan=lifespan,
 )
 
@@ -110,6 +116,7 @@ app.include_router(compliance.router, prefix="/api/compliance", tags=["complianc
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependencies=protected)
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"], dependencies=protected)
 app.include_router(ping.router, prefix="/api/ping", tags=["ping"], dependencies=protected)
+app.include_router(system.router, prefix="/api/system", tags=["system"], dependencies=protected)
 app.include_router(monitoring.router, prefix="/api/monitoring", tags=["monitoring"], dependencies=protected)
 app.include_router(
     notifications.router, prefix="/api/notifications", tags=["notifications"], dependencies=protected

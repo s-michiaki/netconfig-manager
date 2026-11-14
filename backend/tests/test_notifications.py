@@ -262,7 +262,8 @@ def test_violation_and_failure_notifications(ctx, sent):
     h = login(c, uname, "password-1234")
     hook = D.format(901, uid())
     # 内容を1つも選ばないとエラー
-    bad = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False}, headers=h)
+    bad = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False,
+                                                "on_system": False}, headers=h)
     assert bad.status_code == 422 and "通知する内容" in bad.json()["detail"]
     r = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False,
                                               "on_violation": True, "on_failure": True}, headers=h)

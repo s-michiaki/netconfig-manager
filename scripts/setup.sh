@@ -350,6 +350,33 @@ if [ "$READY" -ne 1 ]; then
 fi
 
 # =========================
+# 動作確認（収集などのバックグラウンド処理が実際に動くか）
+# =========================
+# API が応答していても、worker が Redis に接続できない・スケジューラーが起動していない状態では収集が動かない
+# （依存パッケージの更新で実際に起きた）。タスクを登録して worker が実行するか、スケジューラーからの
+# 定期実行が届くかまで確かめる。
+echo "[INFO] Checking background workers (worker / scheduler)..."
+# compose のサービス名のラベルでコンテナを探す（scripts/backup.sh と同じ方法）
+BACKEND_CT=$(sudo podman ps -q --filter "label=com.docker.compose.service=backend" | head -1 || true)
+if [ -z "$BACKEND_CT" ]; then
+  echo "[WARN] backend のコンテナが見つからないため、動作確認を省略しました"
+elif ! sudo podman exec "$BACKEND_CT" python -m app.tools.selfcheck 2>&1 | sed 's/^/  /'; then
+  echo ""
+  echo "❌ 画面は起動しましたが、コンフィグ収集などのバックグラウンド処理が動いていません"
+  echo ""
+  echo "■ コンテナ状態"
+  sudo podman ps -a --format '{{.Names}}\t{{.Status}}' | sed 's/^/  /'
+  for svc in worker beat; do
+    echo ""
+    echo "■ $svc のログ（末尾）"
+    sudo podman-compose -f "$COMPOSE_FILE" logs --tail 20 "$svc" 2>/dev/null | sed 's/^/  /' || true
+  done
+  echo ""
+  echo "画面の「システム状態」でも確認できます。原因が分からない場合は、上のログを開発者に伝えてください。"
+  exit 1
+fi
+
+# =========================
 # 完了
 # =========================
 echo ""
