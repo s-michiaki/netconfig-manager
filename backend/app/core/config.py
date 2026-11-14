@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     TERMINAL_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
     # 記録を DEVICE_ENCRYPTION_KEY で暗号化して保存する（.cast.enc）。false で従来どおり平文（.cast）
     TERMINAL_LOG_ENCRYPT: bool = True
+    # システムの状態の確認と異常の通知（services/system.py）
+    SYSTEM_WATCHDOG_ENABLED: bool = True  # API のプロセスで定期的に確認し、異常を通知する
+    SYSTEM_CHECK_INTERVAL_SEC: int = Field(default=60, ge=10)
+    SYSTEM_ALERT_AFTER_MIN: int = Field(default=10, ge=0)  # worker・スケジューラー・Redis の停止がこの分数続いたら通知
+    SYSTEM_STALE_DAYS: int = Field(default=7, ge=0)  # この日数以上収集できていない有効な機器を警告（0 で確認しない）
+    SYSTEM_CERT_ENDPOINT: str = "frontend:443"  # 期限を確認する HTTPS の接続先（空で確認しない）
     # ログインの失敗回数の制限（services/login_limit.py。0 で制限しない）
     LOGIN_MAX_FAILURES: int = 5  # 同じユーザー名・同じ接続元からの失敗の上限
     LOGIN_MAX_FAILURES_PER_IP: int = 20  # 同じ接続元からの失敗の上限（ユーザー名を問わない）

@@ -5,7 +5,8 @@
   - ユーザーの mode: inherit = 所属グループの設定を使う（既定。設定が無い場合も同じ）
                      custom  = 自分の通知先・対象を使う / off = 通知しない
 - 対象は機器のグループ（device_group_ids、未分類は include_ungrouped）。all_devices なら全機器
-- 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）
+- 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
+  on_system（システムの異常。対象の機器グループに関係なく送る）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
 import json
@@ -60,6 +61,8 @@ class NotificationSetting(Base):
     on_change: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_true())
     on_violation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     on_failure: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # システムの異常（worker・スケジューラーの停止、長期間収集できていない機器、証明書の期限など）。機器のグループに関係なく送る
+    on_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_true())
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -73,7 +76,7 @@ class NotificationSetting(Base):
         return [x for x in v if isinstance(x, str)]
 
     def wants(self, event: str) -> bool:
-        """この設定で通知する内容か（change / violation / failure）"""
+        """この設定で通知する内容か（change / violation / failure / system）"""
         return bool(getattr(self, f"on_{event}", False))
 
     def matches(self, device_group_id: str | None) -> bool:

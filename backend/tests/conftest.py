@@ -22,6 +22,8 @@ os.environ.update(
     ADMIN_USERNAME="admin",
     ADMIN_PASSWORD="initial-pass-123",
     ALLOWED_ORIGINS="",
+    SYSTEM_WATCHDOG_ENABLED="false",  # テストでは定期確認を動かさない（必要なテストが直接呼ぶ）
+    SYSTEM_CERT_ENDPOINT="",
 )
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))

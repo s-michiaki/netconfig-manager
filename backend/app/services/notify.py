@@ -1,6 +1,7 @@
 """通知（Discord / Slack の Webhook）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗
 
-通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure）。
+通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system）。
+on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
   有効なユーザーごとに:
@@ -48,10 +49,10 @@ WEBHOOK_RE = {
 TIMEOUT_SEC = 10
 MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
-EVENTS = ("change", "violation", "failure")
-EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知"}
+EVENTS = ("change", "violation", "failure", "system")
+EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
-                 "failure": "収集の失敗を通知しました"}
+                 "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
@@ -85,8 +86,11 @@ class Destination:
 
 
 async def resolve_destinations(db: AsyncSession, device_group_id: str | None,
-                               event: str = "change") -> list[Destination]:
-    """指定した機器グループ（None は未分類）の機器で event（change / violation / failure）が起きたときの通知先"""
+                               event: str = "change", any_group: bool = False) -> list[Destination]:
+    """指定した機器グループ（None は未分類）の機器で event（change / violation / failure）が起きたときの通知先。
+
+    any_group: 対象の機器グループを見ない（機器に結び付かない event = system 用）
+    """
     settings_rows = (await db.execute(select(NotificationSetting))).scalars().all()
     user_settings = {s.owner_id: s for s in settings_rows if s.owner_type == "user"}
     group_settings = {s.owner_id: s for s in settings_rows if s.owner_type == "group"}
@@ -108,12 +112,13 @@ async def resolve_destinations(db: AsyncSession, device_group_id: str | None,
         own = user_settings.get(u.id)
         mode = own.mode if own else "inherit"
         if mode == "custom":
-            if own.matches(device_group_id) and own.wants(event):
+            if (any_group or own.matches(device_group_id)) and own.wants(event):
                 add(own, f"ユーザー: {u.username}")
         elif mode == "inherit":
             for gid in memberships.get(u.id, []):
                 gs = group_settings.get(gid)
-                if gid in groups and gs and gs.mode == "custom" and gs.matches(device_group_id) and gs.wants(event):
+                if (gid in groups and gs and gs.mode == "custom" and gs.wants(event)
+                        and (any_group or gs.matches(device_group_id))):
                     add(gs, f"グループ: {groups[gid].name}")
     return list(dests.values())
 
@@ -349,6 +354,17 @@ async def notify_failure(db: AsyncSession, device_id: str, error: str, triggered
         (d, _message(d.kind, f"収集失敗: {device.name}", facts, url, "アクティビティを画面で確認", 0xFB923C), device)
         for d in dests
     ], ref)
+
+
+async def notify_system(db: AsyncSession, title: str, body: str, facts: list[tuple[str, str]] | None = None,
+                        ok: bool = False) -> dict:
+    """システムの異常・復旧を通知する（services/system.py のウォッチドッグから呼ぶ）"""
+    dests = await resolve_destinations(db, None, "system", any_group=True)
+    url = _page_url("/system")
+    return await _deliver(db, "system", [
+        (d, _message(d.kind, title, facts or [], url, "システムの状態を画面で確認", 0x34D399 if ok else 0xEF4444, body), None)
+        for d in dests
+    ], None)
 
 
 async def wants_any(db: AsyncSession, event: str) -> bool:

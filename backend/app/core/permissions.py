@@ -31,6 +31,7 @@ class Perm(str, Enum):
     PING_WRITE = "ping:write"  # Ping監視の対象IPの追加・変更・削除
     ACTIVITY_READ = "activity:read"  # アクティビティログ（収集の結果・違反の発生など）の閲覧
     NOTIFY_SELF = "notify:self"  # 自分の通知設定（コンフィグ変更の通知先・対象）の編集
+    SYSTEM_READ = "system:read"  # システムの状態（worker・スケジューラーの稼働など）の閲覧。admin のみ
     MONITOR_READ = "monitor:read"  # モニタリング（FW ルールのヒット数・帯域）の閲覧
 
 

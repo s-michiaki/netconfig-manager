@@ -21,6 +21,7 @@ interface Notification {
   on_change: boolean;
   on_violation: boolean;
   on_failure: boolean;
+  on_system: boolean;
   last_sent_at: string | null;
   last_error: string | null;
 }
@@ -47,11 +48,12 @@ function targetText(n: Notification, groups: DeviceGroup[]): string {
   return names.length ? names.join("・") : "（なし）";
 }
 
-type EventKey = "on_change" | "on_violation" | "on_failure";
+type EventKey = "on_change" | "on_violation" | "on_failure" | "on_system";
 const EVENT_OPTIONS: [EventKey, string, string][] = [
   ["on_change", "コンフィグの変更", "収集で設定の変更が見つかったとき"],
   ["on_violation", "コンプライアンス違反の発生", "新しく違反になったとき（同時に多数の機器が違反になったときは1通にまとめます）"],
   ["on_failure", "収集の失敗", "再試行しても収集できなかったとき"],
+  ["on_system", "システムの異常", "worker・スケジューラーの停止、長期間収集できていない機器、ディスク・証明書の期限など（対象の機器に関係なく通知）"],
 ];
 
 function eventsText(n: Notification): string {
@@ -70,14 +72,14 @@ interface FormState {
   discord: string; clearDiscord: boolean;
   slack: string; clearSlack: boolean;
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
-  on_change: boolean; on_violation: boolean; on_failure: boolean;
+  on_change: boolean; on_violation: boolean; on_failure: boolean; on_system: boolean;
 }
 
 function initForm(n: Notification | null): FormState {
   return {
     discord: "", clearDiscord: false, slack: "", clearSlack: false,
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
-    on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false,
+    on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false, on_system: n?.on_system ?? true,
   };
 }
 
@@ -90,7 +92,7 @@ function toPayload(mode: Mode, f: FormState) {
     all_devices: f.all_devices,
     device_group_ids: f.all_devices ? [] : f.device_group_ids,
     include_ungrouped: f.all_devices ? false : f.include_ungrouped,
-    on_change: f.on_change, on_violation: f.on_violation, on_failure: f.on_failure,
+    on_change: f.on_change, on_violation: f.on_violation, on_failure: f.on_failure, on_system: f.on_system,
   };
 }
 

@@ -39,6 +39,7 @@ const TerminalPage = lazyPage(() => import("./pages/TerminalPage"));
 const TopologyPage = lazyPage(() => import("./pages/TopologyPage"));
 const UsersPage = lazyPage(() => import("./pages/UsersPage"));
 const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
+const SystemPage = lazyPage(() => import("./pages/SystemPage"));
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
@@ -56,6 +57,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; featur
   { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
   { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
   { path: "/users", label: "ユーザー管理", icon: "👥", perm: PERM.USER_ADMIN },
+  { path: "/system", label: "システム状態", icon: "🩺", perm: PERM.SYSTEM_READ },
 ];
 
 function PasswordModal({ onClose }: { onClose: () => void }) {
@@ -121,6 +123,18 @@ function Layout() {
     }).catch(() => undefined);
   }, []);
 
+  // 管理者には、システムに異常・注意があることをメニューの印で知らせる（worker の停止などに気づけるように）
+  const [systemStatus, setSystemStatus] = useState<string>("ok");
+  const canSystem = can(PERM.SYSTEM_READ);
+  useEffect(() => {
+    if (!canSystem) return;
+    const check = () => api.get<{ overall: string }>("/system/status")
+      .then((r) => setSystemStatus(r.data.overall)).catch(() => undefined);
+    check();
+    const t = window.setInterval(check, 120_000);
+    return () => window.clearInterval(t);
+  }, [canSystem, location.pathname === "/system"]);
+
   const logout = () => {
     clearToken();
     window.location.href = "/login";
@@ -142,6 +156,10 @@ function Layout() {
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
+              {item.path === "/system" && systemStatus !== "ok" && (
+                <span className={`nav-alert${systemStatus === "error" ? " error" : ""}`}
+                      title={systemStatus === "error" ? "システムに異常があります" : "確認が必要な項目があります"} />
+              )}
             </Link>
           ))}
         </nav>
@@ -181,6 +199,7 @@ function Layout() {
           <Route path="/activity" element={<RequirePerm perm={PERM.ACTIVITY_READ}><ActivityPage /></RequirePerm>} />
           <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
+          <Route path="/system" element={<RequirePerm perm={PERM.SYSTEM_READ}><SystemPage /></RequirePerm>} />
           <Route path="*" element={<Navigate to="/devices" replace />} />
         </Routes>
         </Suspense>

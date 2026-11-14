@@ -758,3 +758,19 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .mon-err { color: var(--color-danger); display: inline-block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .mon-raw { width: min(900px, 94vw); }
 .mon-raw pre { max-height: 60vh; overflow: auto; background: var(--color-bg); padding: 10px; border-radius: 6px; font-size: 11px; white-space: pre; }
+
+/* ---- システム状態 ---- */
+.sys-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.sys-card { padding: 14px 16px; border-left: 3px solid var(--color-border); }
+.sys-card.sys-ok { border-left-color: var(--color-success); }
+.sys-card.sys-warn { border-left-color: var(--color-warning); }
+.sys-card.sys-error { border-left-color: var(--color-danger); }
+.sys-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.sys-summary { font-size: 13px; margin-bottom: 4px; }
+.sys-sub { font-size: 12px; color: var(--color-muted); margin-bottom: 4px; }
+.sys-list { font-size: 12px; margin: 4px 0 6px 18px; max-height: 160px; overflow: auto; }
+.sys-help { font-size: 11px; color: var(--color-muted); margin-top: 6px; }
+.nav-alert { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--color-warning); }
+.nav-alert.error { background: var(--color-danger); }
+.sys-card a, .sys-note a { color: var(--color-accent); }
+.sys-card a:hover, .sys-note a:hover { text-decoration: underline; }

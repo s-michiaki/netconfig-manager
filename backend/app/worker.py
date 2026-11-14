@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
-from app.services import fw_hits, monitoring
+from app.services import fw_hits, monitoring, system
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -56,6 +56,11 @@ celery_app.conf.update(
     timezone=settings.TIMEZONE,
     enable_utc=True,
     beat_schedule={
+        # スケジューラーと worker が動いていることの印（services/system.py が時刻を見て停止を検出する）
+        "system-heartbeat": {
+            "task": "app.worker.heartbeat",
+            "schedule": 60.0,
+        },
         "dispatch-due-schedules": {
             "task": "app.worker.dispatch_due_schedules",
             "schedule": 60.0,
@@ -484,6 +489,14 @@ def is_due(cron_expression: str, now: datetime) -> datetime | None:
     # croniter は「開始時刻より前」の発火時刻を返すため、1秒進めて丁度の時刻も拾う
     prev = croniter(cron_expression, now + timedelta(seconds=1)).get_prev(datetime)
     return prev if now - prev < SCHEDULE_WINDOW else None
+
+
+@celery_app.task
+def heartbeat(record: bool = True) -> str:
+    """beat が毎分投入する。実行できた時刻を残す（record=False は自己診断用で、時刻を残さない）"""
+    if record:
+        _redis().set(system.HEARTBEAT_KEY, utcnow().isoformat(), ex=86400)
+    return "ok"
 
 
 @celery_app.task

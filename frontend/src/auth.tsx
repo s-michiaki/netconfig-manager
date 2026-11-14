@@ -21,6 +21,7 @@ export const PERM = {
   NOTIFY_SELF: "notify:self",
   ACTIVITY_READ: "activity:read",
   MONITOR_READ: "monitor:read",
+  SYSTEM_READ: "system:read",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 

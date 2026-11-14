@@ -45,6 +45,7 @@ class NotificationIn(BaseModel):
     on_change: bool = True
     on_violation: bool = False
     on_failure: bool = False
+    on_system: bool = True
 
 
 class NotificationOut(BaseModel):
@@ -59,6 +60,7 @@ class NotificationOut(BaseModel):
     on_change: bool = True
     on_violation: bool = False
     on_failure: bool = False
+    on_system: bool = True
     last_sent_at: datetime | None = None
     last_error: str | None = None
 
@@ -115,7 +117,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         all_devices=s.all_devices,
         device_group_ids=s.group_ids,
         include_ungrouped=s.include_ungrouped,
-        on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure,
+        on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure, on_system=s.on_system,
         last_sent_at=s.last_sent_at,
         last_error=s.last_error,
     )
@@ -160,10 +162,11 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     s.device_group_ids = json.dumps(ids)
     s.include_ungrouped = p.include_ungrouped
     s.on_change, s.on_violation, s.on_failure = p.on_change, p.on_violation, p.on_failure
+    s.on_system = p.on_system
     changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped,
-                   on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure)
-    if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure):
-        raise HTTPException(status_code=422, detail="通知する内容（変更・違反・収集の失敗）を1つ以上選んでください")
+                   on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure, on_system=p.on_system)
+    if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system):
+        raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
     if p.mode == "custom" and not (s.discord_webhook or s.slack_webhook):
         raise HTTPException(status_code=422, detail="通知先（Discord または Slack の Webhook URL）を1つ以上登録してください")
     if p.mode == "custom" and not p.all_devices and not ids and not p.include_ungrouped:

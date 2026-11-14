@@ -3,7 +3,7 @@ import { login } from "./helpers";
 
 // 全画面を開いて、画面の読み込みや描画でエラーが出ないことを確認する（ルーター・遅延読み込みの更新時の確認用）
 const PAGES = ["/devices", "/topology", "/jump-hosts", "/collect", "/ping", "/history", "/terminal", "/schedules",
-  "/compliance", "/notifications", "/activity", "/audit", "/users"];
+  "/compliance", "/notifications", "/activity", "/audit", "/users", "/system"];
 
 test("すべての画面をエラーなく開ける", async ({ page }) => {
   const errors: string[] = [];

@@ -30,6 +30,8 @@ EVENTS: dict[str, tuple[str, str]] = {
     "notify.failed": ("通知の失敗", "error"),
     "monitor.fw_failed": ("FW ヒット数の取得失敗", "warning"),
     "system.purge": ("古いログの削除", "info"),
+    "system.alert": ("システムの異常", "error"),
+    "system.recovered": ("システムの復旧", "info"),
 }
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "monitor": "モニタリング",
