@@ -61,6 +61,8 @@ body {
 
 .sidebar-nav {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto; /* メニューが増えたので、低い画面ではメニューだけをスクロールする（下部のユーザー欄は残す） */
   padding: 10px 8px;
   display: flex;
   flex-direction: column;
@@ -69,6 +71,7 @@ body {
 
 .nav-item {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 9px;
   padding: 8px 10px;
@@ -800,3 +803,21 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .dash-banner { display: block; padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; text-decoration: none; }
 .dash-banner-error { background: var(--color-danger-dim); color: var(--color-danger); }
 .dash-banner-warn { background: var(--color-warning-dim, rgba(250, 204, 21, 0.12)); color: var(--color-warning); }
+
+/* ---- コンフィグ検索 ---- */
+.srch-check { display: flex; align-items: center; gap: 6px; font-size: 12px; padding-bottom: 8px; white-space: nowrap; }
+.srch-summary { font-size: 13px; margin-bottom: 12px; }
+.srch-device { padding: 0; margin-bottom: 12px; overflow: hidden; }
+.srch-device header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--color-border); font-size: 13px; flex-wrap: wrap; }
+.srch-device header a { color: var(--color-accent); text-decoration: none; }
+.srch-lines { font-size: 12px; padding: 6px 0; overflow-x: auto; }
+.srch-line { display: flex; gap: 12px; padding: 1px 14px; white-space: pre; }
+.srch-ctx { color: var(--color-muted); }
+.srch-no { width: 44px; flex-shrink: 0; text-align: right; color: var(--color-muted); user-select: none; }
+.srch-sep { border-top: 1px dashed var(--color-border); margin-top: 4px; padding-top: 4px; }
+.srch-lines mark { background: var(--color-warning-dim); color: var(--color-warning); border-radius: 2px; padding: 0 1px; }
+.srch-more { padding: 0 14px 10px; }
+.srch-note { font-size: 12px; border: 1px solid var(--color-border); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 10px; }
+.srch-note summary { cursor: pointer; }
+.srch-note-warn { border-color: var(--color-warning); color: var(--color-warning); }
+.srch-names { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
