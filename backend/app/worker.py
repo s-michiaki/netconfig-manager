@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
-from app.services import fw_hits, monitoring, system
+from app.services import fw_hits, inventory, monitoring, system
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -170,7 +170,28 @@ async def _save_result(
                            "seconds": seconds}, **kw)
         elif settings.ACTIVITY_LOG_UNCHANGED:
             record(db, "collect.unchanged", "変更はありませんでした", detail={"seconds": seconds}, **kw)
+        if result.success and result.inventory:
+            await _save_inventory(db, device_id, result.inventory, kw)
         await db.commit()
+
+
+async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dict) -> None:
+    """機器台帳を保存する。OS バージョンやシリアル番号が変わったら（バージョンアップ・機器の交換）記録に残す"""
+    d = await db.get(Device, device_id)
+    if d is None:
+        return
+    old = {f: getattr(d, f) for f in inventory.FIELDS}
+    for f in inventory.FIELDS:
+        if facts.get(f):  # 今回読み取れなかった項目は、前回の値を残す
+            setattr(d, f, facts[f])
+    d.inventory_at = utcnow()
+    diff = inventory.changes(old, facts)
+    if diff:
+        text = "、".join(f"{inventory.LABELS[f]}: {a} → {b}" for f, a, b in diff)
+        # シリアル番号・モデルが変わるのは機器の交換（または登録先の取り違え）なので、警告にする
+        level = "warning" if any(f in ("serial_number", "model") for f, _, _ in diff) else "info"
+        record(db, "inventory.changed", f"機器情報が変わりました（{text}）", level=level,
+               detail={f: {"before": a, "after": b} for f, a, b in diff}, **kw)
 
 
 async def _record(event: str, message: str, **kw) -> None:

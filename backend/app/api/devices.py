@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.api.monitoring import delete_device_monitoring
 from app.core.config import settings
+from app.core.csv_export import csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.core.ssh_keys import (
@@ -28,6 +30,7 @@ from app.core.ssh_keys import (
 )
 from app.models.compliance import ComplianceException, ComplianceResult
 from app.models.device import Device, DeviceGroup, JumpHost
+from app.services import inventory
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
 from app.worker import collect_all_devices, collect_device_config
@@ -124,6 +127,12 @@ class DeviceResponse(BaseModel):
     read_timeout: int | None = None
     group_id: str | None = None
     group_name: str | None = None
+    # 機器台帳（収集のときに自動で読み取る。未取得・対象外の機種は null）
+    model: str | None = None
+    serial_number: str | None = None
+    os_version: str | None = None
+    reported_hostname: str | None = None
+    inventory_at: datetime | None = None
 
 
 def _to_response(device: Device, names: dict[str, str] | None = None) -> DeviceResponse:
@@ -191,6 +200,21 @@ async def list_devices(db: AsyncSession = Depends(get_db)):
     return [_to_response(d, names) for d in result.scalars().all()]
 
 
+@router.get("/export", dependencies=[Depends(require(Perm.DEVICE_READ))])
+async def export_devices(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    """機器台帳を CSV で出力する（認証情報は含めない）"""
+    devices = (await db.execute(select(Device).order_by(Device.name))).scalars().all()
+    names = await _ref_names(db)
+    audit("device.export", detail={"rows": len(devices)})
+    await db.commit()
+    header = ["名前", "ホスト / IP", "ポート", "グループ", "機種", "モデル", "シリアル番号", "OS バージョン",
+              "機器側のホスト名", f"機器情報の取得日時（{settings.TIMEZONE}）", "踏み台", "有効", "説明"]
+    rows = [[d.name, d.hostname, d.port, names.get(d.group_id), PLATFORMS[d.platform].label if d.platform in PLATFORMS
+             else d.platform, d.model, d.serial_number, d.os_version, d.reported_hostname, d.inventory_at,
+             names.get(d.jump_host_id), d.is_active, d.description] for d in devices]
+    return csv_response(header, rows, export_name("devices"))
+
+
 @router.post(
     "/",
     response_model=DeviceResponse,
@@ -231,6 +255,7 @@ class PlatformInfo(BaseModel):
     icon: str
     supports_enable: bool
     note: str | None = None
+    inventory: bool = False  # 機器台帳（モデル・シリアル番号など）の自動取得に対応しているか
 
 
 # 注意: "/defaults" "/platforms" "/collect/all" は "/{device_id}" 系より先に定義する
@@ -244,7 +269,8 @@ async def device_defaults():
 async def list_platforms():
     """対応プラットフォームの一覧（画面の選択肢・表示名・構成図の既定アイコンに使う）"""
     return [
-        PlatformInfo(id=k, label=v.label, vendor=v.vendor, icon=v.icon, supports_enable=v.supports_enable, note=v.note)
+        PlatformInfo(id=k, label=v.label, vendor=v.vendor, icon=v.icon, supports_enable=v.supports_enable, note=v.note,
+                     inventory=inventory.supported(k))
         for k, v in PLATFORMS.items()
     ]
 

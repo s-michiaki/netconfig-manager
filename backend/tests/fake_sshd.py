@@ -20,6 +20,44 @@ PANOS_SET_CONFIG = (
 )
 
 
+# ---- 機器台帳（show version など）の出力。state["inventory"] に文字列を入れると差し替えられる
+CISCO_VERSION = (
+    "Cisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), Version 15.2(7)E7, RELEASE SOFTWARE (fc2)\r\n"
+    "Technical Support: http://www.cisco.com/techsupport\r\n\r\n"
+    "R1 uptime is 5 weeks, 2 days, 3 hours, 4 minutes\r\n"
+    'System image file is "flash:/c2960x-universalk9-mz.152-7.E7.bin"\r\n\r\n'
+    "cisco WS-C2960X-24TS-L (APM86XXX) processor (revision A0) with 524288K bytes of memory.\r\n"
+    "Processor board ID FOC1234X5YZ\r\n\r\n"
+    "Model number                    : WS-C2960X-24TS-L\r\n"
+    "System serial number            : FOC1234X5YZ\r\n"
+    "Configuration register is 0xF"
+)
+PANOS_SYSTEM_INFO = (
+    "hostname: PA-VM\r\nip-address: 192.0.2.1\r\nmac-address: 00:00:5e:00:53:01\r\ntime: Thu Oct 29 10:00:00 2026\r\n"
+    "uptime: 12 days, 3:04:05\r\nfamily: 220\r\nmodel: PA-220\r\nserial: 012801000001\r\n"
+    "sw-version: 10.1.9-h1\r\napp-version: 8700-8000\r\nmulti-vsys: off\r\noperational-mode: normal"
+)
+FORTI_STATUS = (
+    "Version: FortiGate-60F v7.2.5,build1517,230606 (GA.F)\r\nFirmware Signature: certified\r\n"
+    "Serial-Number: FGT60FTK20012345\r\nBIOS version: 05000007\r\nLog hard disk: Not available\r\n"
+    "Hostname: FGT60F\r\nOperation Mode: NAT\r\nVirtual domain configuration: disable\r\n"
+    "System time: Thu Oct 29 10:00:00 2026"
+)
+AWPLUS_SYSTEM = (
+    "Switch System Status                                   Thu Oct 29 10:00:00 2026\r\n\r\n"
+    "Board       ID  Bay   Board Name                         Rev   Serial number\r\n"
+    "--------------------------------------------------------------------------------\r\n"
+    "Base       400        x230-10GP                          B-0   A05050G144100001\r\n"
+    "--------------------------------------------------------------------------------\r\n"
+    "RAM:  Total: 247360 kB Free: 150000 kB\r\nFlash: 61.2MB Used: 30.0MB Available: 31.2MB\r\n"
+    "--------------------------------------------------------------------------------\r\n"
+    "Uptime                 : 10 days 03:04:05\r\nBootloader version     : 5.2.3\r\n\r\n"
+    "Current software   : x230-5.5.2-0.1.rel\r\nSoftware version   : 5.5.2-0.1\r\n"
+    "Build date         : Tue Nov 01 12:00:00 UTC 2022\r\n\r\n"
+    "System Name\r\n awplus\r\nSystem Contact\r\n\r\nSystem Location\r\n"
+)
+
+
 class Server(paramiko.ServerInterface):
     def __init__(self, cfg):
         self.cfg = cfg
@@ -74,10 +112,18 @@ def _lines(ch):
             yield line
 
 
-def _cisco(ch, pager=None):
+def _cisco(ch, pager=None, state=None):
+    state = state if state is not None else {}
     ch.send("R1#")
     for line in _lines(ch):
         out = ""
+        state.setdefault("commands", []).append(line.strip())
+        if line.strip() == "show version" and state.get("inventory_pager"):
+            # 台帳用のコマンドでページャーが出て止まる機器
+            ch.send(line + "\r\n" + "\r\n".join(CISCO_VERSION.split("\r\n")[:3]) + "\r\n --More-- ")
+            continue
+        if line.strip() == "show version":
+            out = state.get("inventory", CISCO_VERSION)
         if line.strip() == "show running-config" and pager:
             # ページングが無効化されていない機器: 途中でページャーが出て止まる
             ch.send(line + "\r\n" + "\r\n".join(CONFIG.split("\r\n")[:4]) + "\r\n" + pager)
@@ -105,7 +151,9 @@ def _panos(ch, state, login_delay=0.0):
         prompt = conf if in_conf else op
         out = ""
         if not in_conf:
-            if cmd == "show admins":
+            if cmd == "show system info":
+                out = state.get("inventory", PANOS_SYSTEM_INFO)
+            elif cmd == "show admins":
                 out = "Admin  From          Client Session-start\r\n-----------------------------------------\r\nadmin  192.0.2.10    CLI    10/29 10:00:00"
             elif cmd == "configure":
                 in_conf = True
@@ -168,6 +216,8 @@ def _fortinet(ch, state):
             out = "Virtual domain configuration: disable"
         elif cmd == "get system status | grep Version":
             out = "Version: FortiGate-60F v7.2.5,build1517,230606 (GA.F)"
+        elif cmd == "get system status":
+            out = state.get("inventory", FORTI_STATUS)
         elif cmd == "get system console":
             out = f"output              : {state['output']}\r\nlogin               : enable"
         elif cmd.startswith("config "):
@@ -226,6 +276,8 @@ def _awplus(ch, state, enable_password=None):
                 ch.send(line + "\r\nPassword: ")
                 continue
             priv = True
+        elif cmd == "show system":
+            out = state.get("inventory", AWPLUS_SYSTEM)
         elif cmd == "show running-config":
             if not priv:
                 out = "% Invalid input detected at '^' marker."
@@ -283,7 +335,7 @@ def handle(sock, key, state, cfg=None):
         elif cfg["mode"] == "generic":
             _generic(ch, state, cfg.get("prompt", "sw1#"), cfg.get("config_commands", ()))
         else:
-            _cisco(ch, cfg.get("pager"))
+            _cisco(ch, cfg.get("pager"), state)
     except Exception:  # noqa: BLE001
         pass
 

@@ -2,6 +2,7 @@ import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import { downloadCsv } from "../components/CsvButton";
 import { usePlatforms } from "../platforms";
 
 interface Device {
@@ -22,6 +23,22 @@ interface Device {
   group_name: string | null;
   jump_host_name: string | null;
   read_timeout: number | null;
+  // 機器台帳（収集のときに自動で読み取る。未取得・対象外の機種は null）
+  model: string | null;
+  serial_number: string | null;
+  os_version: string | null;
+  reported_hostname: string | null;
+  inventory_at: string | null;
+}
+
+/** 台帳の項目をカーソルを合わせたときに表示する文章 */
+function inventoryTitle(d: Device): string {
+  const at = d.inventory_at ? new Date(d.inventory_at.endsWith("Z") ? d.inventory_at : d.inventory_at + "Z").toLocaleString("ja-JP") : "";
+  return [
+    d.model && `モデル: ${d.model}`, d.os_version && `OS バージョン: ${d.os_version}`,
+    d.serial_number && `シリアル番号: ${d.serial_number}`, d.reported_hostname && `機器側のホスト名: ${d.reported_hostname}`,
+    at && `取得: ${at}`,
+  ].filter(Boolean).join("\n");
 }
 
 interface JumpHostOption { id: string; name: string; hostname: string; }
@@ -489,6 +506,12 @@ function DeviceCard({
       <p className="device-card-info" style={{ marginTop: 2 }}>
         {platformLabel(d.platform)} · port {d.port}
       </p>
+      {(d.model || d.os_version || d.serial_number) && (
+        <p className="device-card-info device-card-inv" style={{ marginTop: 2 }} title={inventoryTitle(d)}>
+          {[d.model, d.os_version].filter(Boolean).join(" · ") || d.serial_number}
+          {d.serial_number && (d.model || d.os_version) && <span className="device-card-serial"> S/N {d.serial_number}</span>}
+        </p>
+      )}
       {d.has_private_key && (
         <p className="device-card-info" style={{ marginTop: 2 }}>🔑 鍵認証{d.has_password ? "＋パスワード" : ""}</p>
       )}
@@ -613,7 +636,8 @@ export default function DevicesPage() {
   const visible = devices.filter((d) => {
     if (groupFilter === UNGROUPED ? d.group_id : groupFilter && d.group_id !== groupFilter) return false;
     if (!q) return true;
-    return `${d.name} ${d.hostname} ${d.description ?? ""}`.toLowerCase().includes(q);
+    return `${d.name} ${d.hostname} ${d.description ?? ""} ${d.model ?? ""} ${d.serial_number ?? ""} ${d.os_version ?? ""}`
+      .toLowerCase().includes(q);
   });
 
   // グループ別の表示: グループ（名前順）→ 未分類 の順。絞り込み中は該当するものだけ
@@ -645,6 +669,10 @@ export default function DevicesPage() {
       <div className="page-header">
         <span className="page-title">デバイス管理</span>
         <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" title="機器の一覧（モデル・シリアル番号・OS バージョンを含む）を CSV で出力します"
+            onClick={() => downloadCsv("/devices/export", {}, "devices.csv").catch((e) => setError(errorMessage(e)))}>
+            台帳 CSV
+          </button>
           {canWrite && <button className="btn" onClick={() => setManaging(true)}>グループの管理</button>}
           {canWrite && (
             <button className="btn" onClick={() => setModal({ device: null, groupId: groupFilter && groupFilter !== UNGROUPED ? groupFilter : undefined })}>
@@ -673,7 +701,7 @@ export default function DevicesPage() {
             {groups.map((g) => <option key={g.id} value={g.id}>{g.name}（{g.device_count}）</option>)}
             <option value={UNGROUPED}>未分類（{devices.filter((d) => !d.group_id).length}）</option>
           </select>
-          <input className="dev-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="名前・IPで検索" aria-label="名前・IPで検索" />
+          <input className="dev-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="名前・IP・モデル・S/N" aria-label="名前・IP・モデル・S/N" />
           <span className="topo-muted topo-small">{visible.length} / {devices.length}台</span>
           {canWrite && groups.length > 0 && (
             <button className={`btn${selecting ? " btn-primary" : ""}`} style={{ marginLeft: "auto" }}

@@ -75,6 +75,9 @@ class Settings(BaseSettings):
 
     # --- モニタリング（試験導入中。既定は無効） ---
     # FW ルールのヒット数（PAN-OS・FortiGate を SSH で取得）とインタフェースの帯域（SNMP）
+    # 機器台帳の自動取得（収集のついでに show version などを実行して、モデル・シリアル番号・OS バージョンを読み取る）
+    INVENTORY_ENABLED: bool = True
+    INVENTORY_TIMEOUT: int = Field(default=30, ge=5, le=600)  # 台帳用コマンドの応答待ち（秒）。機器の応答待ち時間が短ければそちら
     MONITORING_ENABLED: bool = False
     MONITOR_INTERVAL_SEC: int = Field(default=300, ge=60, le=3600)  # 帯域を取得する間隔
     MONITOR_RETENTION_DAYS: int = Field(default=30, ge=1, le=400)  # 帯域の記録を残す日数

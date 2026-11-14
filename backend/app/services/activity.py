@@ -28,13 +28,15 @@ EVENTS: dict[str, tuple[str, str]] = {
     "compliance.run": ("コンプライアンスチェックの実行", "info"),
     "notify.sent": ("通知の送信", "info"),
     "notify.failed": ("通知の失敗", "error"),
+    "inventory.changed": ("機器情報の変化", "info"),
     "monitor.fw_failed": ("FW ヒット数の取得失敗", "warning"),
     "system.purge": ("古いログの削除", "info"),
     "system.alert": ("システムの異常", "error"),
     "system.recovered": ("システムの復旧", "info"),
 }
 CATEGORIES = {
-    "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "monitor": "モニタリング",
+    "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
+    "monitor": "モニタリング",
     "system": "システム",
 }
 LEVELS = ("info", "warning", "error")

@@ -49,6 +49,22 @@ def main() -> None:
             "version": detail["version"],
             "data": {"nodes": nodes, "edges": [{"id": f"e{i}", "source": "n0", "target": f"n{i}"} for i in (1, 2)]},
         })
+    # 機器台帳（実際は収集のときに読み取る）。Core-SW01 だけ取得済みにしておく
+    import asyncio
+
+    from sqlalchemy import update
+
+    from app.core.database import AsyncSessionLocal
+    from app.core.timeutil import utcnow
+    from app.models.device import Device
+
+    async def inventory() -> None:
+        async with AsyncSessionLocal() as db:
+            await db.execute(update(Device).where(Device.name == "Core-SW01").values(
+                model="C9300-24T", serial_number="FCW2245L0AB", os_version="17.06.05", reported_hostname="Core-SW01",
+                inventory_at=utcnow()))
+            await db.commit()
+    asyncio.run(inventory())
     print("seeded")
 
 

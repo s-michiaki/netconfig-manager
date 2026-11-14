@@ -70,6 +70,12 @@ class Device(Base):
     group_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("device_groups.id", name="fk_devices_group_id"), nullable=True
     )
+    # 機器台帳（収集のときに show version などから自動で読み取る。services/inventory.py）
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    serial_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    os_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reported_hostname: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 機器に設定されているホスト名
+    inventory_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最後に読み取れた日時
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

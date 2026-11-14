@@ -25,6 +25,7 @@ from app.core.config import settings
 from app.core.ssh_hostkeys import HostKeyPolicy, UnknownHostKeyError, describe_ssh_error
 from app.core.ssh_jump import JumpHostError, JumpHostInfo, connect_jump, open_tunnel
 from app.core.ssh_keys import PrivateKeyError, load_private_key
+from app.services import inventory
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +308,7 @@ class CollectResult:
     error: str | None = None
     retryable: bool = False
     first: bool = False  # 初めての取得（変更ではないので通知しない）
+    inventory: dict | None = None  # 機器台帳（モデル・シリアル番号など）。読み取れなかった・対象外なら None
 
     def as_dict(self) -> dict:
         return {
@@ -405,9 +407,21 @@ def save_config(device_id: str, config_text: str, triggered_by: str) -> CollectR
 # ---------------------------------------------------------------- Collect
 
 
-def fetch_config(device: DeviceConnectionInfo) -> str:
-    """機器に接続してコンフィグを取得する（生の出力。normalize_config の前）"""
-    def work(conn, spec: PlatformSpec, read_timeout: int) -> str:
+def _gather_inventory(conn, device: DeviceConnectionInfo, read_timeout: int) -> dict | None:
+    """コンフィグの取得後に、同じセッションで機器台帳を読み取る。失敗しても収集は失敗にしない"""
+    if not settings.INVENTORY_ENABLED or not inventory.supported(device.platform):
+        return None
+    timeout = min(read_timeout, settings.INVENTORY_TIMEOUT)
+    try:
+        return inventory.gather(device.platform, lambda cmd: _send(conn, cmd, timeout))
+    except Exception as e:  # noqa: BLE001 - 台帳は付加情報。コンフィグは取得済みなので収集は成功として扱う
+        logger.warning("機器台帳を取得できませんでした: %s (%s: %s)", device.name, type(e).__name__, e)
+        return None
+
+
+def fetch_config(device: DeviceConnectionInfo) -> tuple[str, dict | None]:
+    """機器に接続してコンフィグを取得する（生の出力。normalize_config の前）。あわせて機器台帳も読み取る"""
+    def work(conn, spec: PlatformSpec, read_timeout: int) -> tuple[str, dict | None]:
         output = []
         for cmd in spec.commands:
             output.append(_send(conn, cmd, read_timeout))
@@ -418,7 +432,7 @@ def fetch_config(device: DeviceConnectionInfo) -> str:
                     output.append(_send(conn, cmd, read_timeout))
             finally:
                 conn.exit_config_mode()
-        return "\n".join(output)
+        return "\n".join(output), _gather_inventory(conn, device, read_timeout)
 
     return _with_session(device, work)
 
@@ -544,7 +558,7 @@ def describe_failure(e: BaseException, device: DeviceConnectionInfo) -> tuple[st
 def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manual") -> CollectResult:
     """同期的にコンフィグを収集する（Celeryワーカーから呼び出す）"""
     try:
-        raw = fetch_config(device)
+        raw, facts = fetch_config(device)
     except Exception as e:  # noqa: BLE001
         msg, retryable = describe_failure(e, device)
         return CollectResult(success=False, error=msg, retryable=retryable)
@@ -554,7 +568,9 @@ def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manua
         return CollectResult(success=False, error="取得したコンフィグが空でした")
 
     try:
-        return save_config(device.id, config_text, triggered_by)
+        result = save_config(device.id, config_text, triggered_by)
+        result.inventory = facts
+        return result
     except Exception as e:  # noqa: BLE001
         logger.exception("Gitへの保存に失敗: %s", device.name)
         return CollectResult(success=False, error=f"保存に失敗しました: {type(e).__name__}")

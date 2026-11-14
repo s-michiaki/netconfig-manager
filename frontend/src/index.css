@@ -208,6 +208,8 @@ body {
 .device-card:hover { border-color: var(--color-accent); background: var(--color-surface2); }
 .device-card-name { font-size: 14px; font-weight: 600; margin: 6px 0 2px; }
 .device-card-info { font-size: 11px; color: var(--color-muted); }
+.device-card-inv { color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-card-serial { color: var(--color-muted); }
 
 /* ===== ターミナル ===== */
 .terminal-container {

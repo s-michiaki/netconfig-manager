@@ -372,6 +372,26 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 
 1 分ごとに自動で更新します。
 
+## 機器台帳の自動取得
+
+コンフィグを収集するときに、同じ SSH セッションで機種ごとの表示コマンドを実行し、**モデル・シリアル番号・OS バージョン・機器側のホスト名**を読み取ってデバイス管理に表示します（手で入力する必要はありません）。
+
+| 機種 | 実行するコマンド |
+|---|---|
+| Cisco IOS / IOS-XE / NX-OS / ASA、Arista EOS | `show version` |
+| Juniper JunOS | `show version`、`show chassis hardware` |
+| Fortinet FortiGate | `get system status` |
+| Palo Alto PAN-OS | `show system info` |
+| Allied Telesis AlliedWare Plus | `show system` |
+| Yamaha RTX | `show environment` |
+
+- 読み取り専用のコマンドだけを、コンフィグを取得し終えたあとに実行します。台帳の取得に失敗しても収集は成功として扱い、前回の値を残します（応答待ちは最長 `INVENTORY_TIMEOUT` 秒、既定 30 秒）
+- 上の表に無い機種では何も実行しません（対応の追加は `backend/app/services/inventory.py` の `SPECS`）
+- **OS バージョン・シリアル番号・モデルが前回と変わると、アクティビティに「機器情報の変化」として残します**（バージョンアップの記録。シリアル番号・モデルの変化は機器の交換か登録先の取り違えなので警告）
+- デバイス管理の「台帳 CSV」で、機器の一覧（グループ・機種・モデル・シリアル番号・OS バージョンなど。認証情報は含めません）を出力できます。検索欄はモデル・シリアル番号でも絞り込めます
+- 機器に追加のコマンドを送りたくない場合は `.env` に `INVENTORY_ENABLED=false`（変更後は `setup.sh`）
+- FortiGate の VDOM 構成・スタック構成の 2 台目以降・実機ごとの出力の違いには未対応の場合があります。読み取れない項目は空欄になります
+
 ## コンフィグ検索
 
 全機器の**最後に収集したコンフィグ**を横断して検索します（閲覧者以上）。「この IP アドレス・VLAN・ACL はどの機器にあるか」「この設定が入っていない機器はどれか」を調べるための画面です。
@@ -477,6 +497,7 @@ API が応答していても、worker やスケジューラーが止まってい
 | システム状態（worker・スケジューラーの稼働など）の閲覧 | | | ✓ |
 | ダッシュボードの閲覧 | ✓ | ✓ | ✓ |
 | コンフィグの横断検索 | ✓ | ✓ | ✓ |
+| 機器台帳（モデル・シリアル番号など）の閲覧・CSV 出力 | ✓ | ✓ | ✓ |
 
 - 割り当ては `backend/app/core/permissions.py` の `ROLE_PERMISSIONS` だけで定義しています。変更する場合はここを編集してください（画面の表示も `/api/auth/me` が返す権限に従って自動で切り替わります）
 - 権限チェックはすべてサーバー側で行います。新しいAPIを追加するときは `dependencies=[Depends(require(Perm.XXX))]` を付けてください（付け忘れはテスト `test_every_protected_route_declares_a_permission` で検出されます）
@@ -667,6 +688,7 @@ netconfig-manager/
 │           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
 │           ├── compliance.py    # コンプライアンスの評価エンジン（例外の適用を含む）
 │           ├── config_search.py # コンフィグの横断検索（最新コンフィグを1行ずつ照合、時間制限つき）
+│           ├── inventory.py     # 機器台帳の自動取得（機種ごとのコマンドと show version などの読み取り）
 │           ├── activity.py      # アクティビティログの記録とイベントの一覧
 │           ├── audit.py         # 操作履歴の記録・ターミナルの記録（asciicast）・保持期間
 │           ├── login_limit.py   # ログインの失敗回数の制限（Redis）
