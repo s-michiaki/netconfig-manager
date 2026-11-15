@@ -34,6 +34,7 @@ x-backend-env: &backend-env
   SYSTEM_ALERT_AFTER_MIN: ${SYSTEM_ALERT_AFTER_MIN:-10}
   SYSTEM_STALE_DAYS: ${SYSTEM_STALE_DAYS:-7}
   SYSTEM_CERT_ENDPOINT: ${SYSTEM_CERT_ENDPOINT:-frontend:443}
+  BACKUP_STALE_HOURS: ${BACKUP_STALE_HOURS:-36}
   # 機器台帳の自動取得（収集のついでに show version などを実行）
   INVENTORY_ENABLED: ${INVENTORY_ENABLED:-true}
   # モニタリング（試験導入。既定は無効）

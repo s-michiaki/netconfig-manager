@@ -187,3 +187,111 @@ def test_watchdog_stale_devices_and_cert(ctx, monkeypatch):
     monkeypatch.setattr(system, "fetch_cert_expiry", lambda h, p: base + timedelta(days=300))
     assert ("cert", "recovered") in tick(wd, base)
     c.put("/api/notifications/me", json={"mode": "off", "slack_webhook": ""}, headers=admin)  # ほかのテストに残さない
+
+
+def report(*argv):
+    from app.tools import backup_report
+    assert asyncio.run(backup_report.main(list(argv))) == 0
+
+
+def ok_args(**kw):
+    args = {"--status": "ok", "--file": "netconfig-backup-20261115-031500.tar.gz", "--size": "2097152",
+            "--seconds": "8", "--dir": "/var/backups/netconfig-manager"}
+    args.update(kw)
+    return ["result", *[x for kv in args.items() for x in kv]]
+
+
+def set_backup_at(when):
+    """最後の結果・最後の成功の時刻をずらす（時間がたったことにする）"""
+    async def run():
+        state = await system.load_backup_state()
+        for k in ("last", "last_success"):
+            if state.get(k):
+                state[k]["at"] = when.isoformat()
+        await system.save_backup_state(state)
+    asyncio.run(run())
+
+
+def test_backup_status(ctx, monkeypatch):
+    c, admin = ctx["c"], ctx["admin"]
+    monkeypatch.setattr(settings, "BACKUP_STALE_HOURS", 36)
+    beat()
+    # 記録が無い（バックアップを使っていない・開発環境）→ 確認できない扱いで、全体の状態に影響しない
+    data, comp = by_key(c, admin)
+    assert comp["backup"]["status"] == "unknown" and data["overall"] == "ok"
+    assert data["settings"]["backup_stale_hours"] == 36
+
+    report(*ok_args(**{"--copy": "ok", "--copy-dir": "/mnt/nas/netconfig"}))
+    b = by_key(c, admin)[1]["backup"]
+    assert b["status"] == "ok" and "2.0 MB" in b["summary"] and "外部へのコピーも成功" in b["summary"]
+    assert b["detail"]["last"]["copy_dir"] == "/mnt/nas/netconfig" and b["detail"]["last_success"]["size"] == 2097152
+    acts = c.get("/api/activity/logs", params={"category": "backup"}, headers=admin).json()["items"]
+    assert acts[0]["event"] == "backup.completed" and "/mnt/nas/netconfig" in acts[0]["message"]
+
+    # 外部へのコピーだけ失敗 → 注意
+    report(*ok_args(**{"--copy": "failed", "--copy-dir": "/mnt/nas", "--message": "コピー先がありません"}))
+    b = by_key(c, admin)[1]["backup"]
+    assert b["status"] == "warn" and "外部へのコピーに失敗" in b["summary"] and "コピー先がありません" in b["summary"]
+    report(*ok_args(**{"--post": "failed", "--message": "BACKUP_POST_COMMAND が失敗しました"}))
+    assert "後処理のコマンドに失敗" in by_key(c, admin)[1]["backup"]["summary"]
+
+    # 失敗 → 異常。最後の成功は残る
+    report("result", "--status", "failed", "--message", "「DB のダンプ」で失敗しました")
+    data, comp = by_key(c, admin)
+    assert comp["backup"]["status"] == "error" and "DB のダンプ" in comp["backup"]["summary"]
+    assert comp["backup"]["detail"]["last_success"]["file"].startswith("netconfig-backup-")
+    assert data["overall"] == "error"
+    events = [x["event"] for x in c.get("/api/activity/logs", params={"category": "backup"}, headers=admin).json()["items"]]
+    assert events[:3] == ["backup.failed", "backup.offsite_failed", "backup.offsite_failed"]
+
+    # 長い間成功していない → 注意（0 で確認しない。タイマーを無効にしたときも確認しない）
+    report(*ok_args())
+    set_backup_at(utcnow() - timedelta(hours=40))
+    b = by_key(c, admin)[1]["backup"]
+    assert b["status"] == "warn" and "40 時間バックアップが成功していません" in b["summary"]
+    monkeypatch.setattr(settings, "BACKUP_STALE_HOURS", 0)
+    assert by_key(c, admin)[1]["backup"]["status"] == "ok"
+    monkeypatch.setattr(settings, "BACKUP_STALE_HOURS", 36)
+    report("schedule", "off")
+    assert by_key(c, admin)[1]["backup"]["status"] == "ok"
+
+
+def test_backup_schedule_without_records(ctx, monkeypatch):
+    c, admin = ctx["c"], ctx["admin"]
+    monkeypatch.setattr(settings, "BACKUP_STALE_HOURS", 36)
+    report("schedule", "off")
+    b = by_key(c, admin)[1]["backup"]
+    assert b["status"] == "unknown" and "無効" in b["summary"]
+    # タイマーを登録したのに、一度も結果が届かない → 36 時間たったら注意
+    report("schedule", "on", "--calendar", "*-*-* 03:15:00")
+    assert by_key(c, admin)[1]["backup"]["status"] == "unknown"
+    report("schedule", "on")  # setup.sh を再実行しても、登録した時刻は変わらない
+    since = asyncio.run(system.load_backup_state())["schedule"]["since"]
+
+    async def comp(now):
+        return await system.check_backup(now)
+    b = asyncio.run(comp(utcnow() + timedelta(hours=37)))
+    assert b.status == "warn" and "実行の記録が届いていません" in b.summary
+    assert asyncio.run(system.load_backup_state())["schedule"]["since"] == since
+
+
+def test_watchdog_backup_alerts(ctx, monkeypatch):
+    c, admin, sent = ctx["c"], ctx["admin"], ctx["sent"]
+    monkeypatch.setattr(settings, "SYSTEM_STALE_DAYS", 0)
+    monkeypatch.setattr(settings, "BACKUP_STALE_HOURS", 36)
+    c.put("/api/notifications/me", json={"mode": "custom", "slack_webhook": SLACK, "on_change": False, "on_system": True},
+          headers=admin)
+    beat()
+    wd, now = system.Watchdog(), utcnow()
+    assert tick(wd, now) == []  # 記録なしは通知しない
+    report(*ok_args())
+    assert tick(wd, now) == [] and not sent
+    report("result", "--status", "failed", "--message", "「DB のダンプ」で失敗しました")
+    assert tick(wd, now) == [("backup", "alert")]  # 猶予なしですぐに通知
+    assert "バックアップ" in sent[-1][2]["text"] and "DB のダンプ" in sent[-1][2]["text"]
+    assert tick(wd, now) == []  # 同じ失敗は繰り返さない
+    report("result", "--status", "failed", "--message", "もう一度失敗")
+    assert tick(wd, now) == [("backup", "alert")]  # 次の回の失敗は、続けて失敗していても知らせる
+    report(*ok_args())
+    assert tick(wd, now) == [("backup", "recovered")] and "復旧" in sent[-1][2]["text"]
+    c.put("/api/notifications/me", json={"mode": "off", "slack_webhook": ""}, headers=admin)  # ほかのテストに残さない

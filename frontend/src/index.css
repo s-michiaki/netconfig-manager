@@ -814,6 +814,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .sys-summary { font-size: 13px; margin-bottom: 4px; }
 .sys-sub { font-size: 12px; color: var(--color-muted); margin-bottom: 4px; }
 .sys-list { font-size: 12px; margin: 4px 0 6px 18px; max-height: 160px; overflow: auto; }
+.sys-wrap { overflow-wrap: anywhere; }
 .sys-help { font-size: 11px; color: var(--color-muted); margin-top: 6px; }
 .nav-alert { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--color-warning); }
 .nav-alert.error { background: var(--color-danger); }

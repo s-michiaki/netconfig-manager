@@ -160,18 +160,44 @@ bash /opt/netconfig-manager/scripts/import_cert.sh
 `setup.sh` が systemd タイマー（`netconfig-backup.timer`）を登録し、毎日 `scripts/backup.sh` でバックアップを取ります。
 
 - **内容**: DB（`pg_dump`）・コンフィグ履歴（機器ごとの Git リポジトリ）・SSH の known_hosts・ターミナルの記録・`.env`・証明書（`certs/`）を1つのファイル `netconfig-backup-<日時>.tar.gz` にまとめます
-- **保存先**: `/var/backups/netconfig-manager/`（root だけが読める）。`.env` の `BACKUP_DIR` で変更できます。サーバーの故障に備えて、別ディスク・NFS など**サーバーの外**にも置いてください
+- **保存先**: `/var/backups/netconfig-manager/`（root だけが読める）。`.env` の `BACKUP_DIR` で変更できます。サーバーの故障に備えて、下の「サーバー外への保管」で**サーバーの外**にも置いてください
 - **保存期間**: `BACKUP_KEEP_DAYS`（既定 14 日）より古いものを削除します（最新の1つは必ず残します）
 - **実行時刻**: `BACKUP_ON_CALENDAR`（systemd の OnCalendar 形式。既定 `*-*-* 03:15:00`、`off` で無効）。変更後は `setup.sh` を実行すると反映されます
 - ターミナルの記録を含めない場合は `BACKUP_TERMINAL_LOGS=false`
-- バックアップには `.env`（`DEVICE_ENCRYPTION_KEY`）が含まれ、機器のパスワードを復号できます。持ち出すときは取り扱いに注意してください
+- バックアップには `.env`（`DEVICE_ENCRYPTION_KEY`）と証明書の秘密鍵が含まれ、機器のパスワードを復号できます。持ち出すときは取り扱いに注意してください
 
 ```bash
 sudo bash /opt/netconfig-manager/scripts/backup.sh          # 今すぐ実行
-sudo bash /opt/netconfig-manager/scripts/backup.sh --list   # 一覧
+sudo bash /opt/netconfig-manager/scripts/backup.sh --list   # 一覧（コピー先の一覧と最後の結果も表示）
 systemctl list-timers netconfig-backup.timer                # 次回の実行
 journalctl -u netconfig-backup.service                      # 実行結果
 ```
+
+**サーバー外への保管**（`.env` に書きます。どれもホストの `backup.sh` だけが読む設定で、コンテナには渡しません）
+
+> **注意: 外部へ置くバックアップにも `.env`（暗号化キー `DEVICE_ENCRYPTION_KEY`）と証明書の秘密鍵が入っています。** 手に入れた人は、DB の中の機器のパスワードを復号できます。コピー先は root 相当の人だけが読める場所にしてください（コピー先のディレクトリも 700。NFS は `root_squash` と export する相手の制限、SMB は専用のアカウント）。ファイルは root だけが読める（600）ままコピーします。
+
+| 設定 | 既定 | 内容 |
+|---|---|---|
+| `BACKUP_COPY_DIR` | （空＝コピーしない） | NAS などを**マウントした場所**へ、作ったバックアップをコピーします |
+| `BACKUP_COPY_REQUIRE_MOUNT` | `true` | コピー先が `BACKUP_DIR`・`/` と別のディスクでなければコピーしません（マウントが外れていると、マウント先のはずのディレクトリ＝サーバーのディスクへ書いてしまうため）。同じディスクの別の場所へ置くのが意図した構成なら `false` |
+| `BACKUP_COPY_KEEP_DAYS` | `BACKUP_KEEP_DAYS` と同じ | コピー先の保存日数（最新の1つは必ず残します。ほかのファイルは消しません） |
+| `BACKUP_POST_COMMAND` | （空） | 作成後に実行するコマンド。作ったファイルのパスは `$BACKUP_FILE`。rsync・scp・クラウドへの転送などに使います（root で実行し、1 時間で打ち切ります） |
+
+```bash
+# 例1: NFS をマウントしてコピー（/etc/fstab に書いて起動時にマウント）
+#   nas.example.local:/volume1/netconfig  /mnt/nas-backup  nfs  defaults,_netdev  0 0
+sudo mkdir -p /mnt/nas-backup && sudo chmod 700 /mnt/nas-backup && sudo mount /mnt/nas-backup
+#   .env: BACKUP_COPY_DIR=/mnt/nas-backup
+
+# 例2: rsync（SSH 鍵は root の ~/.ssh に用意し、一度手動で接続して known_hosts に登録しておく）
+#   .env: BACKUP_POST_COMMAND=rsync -t "$BACKUP_FILE" backup@nas.example.local:/volume1/netconfig/
+```
+
+- コピーやコマンドに失敗しても、サーバー内のバックアップは残ります（終了コード 2。systemd の状態は「failed」になります）
+- 外部のバックアップから戻すときは、ファイルをサーバーへコピーして `restore.sh` に渡します（形式は同じです）
+
+**結果の確認と通知**: `backup.sh` は結果を backend のコンテナ（`python -m app.tools.backup_report`）に伝えます。画面「システム状態」の「バックアップ」に最後の成功の日時・保存先・サイズ・外部コピーの結果を表示し、失敗・外部への保管の失敗・`BACKUP_STALE_HOURS`（既定 36 時間）以上成功していないときは「システムの異常」として通知します（下の「システム状態」）。サーバーにも `BACKUP_DIR/last-result.json` に最後の結果を残します（`--list` で表示）。
 
 **復元**（現在のデータはすべてバックアップの時点に置き換わります）
 
@@ -455,6 +481,7 @@ API が応答していても、worker やスケジューラーが止まってい
 | 収集の状況 | `SYSTEM_STALE_DAYS`（既定 7 日）以上収集できていない有効な機器 | 注意として機器名を表示 |
 | ディスクの空き | コンフィグ履歴・ターミナルの記録の保存先（15% 未満で注意、5% 未満で異常） | 収集結果を保存できなくなる |
 | HTTPS の証明書 | 期限（30 日以内で注意、7 日以内で異常） | 画面を開けなくなる |
+| バックアップ | `scripts/backup.sh` の最後の結果（最後の成功の日時・保存先・サイズ・外部コピーの結果）。失敗で異常、外部への保管の失敗・`BACKUP_STALE_HOURS`（既定 36 時間）以上成功していないときは注意 | サーバーが壊れたときに戻せない |
 
 注意・異常があるときは、管理者のメニューの「システム状態」に印（黄・赤）が付きます。
 
@@ -467,6 +494,7 @@ API が応答していても、worker やスケジューラーが止まってい
 - 同じ異常を繰り返し通知することはなく、復旧したときにもう一度通知します。発生と復旧はアクティビティ（システム）にも残ります
 - 確認は API のコンテナ（backend）が行うため、worker・スケジューラーが止まっていても通知できます。backend 自体やサーバーが止まった場合は通知できません（外部からの死活監視には `/api/health` を使ってください）
 - 収集しない機器が警告に出る場合は、その機器を「無効」にするか、`SYSTEM_STALE_DAYS=0` で確認を止めます。通知全体を止めるには `SYSTEM_WATCHDOG_ENABLED=false`
+- バックアップは、失敗するたびに（続けて失敗しても毎回）通知します。結果の記録が一度も無い環境（バックアップを使っていない・開発環境）では確認しません。ただし `setup.sh` でタイマーを登録したのに `BACKUP_STALE_HOURS` を過ぎても結果が届かないときは注意にします。`BACKUP_ON_CALENDAR` を週 1 回などにした場合は `BACKUP_STALE_HOURS` を間隔より長く（例: 192）し、確認しない場合は 0 にします
 
 ### 更新後の自動確認
 
@@ -482,7 +510,8 @@ API が応答していても、worker やスケジューラーが止まってい
 | スケジュール | スケジュールの実行（種類・対象）、Cron 式が不正で実行できないとき（1時間に1回まで） |
 | コンプライアンス | 違反の発生・解消・例外による除外・例外の期限切れ（機器・ルール・重要度・該当箇所）、スケジュールでの検査の結果（台数・新しい違反・解消の件数）。ルールの追加などで一度に 30 件を超えて変わったときは1件にまとめる |
 | 通知 | 変更・違反・収集失敗の通知の送信と失敗（送信先の種類と誰の設定か。URL は残さない） |
-| システム | 保持期間を過ぎたログの削除 |
+| システム | 保持期間を過ぎたログの削除、システムの異常と復旧 |
+| バックアップ | バックアップの完了（ファイル名・保存先・外部へのコピー先）・失敗（どこで失敗したか）・外部への保管の失敗 |
 
 - 「きっかけ」には、手動の収集なら実行したユーザー名、スケジュールなら「スケジュール「名前」」、自動処理なら「システム」を記録します
 - 種類・重要度（情報・警告・エラー）・機器・キーワード・期間で絞り込めます。行をクリックすると詳細（世代へのリンク・違反箇所など）を表示します
@@ -718,7 +747,7 @@ netconfig-manager/
 │   ├── check_env.sh             # 導入前チェック
 │   ├── import_cert.sh           # HTTPS 化（証明書の取り込み）
 │   ├── lock_deps.sh             # backend の依存のロックファイルの生成・確認（uv）
-│   ├── backup.sh                # バックアップ（setup.sh が毎日実行するよう登録）
+│   ├── backup.sh                # バックアップ（setup.sh が毎日実行するよう登録）・サーバー外へのコピー・結果の報告
 │   └── restore.sh               # バックアップからの復元
 ├── backend/
 │   ├── Dockerfile
@@ -734,6 +763,7 @@ netconfig-manager/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
 │       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック・モニタリングの定期取得）
 │       ├── tools/
+│       │   ├── backup_report.py # バックアップの結果をアプリに記録（backup.sh・setup.sh が podman exec で実行）
 │       │   ├── encrypt_recordings.py  # 既存の平文のターミナル記録を暗号化（podman exec で実行）
 │       │   └── selfcheck.py     # 更新後の自己診断（worker・スケジューラーが動くか。setup.sh が実行）
 │       ├── core/
@@ -841,7 +871,7 @@ netconfig-manager/
 
 - **認証強化**: LDAP/AD 連携、MFA、機器グループ単位の権限
 - **通知機能の拡張**: メール・Microsoft Teams への通知、一括収集で多数の機器が失敗したときのまとめ通知
-- **バックアップの拡張**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push、バックアップの外部ストレージ（S3 など）への転送
+- **バックアップの拡張**: config_repo を外部 Git サーバー (GitLab/Gitea) へ push、外部へ置くバックアップの暗号化（または `.env`・証明書を別にして外部コピーの対象から外す）、S3 などへの転送の組み込み（今は `BACKUP_POST_COMMAND` で対応）
 - **パスワード管理**: HashiCorp Vault 連携
 - **踏み台の多段化**: 2段以上の踏み台経由（現在は1段まで）
 - **Ping監視の拡張**: 結果の履歴保存・グラフ、応答なしが続いたときの通知、踏み台経由の PING、構成図への死活状態の表示

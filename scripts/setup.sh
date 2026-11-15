@@ -366,12 +366,15 @@ sudo systemctl enable --now podman-restart.service
 # 実行時刻は .env の BACKUP_ON_CALENDAR（systemd の OnCalendar 形式、既定 毎日 03:15）。off で無効
 BACKUP_ON_CALENDAR=$( (grep -E '^BACKUP_ON_CALENDAR=' "$INSTALL_DIR/.env" 2>/dev/null || true) | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')
 BACKUP_ON_CALENDAR="${BACKUP_ON_CALENDAR:-*-*-* 03:15:00}"
+BACKUP_TIMER=""  # on / off（最後にアプリへ伝える。画面「システム状態」で、登録したのに動いていないことに気づけるように）
 if [ "$BACKUP_ON_CALENDAR" = "off" ]; then
   echo "[INFO] 定期バックアップは無効です（BACKUP_ON_CALENDAR=off）"
   sudo systemctl disable --now netconfig-backup.timer 2>/dev/null || true
+  BACKUP_TIMER="off"
 elif ! systemd-analyze calendar "$BACKUP_ON_CALENDAR" >/dev/null 2>&1; then
   echo "[WARN] BACKUP_ON_CALENDAR の形式が正しくありません（$BACKUP_ON_CALENDAR）。定期バックアップの設定をスキップします"
 else
+  BACKUP_TIMER="on"
   echo "[INFO] Enabling scheduled backup ($BACKUP_ON_CALENDAR)..."
   sudo tee /etc/systemd/system/netconfig-backup.service >/dev/null <<UNIT
 [Unit]
@@ -449,6 +452,12 @@ elif ! sudo podman exec "$BACKEND_CT" python -m app.tools.selfcheck 2>&1 | sed '
   exit 1
 fi
 
+# 定期バックアップの登録状況をアプリへ伝える（失敗しても更新は続ける）
+if [ -n "$BACKEND_CT" ] && [ -n "$BACKUP_TIMER" ]; then
+  sudo podman exec "$BACKEND_CT" python -m app.tools.backup_report schedule "$BACKUP_TIMER" --calendar "$BACKUP_ON_CALENDAR" \
+    >/dev/null 2>&1 || echo "[WARN] 定期バックアップの登録状況を画面に伝えられませんでした（バックアップ自体は動きます）"
+fi
+
 # =========================
 # 完了
 # =========================
@@ -485,6 +494,8 @@ echo "■ バックアップ（毎日自動。保存先は .env の BACKUP_DIR�
 echo "今すぐ実行: sudo bash $INSTALL_DIR/scripts/backup.sh  / 一覧: sudo bash $INSTALL_DIR/scripts/backup.sh --list"
 echo "次回の実行: systemctl list-timers netconfig-backup.timer"
 echo "復元: sudo bash $INSTALL_DIR/scripts/restore.sh <バックアップファイル>"
+echo "サーバー外への保管: .env の BACKUP_COPY_DIR（NAS などをマウントした場所）・BACKUP_POST_COMMAND（README「バックアップと復元」）"
+echo "結果: 画面の「システム状態」（失敗したときは「システムの異常」の通知先へ送ります）"
 echo ""
 echo "■ コンテナ状態"
 echo "sudo podman ps"

@@ -31,3 +31,14 @@ test("試験導入中のモニタリングは既定では表示されない", as
   const res = await page.request.get("/api/health");
   expect((await res.json()).features?.monitoring).toBe(false);
 });
+
+test("システム状態にバックアップの項目があり、記録の無い環境では警告にしない", async ({ page }) => {
+  // 画面テストの環境ではバックアップ（scripts/backup.sh）を使っていないので「—」（確認できない）になる
+  await login(page);
+  await page.goto("/system");
+  const card = page.locator(".sys-card", { hasText: "バックアップ" });
+  await expect(card).toBeVisible();
+  await expect(card.locator(".badge")).toHaveText("—");
+  await expect(card).toContainText("定期バックアップ");
+  await expect(page.locator(".sys-note")).toContainText("バックアップは失敗するたびに通知");
+});

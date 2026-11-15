@@ -1,4 +1,4 @@
-"""システムの状態（worker・スケジューラー・Redis・DB の稼働、収集の状況、ディスク、証明書）"""
+"""システムの状態（worker・スケジューラー・Redis・DB の稼働、収集の状況、ディスク、証明書、バックアップ）"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,5 +15,5 @@ router = APIRouter()
 async def status(db: AsyncSession = Depends(get_db)):
     data = system.to_dict(await system.collect_status(db))
     data["settings"] = {"watchdog": settings.SYSTEM_WATCHDOG_ENABLED, "alert_after_min": settings.SYSTEM_ALERT_AFTER_MIN,
-                        "stale_days": settings.SYSTEM_STALE_DAYS}
+                        "stale_days": settings.SYSTEM_STALE_DAYS, "backup_stale_hours": settings.BACKUP_STALE_HOURS}
     return data

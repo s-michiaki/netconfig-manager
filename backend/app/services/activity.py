@@ -33,11 +33,14 @@ EVENTS: dict[str, tuple[str, str]] = {
     "system.purge": ("古いログの削除", "info"),
     "system.alert": ("システムの異常", "error"),
     "system.recovered": ("システムの復旧", "info"),
+    "backup.completed": ("バックアップ完了", "info"),
+    "backup.failed": ("バックアップ失敗", "error"),
+    "backup.offsite_failed": ("外部へのコピーの失敗", "warning"),
 }
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
     "monitor": "モニタリング",
-    "system": "システム",
+    "system": "システム", "backup": "バックアップ",
 }
 LEVELS = ("info", "warning", "error")
 SYSTEM_ACTOR = "システム"

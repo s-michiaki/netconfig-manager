@@ -13,6 +13,9 @@
   collect  : SYSTEM_STALE_DAYS 日以上収集できていない有効な機器
   disk     : コンフィグ履歴・ターミナルの記録の保存先の空き
   cert     : HTTPS の証明書の期限
+  backup   : 定期バックアップ（scripts/backup.sh）の結果。backup.sh が backend コンテナの
+             app.tools.backup_report を呼んで Redis に書いた記録を読む。記録が無い環境（バックアップを
+             使っていない・開発環境）では unknown にして、警告も通知もしない
 
 ウォッチドッグは **API のプロセス**で動かす（worker / beat が止まっていても検出・通知できるように）。
 - worker / beat / redis の異常は SYSTEM_ALERT_AFTER_MIN 分続いたら通知する（再起動中の一時的な停止では通知しない）
@@ -43,12 +46,13 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_KEY = "netconfig:system:heartbeat"  # beat → worker の heartbeat タスクが書く時刻（UTC の ISO 形式）
 STATE_KEY = "netconfig:system:alerts"  # 通知済みの状態（項目ごと）
+BACKUP_KEY = "netconfig:system:backup"  # バックアップの記録（最後の結果・最後の成功・タイマーの登録状況。JSON）
 BEAT_STALE_SEC = 180  # heartbeat（毎分）がこの秒数より古ければ、スケジューラーが止まっているとみなす
 DISK_WARN_PCT, DISK_ERROR_PCT = 15, 5
 CERT_WARN_DAYS, CERT_ERROR_DAYS = 30, 7
 RANK = {"unknown": 0, "ok": 0, "warn": 1, "error": 2}
 # 通知する項目（db は、止まっていると通知先も読めないため対象外）
-ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert")
+ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup")
 GRACE_KEYS = ("redis", "worker", "beat")  # 一時的な停止では通知しない項目
 
 
@@ -210,6 +214,104 @@ async def check_cert(now: datetime) -> Component:
     return Component("cert", label, st, f"期限まであと {days} 日{hint}", detail)
 
 
+# ---------------------------------------------------------------- バックアップ
+
+
+async def load_backup_state() -> dict:
+    raw = await login_limit.client().get(BACKUP_KEY)
+    try:
+        state = json.loads(raw) if raw else {}
+    except ValueError:
+        state = {}
+    return state if isinstance(state, dict) else {}
+
+
+async def save_backup_state(state: dict) -> None:
+    await login_limit.client().set(BACKUP_KEY, json.dumps(state, ensure_ascii=False))
+
+
+async def record_backup_result(result: dict) -> dict:
+    """backup.sh の結果を記録する（app.tools.backup_report から呼ぶ）。最後の成功は失敗しても引き継ぐ"""
+    state = await load_backup_state()
+    state["last"] = result
+    if result.get("status") == "ok":
+        state["last_success"] = result
+    await save_backup_state(state)
+    return state
+
+
+async def record_backup_schedule(enabled: bool, calendar: str | None, now: datetime) -> None:
+    """setup.sh がタイマーを登録・解除したことを記録する（登録したのに一度も届かないことに気づけるように）"""
+    state = await load_backup_state()
+    prev = state.get("schedule") or {}
+    since = prev.get("since") if prev.get("enabled") == enabled else None
+    state["schedule"] = {"enabled": enabled, "calendar": calendar, "since": since or now.isoformat()}
+    await save_backup_state(state)
+
+
+def _parse_at(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _size_text(size) -> str:
+    try:
+        n = float(size)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return "—"
+
+
+async def check_backup(now: datetime, redis_ok: bool = True) -> Component:
+    label = "バックアップ"
+    hours = settings.BACKUP_STALE_HOURS
+    if not redis_ok:
+        return Component("backup", label, "unknown", "Redis に接続できないため確認できません")
+    try:
+        state = await load_backup_state()
+    except (RedisError, OSError):
+        return Component("backup", label, "unknown", "Redis に接続できないため確認できません")
+    last, ok, schedule = state.get("last") or {}, state.get("last_success") or {}, state.get("schedule") or {}
+    enabled = schedule.get("enabled")  # True / False / None（setup.sh からの連絡が無い）
+    detail = {"last": last or None, "last_success": ok or None, "schedule": schedule or None, "stale_hours": hours}
+    if not last:
+        since = _parse_at(schedule.get("since"))
+        if enabled and hours > 0 and since and now - since > timedelta(hours=hours):
+            return Component("backup", label, "warn",
+                             f"定期バックアップを登録してから {int((now - since).total_seconds() // 3600)} 時間、"
+                             "実行の記録が届いていません（systemctl status netconfig-backup.timer で確認してください）",
+                             detail, items=["never"])
+        if enabled is False:
+            return Component("backup", label, "unknown", "定期バックアップは無効です（BACKUP_ON_CALENDAR=off）", detail)
+        return Component("backup", label, "unknown", "バックアップの記録はまだありません", detail)
+    at = last.get("at") or ""
+    if last.get("status") != "ok":
+        msg = last.get("message") or "原因はサーバーの journalctl -u netconfig-backup.service で確認してください"
+        return Component("backup", label, "error", f"前回のバックアップに失敗しました: {msg}", detail,
+                         items=[f"failed:{at}"])
+    ok_at = _parse_at(ok.get("at"))
+    if enabled is not False and hours > 0 and ok_at and now - ok_at > timedelta(hours=hours):
+        return Component("backup", label, "warn",
+                         f"{int((now - ok_at).total_seconds() // 3600)} 時間バックアップが成功していません"
+                         "（タイマーが止まっている可能性があります）", detail, items=["stale"])
+    failed = [name for key, name in (("copy", "外部へのコピー"), ("post", "後処理のコマンド"))
+              if last.get(key) == "failed"]
+    if failed:
+        msg = last.get("message") or ""
+        return Component("backup", label, "warn",
+                         f"サーバー内には保存しましたが、{'と'.join(failed)}に失敗しました" + (f": {msg}" if msg else ""),
+                         detail, items=[f"offsite:{at}"])
+    copied = "。外部へのコピーも成功" if last.get("copy") == "ok" else ""
+    return Component("backup", label, "ok", f"前回のバックアップは成功しました（{_size_text(last.get('size'))}{copied}）",
+                     detail)
+
+
 async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[Component]:
     now = now or utcnow()
     database = await check_db(db)
@@ -218,7 +320,7 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     out = [database, redis_c, worker, check_beat(heartbeat, worker, now)]
     if database.status == "ok":
         out += [await check_schedules(db), await check_collect(db, now)]
-    return [*out, check_disk(), await check_cert(now)]
+    return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok")]
 
 
 def overall(components: list[Component]) -> str:
