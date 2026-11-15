@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { downloadCsv } from "../components/CsvButton";
+import DeviceImportModal from "../components/DeviceImportModal";
 import { usePlatforms } from "../platforms";
 
 interface Device {
@@ -540,6 +541,7 @@ export default function DevicesPage() {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [modal, setModal] = useState<{ device: Device | null; groupId?: string } | null>(null);
   const [managing, setManaging] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [collecting, setCollecting] = useState(false);
   const [message, setMessage] = useState("");
   const [jumpHosts, setJumpHosts] = useState<JumpHostOption[]>([]);
@@ -666,6 +668,10 @@ export default function DevicesPage() {
           onClose={() => setModal(null)} onSave={load} />
       )}
       {managing && <GroupManagerModal groups={groups} onClose={() => setManaging(false)} onChanged={load} />}
+      {importing && (
+        <DeviceImportModal onClose={() => setImporting(false)}
+          onDone={(n) => { load(); setError(""); setMessage(`CSV から ${n} 台を登録しました。取り込んだ CSV ファイルは削除してください。`); }} />
+      )}
       <div className="page-header">
         <span className="page-title">デバイス管理</span>
         <div style={{ display: "flex", gap: 8 }}>
@@ -673,6 +679,11 @@ export default function DevicesPage() {
             onClick={() => downloadCsv("/devices/export", {}, "devices.csv").catch((e) => setError(errorMessage(e)))}>
             台帳 CSV
           </button>
+          {canWrite && (
+            <button className="btn" title="CSV ファイルから複数の機器をまとめて登録します" onClick={() => setImporting(true)}>
+              CSV 取り込み
+            </button>
+          )}
           {canWrite && <button className="btn" onClick={() => setManaging(true)}>グループの管理</button>}
           {canWrite && (
             <button className="btn" onClick={() => setModal({ device: null, groupId: groupFilter && groupFilter !== UNGROUPED ? groupFilter : undefined })}>

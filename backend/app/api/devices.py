@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -30,7 +30,7 @@ from app.core.ssh_keys import (
 )
 from app.models.compliance import ComplianceException, ComplianceResult
 from app.models.device import ConfigComment, Device, DeviceGroup, JumpHost
-from app.services import inventory
+from app.services import device_import, inventory
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
 from app.worker import collect_all_devices, collect_device_config
@@ -258,7 +258,69 @@ class PlatformInfo(BaseModel):
     inventory: bool = False  # 機器台帳（モデル・シリアル番号など）の自動取得に対応しているか
 
 
-# 注意: "/defaults" "/platforms" "/collect/all" は "/{device_id}" 系より先に定義する
+# 注意: "/defaults" "/platforms" "/collect/all" "/import" は "/{device_id}" 系より先に定義する
+@router.get("/import/template", dependencies=[Depends(require(Perm.DEVICE_WRITE))])
+async def import_template():
+    """CSV 一括登録のひな形（見出しは台帳 CSV とそろえ、認証情報の列を足したもの）"""
+    header, rows = device_import.template_rows()
+    return csv_response(header, rows, "device_import_template.csv")
+
+
+@router.post("/import", dependencies=[Depends(require(Perm.DEVICE_WRITE))])
+async def import_devices(
+    file: UploadFile = File(...),
+    dry_run: bool = Form(True),  # 既定は確認だけ（うっかり登録しないように）
+    skip_errors: bool = Form(False),  # True: エラーの行を飛ばして正しい行だけ登録する
+    on_duplicate: Literal["skip", "error"] = Form("skip"),  # 既にある機器と名前が同じ行の扱い
+    db: AsyncSession = Depends(get_db),
+    audit: Audit = Depends(get_audit),
+):
+    """CSV から機器をまとめて登録する。dry_run=true は確認だけで DB を変えない
+
+    本登録でも必ず検証し直す（確認から登録までの間に機器が増えることがあるため）。
+    結果・エラー・監査ログにはパスワードなどの認証情報を入れない
+    """
+    raw = await file.read(device_import.MAX_IMPORT_BYTES + 1)
+    if len(raw) > device_import.MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=422, detail="ファイルが大きすぎます（1MB まで）。ファイルを分けてください")
+    try:
+        text, encoding = device_import.decode(raw)
+        parsed = device_import.parse(text)
+    except device_import.ImportFormatError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    del raw, text
+    results = await device_import.validate(db, parsed, on_duplicate)
+    counts = {s: sum(r.status == s for r in results) for s in ("ok", "error", "skip")}
+    created: list[Device] = []
+    if not dry_run and counts["ok"] and (skip_errors or not counts["error"]):
+        for r in results:
+            if r.status != "ok" or r.data is None:
+                continue
+            data = {**r.data, "private_key": None, "key_passphrase": None}
+            data["enable_secret"] = data.get("enable_secret") or None
+            device = Device(id=str(uuid.uuid4()), **data)
+            db.add(device)
+            created.append(device)
+            audit("device.create", target_type="device", target_id=device.id, target_name=device.name,
+                  detail={"hostname": device.hostname, "platform": device.platform, "port": device.port,
+                          "username": device.username, "jump_host_id": device.jump_host_id,
+                          "group_id": device.group_id, "auth": ["password"], "via": "csv"})
+        audit("device.import", detail={"rows": len(results), "created": len(created), "skipped": counts["skip"],
+                                       "errors": counts["error"], "skip_errors": skip_errors,
+                                       "on_duplicate": on_duplicate, "encoding": encoding,
+                                       "names": [d.name for d in created[:30]]})
+        try:
+            await db.commit()
+        except IntegrityError as e:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="ほかの操作で同じ名前の機器が登録されました。"
+                                                        "もう一度「内容を確認」からやり直してください") from e
+    return {
+        "dry_run": dry_run, "encoding": encoding, "total": len(results), **counts,
+        "created": len(created), "registered": bool(created), "ignored_columns": parsed.ignored_columns,
+        "rows": [r.public() for r in results],
+    }
+
 @router.get("/defaults", response_model=DeviceDefaults, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def device_defaults():
     """画面表示用の既定値（応答待ち時間など）"""

@@ -73,6 +73,13 @@ test("CSP を付けても全画面・書き出し・ダウンロード・WebSock
   await page.goto("/devices");
   const [csv] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "台帳 CSV" }).click()]);
   expect(await csv.path()).toBeTruthy();
+  // ファイルの送信（CSV 一括登録の確認だけ。multipart/form-data で送る。登録はしない）
+  await page.getByRole("button", { name: "CSV 取り込み" }).click();
+  await page.locator(".imp-modal input[type=file]").setInputFiles({
+    name: "d.csv", mimeType: "text/csv", buffer: Buffer.from("名前,ホスト / IP,機種,ユーザー名,パスワード\nCSP-X,192.0.2.1,cisco_ios,u,p\n") });
+  await page.getByRole("button", { name: "内容を確認" }).click();
+  await expect(page.locator(".imp-summary")).toContainText("登録できる 1 件");
+  await page.locator(".imp-modal").getByRole("button", { name: "閉じる" }).click();
 
   // 構成図の書き出し（PNG・PDF）と印刷（新しいウィンドウに <style> と data: の画像を書き込む）
   await page.goto("/topology");

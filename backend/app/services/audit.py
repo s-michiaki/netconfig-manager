@@ -39,6 +39,7 @@ ACTIONS = {
     "device.create": "機器登録",
     "device.update": "機器変更",
     "device.export": "機器台帳の CSV 出力",
+    "device.import": "機器の CSV 一括登録",
     "device.delete": "機器削除",
     "device_group.create": "グループ作成",
     "device_group.update": "グループ変更",

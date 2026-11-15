@@ -863,3 +863,25 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .srch-note summary { cursor: pointer; }
 .srch-note-warn { border-color: var(--color-warning); color: var(--color-warning); }
 .srch-names { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* ---- 機器の CSV 一括登録 ---- */
+.imp-modal { width: 880px; }
+.imp-warn { background: var(--color-warning-dim); border: 1px solid var(--color-warning); color: var(--color-warning); padding: 10px 12px; border-radius: var(--radius); margin-bottom: 12px; font-size: 13px; line-height: 1.6; }
+.imp-help { margin-bottom: 12px; line-height: 1.6; }
+.imp-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.imp-file { font-size: 12px; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
+.imp-options { border: none; display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; margin-bottom: 12px; }
+.imp-options legend { font-size: 12px; color: var(--color-muted); margin-bottom: 4px; }
+.imp-options label, .imp-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.imp-options input, .imp-check input { width: auto; }
+.imp-check { font-size: 13px; margin-top: 10px; }
+.imp-summary { font-size: 13px; margin-bottom: 8px; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.imp-table-wrap { max-height: 40vh; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius); margin-top: 8px; }
+.imp-table-wrap .data-table td { vertical-align: top; font-size: 12px; }
+.imp-table-wrap .data-table th { white-space: nowrap; }
+.imp-row-skip td { color: var(--color-muted); }
+.imp-msg { font-size: 12px; margin-top: 3px; }
+.imp-ok { color: var(--color-success); }
+.imp-ng { color: var(--color-danger); }
+.imp-warn-text { color: var(--color-warning); }
+.imp-platforms { columns: 2; font-size: 12px; margin: 8px 0 0 16px; }
