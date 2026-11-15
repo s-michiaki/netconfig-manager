@@ -1,19 +1,29 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
+from app.core.config import settings
+from app.core.csv_export import content_disposition
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import Device, DeviceGroup
 from app.services import config_search
+from app.services.audit import Audit, get_audit
 from app.services.config_service import (
+    MAX_COMPARE_LINES,
+    compare_texts,
     get_config_content,
     get_config_diff,
     get_config_history,
+    get_config_version,
+    has_config,
 )
 
 router = APIRouter()
@@ -21,9 +31,55 @@ router = APIRouter()
 HASH_PATTERN = r"^[0-9a-fA-F]{7,40}$"
 
 
-async def _ensure_device(db: AsyncSession, device_id: str) -> None:
-    if not await db.get(Device, device_id):
+async def _ensure_device(db: AsyncSession, device_id: str) -> Device:
+    device = await db.get(Device, device_id)
+    if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+    return device
+
+
+async def _load_version(db: AsyncSession, device_id: str, commit_hash: str | None, side: str) -> tuple[Device, dict]:
+    """比較する片側（機器と世代）を読み込む。見つからない理由をメッセージで分ける"""
+    device = await db.get(Device, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"比較{side}の機器が見つかりません")
+    version = await run_in_threadpool(get_config_version, device_id, commit_hash)
+    if version is None:
+        if not await run_in_threadpool(has_config, device_id):
+            raise HTTPException(status_code=404, detail=f"比較{side}の機器（{device.name}）はまだコンフィグを収集していません")
+        raise HTTPException(status_code=404, detail=f"比較{side}の機器（{device.name}）に指定した世代が見つかりません")
+    if version["content"].count("\n") > MAX_COMPARE_LINES:
+        raise HTTPException(
+            status_code=422, detail=f"比較{side}のコンフィグが大きすぎるため比較できません（{MAX_COMPARE_LINES} 行まで）"
+        )
+    return device, version
+
+
+def _side(device: Device, version: dict) -> dict:
+    return {"device_id": device.id, "name": device.name, "hash": version["hash"], "full_hash": version["full_hash"],
+            "date": version["date"]}
+
+
+# /{device_id}/... より前に定義する（パスの形は違うが、読み違えを避けるため）
+@router.get("/compare", dependencies=[Depends(require(Perm.CONFIG_READ))])
+async def compare_configs(
+    device_a: str = Query(..., max_length=36),
+    device_b: str = Query(..., max_length=36),
+    hash_a: str | None = Query(None, pattern=HASH_PATTERN),
+    hash_b: str | None = Query(None, pattern=HASH_PATTERN),
+    db: AsyncSession = Depends(get_db),
+):
+    """2 台の機器（または同じ機器）の世代どうしの差分を返す。世代を省略すると最新を使う"""
+    dev_a, ver_a = await _load_version(db, device_a, hash_a, "元")
+    dev_b, ver_b = await _load_version(db, device_b, hash_b, "先")
+    diff, truncated = await run_in_threadpool(
+        compare_texts, ver_a["content"], ver_b["content"],
+        f"{dev_a.name} ({ver_a['hash']})", f"{dev_b.name} ({ver_b['hash']})",
+    )
+    res = {"diff": diff, "a": _side(dev_a, ver_a), "b": _side(dev_b, ver_b), "truncated": truncated}
+    if not diff:
+        res["message"] = "変更なし"
+    return res
 
 
 @router.get("/{device_id}/history", dependencies=[Depends(require(Perm.CONFIG_READ))])
@@ -70,6 +126,29 @@ async def get_content(
     if content is None:
         raise HTTPException(status_code=404, detail="Config not found")
     return content
+
+
+@router.get("/{device_id}/download/{commit_hash}", dependencies=[Depends(require(Perm.CONFIG_READ))])
+async def download_config(
+    device_id: str,
+    commit_hash: str = Path(..., pattern=HASH_PATTERN),
+    db: AsyncSession = Depends(get_db),
+    audit: Audit = Depends(get_audit),
+):
+    """指定した世代のコンフィグをテキストファイルとしてダウンロードする（ファイルとして持ち出すので監査ログに残す）"""
+    device = await _ensure_device(db, device_id)
+    version = await run_in_threadpool(get_config_version, device_id, commit_hash)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Config not found")
+    body = version["content"].encode("utf-8")
+    # ファイル名は 機器名_世代の日時_ハッシュ8桁.txt（同じ世代なら何度保存しても同じ名前）
+    at = datetime.fromisoformat(version["date"]).astimezone(ZoneInfo(settings.TIMEZONE)).strftime("%Y%m%d-%H%M%S")
+    filename = f"{device.name}_{at}_{version['hash']}.txt"
+    audit("config.download", target_type="device", target_id=device.id, target_name=device.name,
+          detail={"commit": version["full_hash"], "bytes": len(body)})
+    await db.commit()
+    return Response(content=body, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": content_disposition(filename)})
 
 
 class SearchRequest(BaseModel):

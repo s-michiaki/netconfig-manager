@@ -49,6 +49,7 @@ const CATEGORIES: [string, string][] = [
   ["jump_host.", "踏み台"],
   ["schedule.", "スケジュール"],
   ["collect.", "収集"],
+  ["config.", "コンフィグ"],
   ["terminal.", "ターミナル"],
   ["topology.", "構成図"],
   ["compliance.", "コンプライアンス"],

@@ -256,6 +256,28 @@ body {
 .diff-add { color: #3fb950; }
 .diff-del { color: #f85149; }
 .diff-meta { color: #8b949e; }
+.diff-view > div { white-space: pre-wrap; } /* 行頭の空白（字下げ）を詰めない */
+
+/* ===== 世代管理（比較・保存） ===== */
+.hist-table td { vertical-align: middle; }
+.hist-picked td { background: rgba(79, 142, 247, 0.08); }
+.hist-mark {
+  margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600;
+  background: var(--color-accent-dim); color: var(--color-text);
+}
+.hist-actions { display: flex; gap: 4px; flex-wrap: nowrap; }
+.hist-compare { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+.hist-side {
+  font-size: 11px; font-weight: 700; color: var(--color-accent);
+  border: 1px solid var(--color-accent-dim); border-radius: 4px; padding: 1px 6px;
+}
+.hist-compare-grid {
+  display: grid; grid-template-columns: auto 200px 230px auto; gap: 8px; align-items: center;
+  justify-content: start; margin-bottom: 8px;
+}
+.hist-devname { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.hist-note { color: var(--color-muted); font-size: 12px; margin: 0 0 10px; }
+.hist-title { font-size: 11px; color: var(--color-text); margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ===== プログレスバー ===== */
 .progress-wrap {

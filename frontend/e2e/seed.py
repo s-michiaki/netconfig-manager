@@ -37,6 +37,8 @@ def main() -> None:
                                                    "username": "admin", "password": "pw", "group_id": group["id"]})
             devs[name] = d
             cs.save_config(d["id"], (CONFIG_NG if ng else CONFIG_OK).format(name=name), "manual")
+        # 世代の比較用に Core-SW01 だけ 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
+        cs.save_config(devs["Core-SW01"]["id"], CONFIG_OK.format(name="Core-SW01") + "logging host 10.0.9.9\n", "schedule")
         # ルールを作ると収集済みのコンフィグを検査する（SW-2F・DC-SW01 が違反）
         call("POST", "/compliance/rules", h, json={
             "name": "HTTP サーバーの無効化", "severity": "medium", "match_type": "regex", "expect": "absent",

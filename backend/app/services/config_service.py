@@ -630,3 +630,50 @@ def get_config_content(device_id: str, commit_hash: str) -> str | None:
     except (KeyError, ValueError, git.BadName, git.GitCommandError):
         return None
     return blob.data_stream.read().decode("utf-8", errors="replace")
+
+
+def get_config_version(device_id: str, commit_hash: str | None = None) -> dict | None:
+    """指定した世代（省略時は最新）のコンフィグと世代の情報。リポジトリ・世代が無い場合は None"""
+    if commit_hash is not None:
+        _check_hash(commit_hash)
+    repo = _open_repo(device_id)
+    if repo is None:
+        return None
+    try:
+        commit = repo.commit(commit_hash) if commit_hash else repo.head.commit
+        blob = commit.tree[CONFIG_FILENAME]
+    except (KeyError, ValueError, AttributeError, git.BadName, git.BadObject, git.GitCommandError):
+        return None
+    return {
+        "hash": commit.hexsha[:8],
+        "full_hash": commit.hexsha,
+        "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).isoformat(),
+        "content": blob.data_stream.read().decode("utf-8", errors="replace"),
+    }
+
+
+def has_config(device_id: str) -> bool:
+    """1 世代でもコンフィグを保存しているか"""
+    return bool(get_config_history(device_id, 1))
+
+
+MAX_COMPARE_LINES = 50_000  # 比較できるコンフィグの行数（片方あたり）
+MAX_DIFF_LINES = 20_000  # 返す差分の行数（超えた分は切り捨てて truncated を付ける）
+
+
+def _diff_label(label: str) -> str:
+    # 差分の見出し行が崩れないよう、改行・タブは空白にする（difflib はタブを日時の区切りに使う）
+    return re.sub(r"[\r\n\t]+", " ", label)
+
+
+def compare_texts(text_a: str, text_b: str, label_a: str, label_b: str) -> tuple[str, bool]:
+    """2 つのコンフィグの差分（unified diff）と、行数の上限で切り捨てたかを返す。別の機器どうしの比較に使う"""
+    lines = difflib.unified_diff(
+        text_a.splitlines(), text_b.splitlines(), fromfile=_diff_label(label_a), tofile=_diff_label(label_b), lineterm=""
+    )
+    out: list[str] = []
+    for line in lines:
+        if len(out) >= MAX_DIFF_LINES:
+            return "\n".join(out), True
+        out.append(line)
+    return "\n".join(out), False
