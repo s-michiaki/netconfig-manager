@@ -215,6 +215,11 @@ async def poll_all(db: AsyncSession) -> dict:
         select(SnmpSetting, Device).join(Device, Device.id == SnmpSetting.device_id)
         .where(SnmpSetting.enabled.is_(True), Device.is_active.is_(True))
     )).all()
+    targets = [target_of(s, d) for s, d in rows]
+    # SNMP の応答待ち（1 台で最大 SNMP_TIMEOUT×(SNMP_RETRIES+1) 秒）の間、DB のトランザクションを開いたままにしない
+    # （PostgreSQL の idle in transaction を避ける）。rollback() では読み込んだ設定が失効して後で読めなくなるため
+    # commit() で閉じる（セッションは expire_on_commit=False なので、下で s の属性をそのまま更新できる）
+    await db.commit()
     engine = SnmpEngine()
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
@@ -227,7 +232,7 @@ async def poll_all(db: AsyncSession) -> dict:
                 return t, None, str(e) or type(e).__name__
 
     try:
-        results = await asyncio.gather(*(one(target_of(s, d)) for s, d in rows))
+        results = await asyncio.gather(*(one(t) for t in targets))
     finally:
         engine.close_dispatcher()
     ok = failed = samples = 0
@@ -264,8 +269,8 @@ async def store_fw_result(db: AsyncSession, device_id: str, res: FwHitResult) ->
         st = FwHitStatus(device_id=device_id)
         db.add(st)
     st.collected_at, st.success, st.error = now, res.error is None, res.error
-    if res.raw:
-        st.raw_output = res.raw
+    # 接続できずに出力が無いときは前回の出力を消す（新しい日時のエラーの隣に古い出力を見せないため）
+    st.raw_output = res.raw or None
     if res.error is not None and not res.rules:
         await db.commit()
         return

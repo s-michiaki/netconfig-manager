@@ -11,6 +11,7 @@
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.services.config_service import DeviceConnectionInfo, describe_failure, run_commands
@@ -58,7 +59,8 @@ def parse_ts(text: str | None) -> datetime | None:
             continue
     if t.isdigit() and len(t) >= 9:  # epoch 秒
         try:
-            return datetime.fromtimestamp(int(t))
+            # ほかの形式と同じく「機器のローカル時刻＝アプリの TIMEZONE」にそろえる（プロセスのタイムゾーンに依存させない）
+            return datetime.fromtimestamp(int(t), ZoneInfo(settings.TIMEZONE)).replace(tzinfo=None)
         except (OverflowError, OSError, ValueError):
             return None
     return None

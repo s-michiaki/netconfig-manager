@@ -387,8 +387,14 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 - 対象: Palo Alto（PAN-OS）・Fortinet（FortiGate）として登録した機器。コンフィグ収集と同じ認証情報で SSH ログインし、`MONITOR_FW_INTERVAL_MIN`（既定 60 分）ごとに取得します（踏み台経由も可）。同じ機器のコンフィグ収集とは重ならないようにしており、収集中ならその回は取得しません（FortiGate は接続のたびに console の設定を変えて戻すため、重なると出力が止まるため）
   - PAN-OS: `show rule-hit-count vsys vsys-name <MONITOR_PANOS_VSYS> rule-base security rules all`
   - FortiGate: `show firewall policy`（ID と名前）と `diagnose firewall iprope list 100004`（ヒット数・パケット・バイト・初回/最終ヒット）
-- 表示: ルールの順・名前・ヒット数・前回の取得からの増加・最終/初回ヒット（FortiGate はパケット/バイトも）。**一度もヒットしていない、または最終ヒットが 30 日以上前**のルールに「未使用」の印を付け、絞り込めます（ルールの棚卸し用）
-- 取得に失敗したときは前回の結果を残したままエラーを表示し、アクティビティに「FW ヒット数の取得失敗」を記録します。FortiGate で `diagnose firewall iprope list` の統計を読めない（権限不足・VDOM 構成など）ときも、全ポリシーを「未使用」とせずに失敗として扱います
+- FortiGate の console の設定（推奨: `standard`）: Netmiko はページングを止めるため、接続のたびに `config system console` の `output` が `more` なら `standard` に変え、切断時に `more` へ戻します。ヒット数は定期的（既定 60 分ごと）に取得するので、そのたびに FortiGate のイベントログ（システムの設定変更）に記録が残ります。FortiGate 側で次のように `standard` にしておくと、変更も戻しも行われず記録も残りません（収集用アカウントに設定の書き込み権限も不要になります）。コンフィグ収集についても同じです
+  ```
+  config system console
+      set output standard
+  end
+  ```
+- 表示: ルールの順・名前・ヒット数・前回の取得からの増加・最終/初回ヒット（FortiGate はパケット/バイトも）。日時は機器の出力どおり（機器のローカル時刻を `TIMEZONE` の時刻とみなします。epoch 秒で出力された日時も `TIMEZONE` の時刻に直します）。**一度もヒットしていない、または最終ヒットが 30 日以上前**のルールに「未使用」の印を付け、絞り込めます（ルールの棚卸し用）
+- 取得に失敗したときは前回の結果（ルールの一覧）を残したままエラーを表示し、アクティビティに「FW ヒット数の取得失敗」を記録します。「取得した出力」は今回の出力です（接続できず出力が無い失敗では、古い出力を表示しないよう消します）。FortiGate で `diagnose firewall iprope list` の統計を読めない（権限不足・VDOM 構成など）ときも、全ポリシーを「未使用」とせずに失敗として扱います
 - 機種や OS のバージョンで出力が違い正しく読めない場合は、「取得した出力」（管理者）で機器の出力を確認できます。試験導入中に合わない出力があれば、その内容をもとに読み取りを調整します
 - 現時点の制限: FortiGate の VDOM（複数 VDOM 構成）、PAN-OS の複数 vsys の同時取得、Panorama 経由の取得には対応していません
 

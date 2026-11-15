@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.timeutil import utcnow
 from app.main import app
-from app.models.monitoring import IfSample, MonInterface
+from app.models.monitoring import IfSample, MonInterface, SnmpSetting
 from app.services import fw_hits, monitoring
 
 
@@ -373,6 +373,9 @@ def test_fw_hits_flow(ctx, enabled):
     st = {x["device_id"]: x for x in c.get("/api/monitoring/fw", headers=view).json()}[fw["id"]]
     assert st["success"] is False and st["rule_count"] == 4 and "未対応の応答" in st["error"]
     assert len(c.get(f"/api/monitoring/fw/{fw['id']}/rules", headers=view).json()) == 4
+    # 接続できず出力が無い失敗では、前回の出力を残さない（新しい日時のエラーの隣に古い出力を見せない）
+    assert st["has_raw"] is False
+    assert c.get(f"/api/monitoring/fw/{fw['id']}/raw", headers=admin).status_code == 404
     acts = c.get("/api/activity/logs", params={"ref": "ref-fw"}, headers=view).json()["items"]
     assert acts[0]["event"] == "monitor.fw_failed" and acts[0]["level"] == "warning"
 
@@ -381,3 +384,83 @@ def test_fw_hits_flow(ctx, enabled):
         n = worker.collect_fw_hits_all.apply().get()["devices"]
         ids = {call.args[0] for call in dly.call_args_list}
     assert fw["id"] in ids and ios["id"] not in ids and n == len(ids)
+
+
+def test_fw_raw_kept_when_output_cannot_be_parsed(ctx, enabled):
+    """出力は取れたが解析できない失敗では、調整用に今回の出力を残す"""
+    c, admin, view = ctx["c"], ctx["admin"], ctx["view"]
+    fw = device(c, admin, platform="fortinet")
+    fr = fakeredis.FakeRedis()
+    with mock.patch.object(worker, "_redis", return_value=fr):
+        with mock.patch.object(fw_hits, "run_commands", return_value=[FORTI_SHOW, FORTI_IPROPE]):
+            worker.collect_fw_hits_device.apply(args=(fw["id"], "admin")).get()
+        with mock.patch.object(fw_hits, "run_commands", return_value=[FORTI_SHOW, "Command fail. Return code -61"]):
+            assert worker.collect_fw_hits_device.apply(args=(fw["id"], "admin")).get()["error"]
+    st = {x["device_id"]: x for x in c.get("/api/monitoring/fw", headers=view).json()}[fw["id"]]
+    assert st["success"] is False and st["has_raw"]
+    raw = c.get(f"/api/monitoring/fw/{fw['id']}/raw", headers=admin).text
+    assert "Command fail" in raw and "pkts/bytes" not in raw  # 前回（成功時）ではなく今回の出力
+
+
+@pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo", "America/New_York"])
+def test_parse_ts_epoch_uses_app_timezone(monkeypatch, tz):
+    """epoch 秒も、ほかの形式と同じくアプリの TIMEZONE の時刻にする（プロセスのタイムゾーンに左右されない）"""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset がない環境")
+    monkeypatch.setenv("TZ", tz)
+    time.tzset()
+    try:
+        monkeypatch.setattr(settings, "TIMEZONE", "Asia/Tokyo")
+        assert fw_hits.parse_ts("1762500000") == datetime(2025, 11, 7, 16, 20)  # 07:20 UTC = 16:20 JST
+        monkeypatch.setattr(settings, "TIMEZONE", "UTC")
+        assert fw_hits.parse_ts("1762500000") == datetime(2025, 11, 7, 7, 20)
+        assert fw_hits.parse_ts("1762500000").tzinfo is None  # 比べる相手（画面の判定）と同じく naive
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_snmp_update_with_unknown_stored_protocol(ctx, enabled):
+    """DB に残っていた未知のプロトコル名でも、設定の更新が失敗しない（入力は Literal で制限済み。assert は削除した）"""
+    c, admin = ctx["c"], ctx["admin"]
+    d = device(c, admin)
+    url = f"/api/monitoring/snmp/{d['id']}"
+    assert c.put(url, json={"version": "3", "v3_user": "mon", "v3_auth_proto": "SHA", "v3_auth_key": "authpass1"},
+                 headers=admin).status_code == 200
+
+    async def corrupt():
+        async with AsyncSessionLocal() as db:
+            s = await db.get(SnmpSetting, d["id"])
+            s.v3_auth_proto = "SHA512"  # 古い版などで保存された、今は選べない値
+            await db.commit()
+    asyncio.run(corrupt())
+    r = c.put(url, json={"version": "3", "v3_user": "mon", "port": 1161}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["port"] == 1161
+    assert c.delete(url, headers=admin).status_code == 204
+
+
+def test_poll_all_does_not_hold_transaction_during_snmp(ctx, enabled):
+    """SNMP の応答を待つ間は DB のトランザクションを閉じている（PostgreSQL の idle in transaction を避ける）"""
+    c, admin = ctx["c"], ctx["admin"]
+    d = device(c, admin)
+    assert c.put(f"/api/monitoring/snmp/{d['id']}", json={"version": "2c", "community": "public"},
+                 headers=admin).status_code == 200
+    seen = []
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            async def fake_poll(t, engine):
+                seen.append((t.device_id, db.in_transaction()))
+                if t.device_id == d["id"]:
+                    return [], utcnow()
+                raise RuntimeError("応答なし")
+            with mock.patch.object(monitoring, "poll_interfaces", side_effect=fake_poll):
+                return await monitoring.poll_all(db)
+    res = asyncio.run(run())
+    assert (d["id"], False) in seen and all(not in_tx for _, in_tx in seen)
+    assert res["ok"] >= 1
+    # 取得後の結果（最終取得日時・エラー）は従来どおり保存される
+    rows = {x["device_id"]: x for x in c.get("/api/monitoring/snmp", headers=admin).json()}
+    assert rows[d["id"]]["last_polled_at"] and rows[d["id"]]["last_error"] is None
+    assert c.delete(f"/api/monitoring/snmp/{d['id']}", headers=admin).status_code == 204

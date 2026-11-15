@@ -23,7 +23,7 @@ from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface
 from app.models.user import User
 from app.services.audit import Audit, get_audit
 from app.services.fw_hits import SUPPORTED as FW_PLATFORMS
-from app.services.monitoring import AUTH_PROTOCOLS, PRIV_PROTOCOLS, SnmpError, snmp_get_info, target_of
+from app.services.monitoring import SnmpError, snmp_get_info, target_of
 
 
 def require_enabled() -> None:
@@ -139,7 +139,6 @@ async def update_snmp(device_id: str, p: SnmpIn, db: AsyncSession = Depends(get_
             raise HTTPException(status_code=422, detail="暗号化（priv）を使う場合は認証（auth）も設定してください")
         if s.v3_priv_proto and len(s.v3_priv_key or "") < 8:
             raise HTTPException(status_code=422, detail="暗号化パスワードは8文字以上で入力してください")
-    assert s.v3_auth_proto in (None, *AUTH_PROTOCOLS) and s.v3_priv_proto in (None, *PRIV_PROTOCOLS)
     audit("monitor.snmp_update", target_type="device", target_id=d.id, target_name=d.name,
           detail={"enabled": s.enabled, "version": s.version, "port": s.port,
                   "community": "（変更）" if p.community else None,
