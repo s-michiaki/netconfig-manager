@@ -65,6 +65,9 @@ def test_me_returns_permissions(client, users):
         ("post", "/api/devices/{dev}/collect", None, {"viewer": 403, "operator": 200, "admin": 200}),
         ("post", "/api/devices/collect/all", None, {"viewer": 403, "operator": 200}),
         ("get", "/api/configs/{dev}/history", None, {"viewer": 200, "operator": 200}),
+        # コメントは operator 以上（未収集の機器なので、権限を通ったあと世代が見つからず 404）
+        ("put", "/api/configs/{dev}/comments/0000000", {"body": "x"}, {"viewer": 403, "operator": 404, "admin": 404}),
+        ("delete", "/api/configs/{dev}/comments/0000000", None, {"viewer": 403, "operator": 404}),
         ("get", "/api/schedules/", None, {"viewer": 200, "operator": 200}),
         ("post", "/api/schedules/", {"name": "s", "cron_expression": "0 9 * * *"}, {"viewer": 403, "operator": 403, "admin": 201}),
         ("get", "/api/tasks/abc", None, {"viewer": 403}),

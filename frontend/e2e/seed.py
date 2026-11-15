@@ -38,7 +38,7 @@ def main() -> None:
             devs[name] = d
             cs.save_config(d["id"], (CONFIG_NG if ng else CONFIG_OK).format(name=name), "manual")
         # 世代の比較用に Core-SW01 だけ 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
-        cs.save_config(devs["Core-SW01"]["id"], CONFIG_OK.format(name="Core-SW01") + "logging host 10.0.9.9\n", "schedule")
+        second = cs.save_config(devs["Core-SW01"]["id"], CONFIG_OK.format(name="Core-SW01") + "logging host 10.0.9.9\n", "schedule")
         # ルールを作ると収集済みのコンフィグを検査する（SW-2F・DC-SW01 が違反）
         call("POST", "/compliance/rules", h, json={
             "name": "HTTP サーバーの無効化", "severity": "medium", "match_type": "regex", "expect": "absent",
@@ -58,13 +58,16 @@ def main() -> None:
 
     from app.core.database import AsyncSessionLocal
     from app.core.timeutil import utcnow
-    from app.models.device import Device
+    from app.models.device import ConfigSnapshot, Device
 
     async def inventory() -> None:
         async with AsyncSessionLocal() as db:
             await db.execute(update(Device).where(Device.name == "Core-SW01").values(
                 model="C9300-24T", serial_number="FCW2245L0AB", os_version="17.06.05", reported_hostname="Core-SW01",
                 inventory_at=utcnow()))
+            # ダッシュボードの「直近の変更」に出す世代（実際は収集のときに worker が記録する）
+            db.add(ConfigSnapshot(device_id=devs["Core-SW01"]["id"], commit_hash=second.commit_hash, collected_at=utcnow(),
+                                  lines_added=second.added, lines_removed=second.removed, triggered_by="schedule"))
             await db.commit()
     asyncio.run(inventory())
     print("seeded")

@@ -44,12 +44,12 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0021_device_inventory"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0022_config_comments"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols
     assert con.execute("select name, jump_host_id from devices").fetchall() == [("sw1", None)]  # 既存データは保持
     tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
-    assert {"users", "jump_hosts"} <= tables
+    assert {"users", "jump_hosts", "config_comments"} <= tables
     if with_users:
         assert con.execute("select username from users").fetchall() == [("admin",)]
 

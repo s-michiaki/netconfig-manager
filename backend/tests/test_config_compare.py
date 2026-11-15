@@ -135,7 +135,7 @@ def test_download_and_audit(client, env):
     item = logs["items"][0]
     assert item["target_name"] == "cfgcmp-core1" and json.loads(item["detail"]) == {"commit": env["a1"], "bytes": len(r.content)}
     client.get(f"/api/configs/{env['a']}/content/{env['a1']}", headers=env["admin"])
-    assert client.get("/api/audit/logs", params={"action": "config."}, headers=env["admin"]).json()["total"] == 3
+    assert client.get("/api/audit/logs", params={"action": "config.download"}, headers=env["admin"]).json()["total"] == 3
     assert client.get("/api/audit/actions", headers=env["admin"]).json()["config.download"] == "コンフィグのダウンロード"
 
 

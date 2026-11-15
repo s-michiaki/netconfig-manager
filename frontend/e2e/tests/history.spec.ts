@@ -19,7 +19,7 @@ test("世代を日時で選んで差分を見られ、一覧の A・B でも選�
   await expect(page.locator(".diff-add")).toHaveText(["+logging host 10.0.9.9"]);
   await expect(page.locator(".hist-title")).toContainText("→");
   // 一覧の A・B で入れ替える（新しい世代 → 古い世代）
-  const rows = page.locator(".hist-table tbody tr");
+  const rows = page.locator(".hist-table tr.hist-row");
   await rows.nth(0).getByRole("button", { name: "A", exact: true }).click();
   await rows.nth(1).getByRole("button", { name: "B", exact: true }).click();
   await expect(rows.nth(0).locator(".hist-mark")).toHaveText("A");
@@ -56,7 +56,7 @@ test("閲覧者が選んだ世代のコンフィグをファイルに保存で�
   await login(page, USERS.viewer);
   await page.goto("/history");
   await page.locator(".page-header select").selectOption({ label: "Core-SW01" });
-  const rows = page.locator(".hist-table tbody tr");
+  const rows = page.locator(".hist-table tr.hist-row");
   // 古い世代（logging host が無い方）を保存する
   const [dl] = await Promise.all([page.waitForEvent("download"), rows.nth(1).getByRole("button", { name: "保存" }).click()]);
   expect(dl.suggestedFilename()).toMatch(/^Core-SW01_\d{8}-\d{6}_[0-9a-f]{8}\.txt$/);

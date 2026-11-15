@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto import EncryptedString, EncryptedText
@@ -86,6 +86,9 @@ class Device(Base):
     collect_logs: Mapped[list["CollectLog"]] = relationship(
         "CollectLog", back_populates="device", cascade="all, delete-orphan"
     )
+    config_comments: Mapped[list["ConfigComment"]] = relationship(
+        "ConfigComment", back_populates="device", cascade="all, delete-orphan"
+    )
 
 
 class ConfigSnapshot(Base):
@@ -102,6 +105,32 @@ class ConfigSnapshot(Base):
     triggered_by: Mapped[str] = mapped_column(String(64), default="manual")  # schedule / manual
 
     device: Mapped["Device"] = relationship("Device", back_populates="config_snapshots")
+
+
+class ConfigComment(Base):
+    """世代（Git のコミット）に付ける作業内容のメモ。1 世代に 1 件
+
+    config_snapshots の行が無い世代（直接保存したものなど）もあるため、別のテーブルで Git のコミットに結び付ける。
+    書いた人は名前で持つ（ユーザーを削除しても残す。監査ログと同じ考え方）
+    """
+
+    __tablename__ = "config_comments"
+    __table_args__ = (UniqueConstraint("device_id", "commit_hash", name="uq_config_comments_device_commit"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    device_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("devices.id", name="fk_config_comments_device_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)  # 完全な 40 桁
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    device: Mapped["Device"] = relationship("Device", back_populates="config_comments")
 
 
 class CollectLog(Base):

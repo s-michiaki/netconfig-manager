@@ -677,3 +677,9 @@ def compare_texts(text_a: str, text_b: str, label_a: str, label_b: str) -> tuple
             return "\n".join(out), True
         out.append(line)
     return "\n".join(out), False
+
+
+def resolve_commit(device_id: str, commit_hash: str) -> str | None:
+    """短縮ハッシュを完全な 40 桁にする。その機器の世代でなければ None"""
+    version = get_config_version(device_id, commit_hash)
+    return version["full_hash"] if version else None

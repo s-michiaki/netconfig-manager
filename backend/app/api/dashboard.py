@@ -7,21 +7,23 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require
+from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.permissions import Perm
+from app.core.permissions import Perm, has_permission
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceResult, ComplianceRule
-from app.models.device import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models.device import CollectLog, ConfigComment, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models.user import User
 
 router = APIRouter()
 LIST_LIMIT = 10
+COMMENT_EXCERPT = 60  # 直近の変更に出すコメントの長さ
 KIND_LABELS = {"collect": "コンフィグ収集", "compliance": "コンプライアンスチェック"}
 
 
 @router.get("", dependencies=[Depends(require(Perm.DEVICE_READ))])
-async def dashboard(db: AsyncSession = Depends(get_db)):
+async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     now = utcnow()
     devices = (await db.execute(select(Device).order_by(Device.name))).scalars().all()
     names = {d.id: d.name for d in devices}
@@ -83,6 +85,17 @@ async def dashboard(db: AsyncSession = Depends(get_db)):
                          "target": target, "next_run": nxt.isoformat()})
     upcoming.sort(key=lambda x: x["next_run"])
 
+    # 世代へのコメント（作業内容のメモ）。コンフィグを閲覧できる人にだけ出す。改行は空白にして短くする
+    comments: dict[tuple[str, str], str] = {}
+    if snaps and has_permission(user.role, Perm.CONFIG_READ):
+        rows = await db.execute(select(ConfigComment).where(
+            ConfigComment.device_id.in_({s.device_id for s in snaps}),
+            ConfigComment.commit_hash.in_({s.commit_hash for s in snaps}),
+        ))
+        for c in rows.scalars():
+            text = " ".join(c.body.split())
+            comments[(c.device_id, c.commit_hash)] = text if len(text) <= COMMENT_EXCERPT else text[:COMMENT_EXCERPT] + "…"
+
     return {
         "devices": {"total": len(devices), "active": len(active), "inactive": len(devices) - len(active),
                     "failing": len(failing), "never": len(never),
@@ -93,7 +106,8 @@ async def dashboard(db: AsyncSession = Depends(get_db)):
         "changes": {"last_24h": await changed_since(timedelta(hours=24)), "last_7d": await changed_since(timedelta(days=7)),
                     "recent": [{"device_id": s.device_id, "device_name": names.get(s.device_id, "（削除済み）"),
                                 "at": s.collected_at, "added": s.lines_added, "removed": s.lines_removed,
-                                "commit": s.commit_hash[:8], "triggered_by": s.triggered_by} for s in snaps]},
+                                "commit": s.commit_hash[:8], "full_commit": s.commit_hash, "triggered_by": s.triggered_by,
+                                "comment": comments.get((s.device_id, s.commit_hash))} for s in snaps]},
         "compliance": {"rules": rules, "by_severity": by_severity, "violations": sum(by_severity.values()),
                        "devices": len({d for d, _ in fails if d in names})},
         "schedules": {"active": len(upcoming), "upcoming": upcoming[:5]},

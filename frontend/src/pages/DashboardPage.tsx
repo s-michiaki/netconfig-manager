@@ -10,7 +10,10 @@ import { PERM, useAuth } from "../auth";
 
 interface Failing { id: string; name: string; hostname: string; message: string; at: string; }
 interface Never { id: string; name: string; hostname: string; }
-interface Change { device_id: string; device_name: string; at: string; added: number; removed: number; commit: string; triggered_by: string; }
+interface Change {
+  device_id: string; device_name: string; at: string; added: number; removed: number; commit: string; full_commit: string;
+  triggered_by: string; comment: string | null; // 世代へのコメント（先頭 60 文字）
+}
 interface Upcoming { id: string; name: string; kind: string; target: string; next_run: string; }
 interface Dashboard {
   devices: { total: number; active: number; inactive: number; failing: number; never: number; ok: number };
@@ -129,9 +132,11 @@ export default function DashboardPage() {
             {ch.recent.map((c) => (
               <div key={`${c.device_id}-${c.commit}`} className="dash-row">
                 <div className="dash-row-main">
-                  <Link to={`/history?device=${c.device_id}`}><b>{c.device_name}</b></Link>
+                  {/* その世代の変更（1 つ前との差分）を開く */}
+                  <Link to={`/history?device=${c.device_id}&commit=${c.full_commit}`}><b>{c.device_name}</b></Link>
                   <span className="dash-diff"><span className="dash-add">+{c.added}</span> <span className="dash-del">-{c.removed}</span></span>
                   <span className="topo-muted topo-small">　{TRIGGER[c.triggered_by] ?? c.triggered_by}収集</span>
+                  {c.comment && <div className="dash-row-sub dash-comment" title={c.comment}>メモ: {c.comment}</div>}
                 </div>
                 <span className="topo-muted topo-small nowrap">{fmt(c.at)}</span>
               </div>

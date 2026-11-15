@@ -52,6 +52,8 @@ ACTIONS = {
     "schedule.delete": "スケジュール削除",
     "collect.run": "収集の実行",
     "config.download": "コンフィグのダウンロード",
+    "config.comment_set": "コンフィグ変更へのコメント",
+    "config.comment_delete": "コンフィグ変更のコメント削除",
     "terminal.open": "ターミナル接続",
     "terminal.close": "ターミナル切断",
     "topology.create": "構成図作成",

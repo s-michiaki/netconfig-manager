@@ -266,6 +266,24 @@ body {
   background: var(--color-accent-dim); color: var(--color-text);
 }
 .hist-actions { display: flex; gap: 4px; flex-wrap: nowrap; }
+.hist-has-comment td { border-bottom: none; }
+.hist-comment-row td { padding-top: 0; }
+.hist-comment {
+  display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 8px;
+  border-left: 2px solid var(--color-accent); background: var(--color-surface2); border-radius: 0 4px 4px 0;
+}
+.hist-comment .hist-comment-body {
+  flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  white-space: pre-wrap; word-break: break-word;
+}
+.hist-comment-by { color: var(--color-muted); font-size: 11px; white-space: nowrap; }
+.hist-comments { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.hist-comment-note {
+  display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 6px 10px;
+  border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent); border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+.hist-comment-note .hist-comment-body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
 .hist-compare { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
 .hist-side {
   font-size: 11px; font-weight: 700; color: var(--color-accent);

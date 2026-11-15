@@ -9,7 +9,7 @@ from enum import Enum
 
 class Role(str, Enum):
     ADMIN = "admin"  # すべての操作（ユーザー・機器・スケジュールの管理を含む）
-    OPERATOR = "operator"  # 閲覧 + コンフィグ収集 + SSHターミナル + 構成図の編集
+    OPERATOR = "operator"  # 閲覧 + コンフィグ収集 + SSHターミナル + 構成図の編集 + 変更へのコメント
     VIEWER = "viewer"  # 閲覧のみ
 
 
@@ -17,6 +17,7 @@ class Perm(str, Enum):
     DEVICE_READ = "device:read"
     DEVICE_WRITE = "device:write"  # 機器の登録・編集・削除（認証情報を扱うため admin のみ）
     CONFIG_READ = "config:read"  # 履歴・差分・コンフィグ内容の閲覧
+    CONFIG_COMMENT = "config:comment"  # 世代へのコメント（作業内容のメモ）の追加・編集・削除。閲覧は CONFIG_READ
     COLLECT = "collect:run"  # 収集の実行・タスク状態の確認
     TERMINAL = "terminal:use"  # SSHターミナル（機器を直接操作できる）
     SCHEDULE_READ = "schedule:read"
@@ -39,7 +40,9 @@ _VIEWER = {
     Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ, Perm.PING_USE,
     Perm.NOTIFY_SELF, Perm.ACTIVITY_READ, Perm.MONITOR_READ,
 }
-_OPERATOR = _VIEWER | {Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE}
+_OPERATOR = _VIEWER | {
+    Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE, Perm.CONFIG_COMMENT,
+}
 _ADMIN = set(Perm)
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Perm]] = {

@@ -1,14 +1,21 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useRef, useState, type CSSProperties } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import { PERM, useAuth } from "../auth";
 import { downloadFile } from "../components/CsvButton";
 
 interface Device { id: string; name: string; group_name: string | null; }
-interface Commit { hash: string; full_hash: string; message: string; date: string; author: string; }
+/** 世代へのコメント（作業内容のメモ） */
+interface Comment {
+  body: string; created_by: string | null; created_by_id: string | null; created_at: string | null;
+  updated_by: string | null; updated_at: string | null;
+}
+interface Commit { hash: string; full_hash: string; message: string; date: string; author: string; comment: Comment | null; }
 interface Side { device_id: string; name: string; hash: string; full_hash: string; date: string; }
 interface CompareResult { diff: string; message?: string; truncated: boolean; a: Side; b: Side; }
 
 const HISTORY_LIMIT = 500; // 一覧に出す世代の数（API の上限）
+const COMMENT_MAX = 1000;
 
 const fmt = (iso: string) => new Date(iso).toLocaleString("ja-JP");
 const optionLabel = (c: Commit) => `${c.hash}  ${fmt(c.date)}`;
@@ -53,12 +60,93 @@ function DeviceSelect({ devices, groupOrder, value, onChange, placeholder, exclu
 
 const smallBtn: CSSProperties = { padding: "2px 8px", fontSize: 11 };
 
+const commentBy = (c: Comment) => {
+  const who = c.updated_by && c.updated_by !== c.created_by ? `${c.created_by}（更新: ${c.updated_by}）` : c.created_by;
+  return `${who ?? ""}${c.updated_at ? ` · ${fmt(c.updated_at)}` : ""}`;
+};
+
+/** 差分・コンフィグの見出しの下に出すコメント */
+function CommentNotes({ items }: { items: { label: string; comment: Comment | null }[] }) {
+  const shown = items.filter((x) => x.comment);
+  if (!shown.length) return null;
+  return (
+    <div className="hist-comments">
+      {shown.map((x) => (
+        <div key={x.label} className="hist-comment-note">
+          <span className="hist-side">{x.label}</span>
+          <span className="hist-comment-body">{x.comment!.body}</span>
+          <span className="hist-comment-by">{commentBy(x.comment!)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** コメントの入力（オペレーター以上）。他の人のコメントは本人か管理者だけが変更できる */
+function CommentModal({ deviceId, commit, editable, onClose, onSaved }: {
+  deviceId: string; commit: Commit; editable: boolean; onClose: () => void; onSaved: (c: Comment | null) => void;
+}) {
+  const [body, setBody] = useState(commit.comment?.body ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const url = `/configs/${encodeURIComponent(deviceId)}/comments/${commit.full_hash}`;
+  const run = async (f: () => Promise<Comment | null>) => {
+    setBusy(true);
+    setError("");
+    try {
+      onSaved(await f());
+    } catch (e) {
+      setError(errorMessage(e));
+      setBusy(false);
+    }
+  };
+  const save = () => run(async () => (await api.put<Comment>(url, { body })).data);
+  const remove = () => {
+    if (!window.confirm("このコメントを削除しますか？")) return;
+    void run(async () => {
+      await api.delete(url);
+      return null;
+    });
+  };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <p className="modal-title">変更へのコメント</p>
+        <p className="hist-note">
+          世代 <span className="mono">{commit.hash}</span>（{fmt(commit.date)}）に、作業内容や依頼番号など、後から見て意図した変更か分かるメモを残します。
+        </p>
+        {commit.comment && <p className="hist-note">書いた人: {commentBy(commit.comment)}</p>}
+        <div className="form-group">
+          <label className="form-label" htmlFor="hist-comment">メモ（{COMMENT_MAX} 文字まで）</label>
+          <textarea id="hist-comment" rows={6} maxLength={COMMENT_MAX} value={body} disabled={!editable}
+            placeholder="例: CHG-1234 VLAN 30 を追加（夜間作業・山田）" onChange={(e) => setBody(e.target.value)} />
+          <p className="hist-note" style={{ marginTop: 4 }}>
+            {body.length} / {COMMENT_MAX} 文字。パスワードなどの秘密情報は書かないでください（変更・削除は監査ログに残ります）
+          </p>
+        </div>
+        {!editable && <p className="hist-note">他の人が書いたコメントは、書いた本人か管理者だけが変更できます。</p>}
+        {error && <p className="form-error">{error}</p>}
+        <div className="btn-row">
+          <button className="btn" onClick={onClose}>キャンセル</button>
+          {editable && commit.comment && <button className="btn btn-danger" disabled={busy} onClick={remove}>削除</button>}
+          {editable && <button className="btn btn-primary" disabled={busy || !body.trim()} onClick={save}>保存</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function HistoryPage() {
+  const { me, can } = useAuth();
+  const canComment = can(PERM.CONFIG_COMMENT);
+  const isAdmin = can(PERM.USER_ADMIN);
   const [devices, setDevices] = useState<Device[]>([]);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
   const [searchParams] = useSearchParams();
   // 構成図などから ?device=<id> 付きで開かれた場合は、その機器を選択した状態にする
   const [selectedDevice, setSelectedDevice] = useState(searchParams.get("device") ?? "");
+  // ダッシュボードなどから ?commit=<hash> 付きで開かれた場合は、その世代の変更（1 つ前との差分）を表示する（最初の 1 回だけ）
+  const initialCommit = useRef(searchParams.get("commit") ?? "");
   const [history, setHistory] = useState<Commit[]>([]);
   // 比べ方: 同じ機器の 2 世代 / 別の機器と
   const [mode, setMode] = useState<"self" | "other">("self");
@@ -72,6 +160,8 @@ export default function HistoryPage() {
 
   const [diff, setDiff] = useState("");
   const [diffTitle, setDiffTitle] = useState("");
+  const [diffComments, setDiffComments] = useState<{ label: string; full_hash: string; comment: Comment | null }[]>([]);
+  const [editing, setEditing] = useState<Commit | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [contentCommit, setContentCommit] = useState<Commit | null>(null);
@@ -94,6 +184,7 @@ export default function HistoryPage() {
     setSelfHash("");
     setDiff("");
     setDiffTitle("");
+    setDiffComments([]);
     setTruncated(false);
     setContent(null);
     setContentCommit(null);
@@ -111,6 +202,16 @@ export default function HistoryPage() {
         if (r.data.length >= 2) {
           setSelectedA(r.data[1].full_hash);
           setSelectedB(r.data[0].full_hash);
+        }
+        const want = initialCommit.current.toLowerCase();
+        initialCommit.current = "";
+        const i = want ? r.data.findIndex((c) => c.full_hash.startsWith(want)) : -1;
+        if (i >= 0 && i + 1 < r.data.length) {
+          setSelectedA(r.data[i + 1].full_hash);
+          setSelectedB(r.data[i].full_hash);
+          void loadDiff(selectedDevice, r.data[i + 1], r.data[i]);
+        } else if (i >= 0) {
+          void showContent(r.data[i], selectedDevice);
         }
       })
       .catch((e) => !cancelled && setError(errorMessage(e)));
@@ -133,22 +234,27 @@ export default function HistoryPage() {
     };
   }, [otherDevice]);
 
-  const showDiff = async () => {
-    if (!selectedDevice || !selectedA || !selectedB) return;
+  const loadDiff = async (deviceId: string, a: Commit, b: Commit) => {
     setError("");
     try {
-      const r = await api.get(`/configs/${encodeURIComponent(selectedDevice)}/diff`, {
-        params: { from_hash: selectedA, to_hash: selectedB },
+      const r = await api.get(`/configs/${encodeURIComponent(deviceId)}/diff`, {
+        params: { from_hash: a.full_hash, to_hash: b.full_hash },
       });
-      const a = history.find((c) => c.full_hash === selectedA);
-      const b = history.find((c) => c.full_hash === selectedB);
       setDiff(r.data.diff || "差分なし");
-      setDiffTitle(a && b ? `${a.hash}（${fmt(a.date)}）→ ${b.hash}（${fmt(b.date)}）` : "");
+      setDiffTitle(`${a.hash}（${fmt(a.date)}）→ ${b.hash}（${fmt(b.date)}）`);
+      setDiffComments([{ label: "A", full_hash: a.full_hash, comment: a.comment }, { label: "B", full_hash: b.full_hash, comment: b.comment }]);
       setTruncated(false);
       setView("diff");
     } catch (e) {
       setError(errorMessage(e));
     }
+  };
+
+  const showDiff = async () => {
+    const a = history.find((c) => c.full_hash === selectedA);
+    const b = history.find((c) => c.full_hash === selectedB);
+    if (!selectedDevice || !a || !b) return;
+    await loadDiff(selectedDevice, a, b);
   };
 
   const compareOther = async () => {
@@ -161,6 +267,10 @@ export default function HistoryPage() {
       const { a, b } = r.data;
       setDiff(r.data.diff || "差分なし");
       setDiffTitle(`${a.name} ${a.hash}（${fmt(a.date)}）→ ${b.name} ${b.hash}（${fmt(b.date)}）`);
+      setDiffComments([
+        { label: "A", full_hash: a.full_hash, comment: history.find((c) => c.full_hash === a.full_hash)?.comment ?? null },
+        { label: "B", full_hash: b.full_hash, comment: otherHistory.find((c) => c.full_hash === b.full_hash)?.comment ?? null },
+      ]);
       setTruncated(r.data.truncated);
       setView("diff");
     } catch (e) {
@@ -168,11 +278,11 @@ export default function HistoryPage() {
     }
   };
 
-  const showContent = async (c: Commit) => {
-    if (!selectedDevice) return;
+  const showContent = async (c: Commit, deviceId = selectedDevice) => {
+    if (!deviceId) return;
     setError("");
     try {
-      const r = await api.get<string>(`/configs/${encodeURIComponent(selectedDevice)}/content/${c.full_hash}`, {
+      const r = await api.get<string>(`/configs/${encodeURIComponent(deviceId)}/content/${c.full_hash}`, {
         responseType: "text",
       });
       setContent(r.data);
@@ -198,6 +308,16 @@ export default function HistoryPage() {
     }
   };
 
+  // コメントを保存・削除したら、一覧と表示中の見出しだけを書き換える（一覧は取り直さない）
+  const commentSaved = (full: string, comment: Comment | null) => {
+    setHistory((h) => h.map((c) => (c.full_hash === full ? { ...c, comment } : c)));
+    setContentCommit((c) => (c && c.full_hash === full ? { ...c, comment } : c));
+    // 別の機器と比べているときの B は別の機器の世代なので、A だけが対象
+    setDiffComments((d) => d.map((x) => (x.full_hash === full && (mode === "self" || x.label === "A") ? { ...x, comment } : x)));
+    setEditing(null);
+  };
+  const editable = (c: Commit) => !c.comment || isAdmin || c.comment.created_by_id === me?.id;
+
   // 一覧の「A」: 比べる元の世代にする（別の機器と比べるときは、この機器の側の世代）
   const pickA = (c: Commit) => (mode === "self" ? setSelectedA(c.full_hash) : setSelfHash(c.full_hash));
   const markOf = (c: Commit) => {
@@ -219,7 +339,7 @@ export default function HistoryPage() {
 
       <div className="page-body" style={{ display: "flex", gap: 16, height: "100%", paddingBottom: 0 }}>
         {/* 左: コミット一覧 */}
-        <div style={{ width: 400, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ width: 440, flexShrink: 0, display: "flex", flexDirection: "column" }}>
           <p className="section-label">コミット履歴</p>
           {history.length === 0 ? (
             <p style={{ color: "var(--color-muted)", fontSize: 13 }}>
@@ -239,7 +359,8 @@ export default function HistoryPage() {
                   {history.map((c) => {
                     const mark = markOf(c);
                     return (
-                      <tr key={c.full_hash} title={c.message} className={mark ? "hist-picked" : undefined}>
+                      <Fragment key={c.full_hash}>
+                      <tr title={c.message} className={`hist-row${mark ? " hist-picked" : ""}${c.comment ? " hist-has-comment" : ""}`}>
                         <td>
                           <span className="mono" style={{ fontSize: 12, color: "var(--color-accent)" }}>
                             {c.hash}
@@ -262,9 +383,23 @@ export default function HistoryPage() {
                             {mode === "self" && (
                               <button className="btn" style={smallBtn} title="比べる先（B）にする" onClick={() => setSelectedB(c.full_hash)}>B</button>
                             )}
+                            {canComment && (
+                              <button className="btn" style={smallBtn} title="作業内容のメモを書きます" onClick={() => setEditing(c)}>メモ</button>
+                            )}
                           </div>
                         </td>
                       </tr>
+                      {c.comment && (
+                        <tr className={`hist-comment-row${mark ? " hist-picked" : ""}`}>
+                          <td colSpan={3}>
+                            <div className="hist-comment" title={`${c.comment.body}\n— ${commentBy(c.comment)}`}>
+                              <span className="hist-comment-body">{c.comment.body}</span>
+                              <span className="hist-comment-by">{c.comment.updated_by ?? c.comment.created_by}</span>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
@@ -341,6 +476,8 @@ export default function HistoryPage() {
               </>
             )}
           </div>
+          {view === "diff" && diff && <CommentNotes items={diffComments} />}
+          {view === "content" && contentCommit && <CommentNotes items={[{ label: contentCommit.hash, comment: contentCommit.comment }]} />}
           {view === "diff" && truncated && (
             <p className="hist-note">差分が大きいため、先頭の部分だけを表示しています。</p>
           )}
@@ -354,6 +491,10 @@ export default function HistoryPage() {
           </div>
         </div>
       </div>
+      {editing && (
+        <CommentModal deviceId={selectedDevice} commit={editing} editable={editable(editing)} onClose={() => setEditing(null)}
+          onSaved={(c) => commentSaved(editing.full_hash, c)} />
+      )}
     </div>
   );
 }

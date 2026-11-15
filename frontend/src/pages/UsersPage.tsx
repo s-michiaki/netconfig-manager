@@ -15,7 +15,8 @@ interface RoleInfo { role: string; label: string; permissions: string[]; }
 const PERM_LABELS: Record<string, string> = {
   "device:read": "デバイス閲覧",
   "device:write": "デバイス登録・編集",
-  "config:read": "コンフィグ・差分閲覧",
+  "config:read": "コンフィグ・差分の閲覧・比較・保存",
+  "config:comment": "変更へのコメント（作業内容のメモ）",
   "collect:run": "収集の実行",
   "terminal:use": "SSHターミナル",
   "schedule:read": "スケジュール閲覧",

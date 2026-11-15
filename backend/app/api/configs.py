@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.config_comments import comment_dict, comments_for
 from app.api.deps import require
 from app.core.config import settings
 from app.core.csv_export import content_disposition
@@ -88,9 +89,14 @@ async def list_history(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """デバイスのコンフィグ収集履歴（Gitコミット一覧）を返す"""
+    """デバイスのコンフィグ収集履歴（Gitコミット一覧）を返す。世代へのコメントも含める"""
     await _ensure_device(db, device_id)
-    return await run_in_threadpool(get_config_history, device_id, limit)
+    history = await run_in_threadpool(get_config_history, device_id, limit)
+    comments = await comments_for(db, device_id, [c["full_hash"] for c in history])
+    for c in history:
+        found = comments.get(c["full_hash"])
+        c["comment"] = comment_dict(found) if found else None
+    return history
 
 
 @router.get("/{device_id}/diff", dependencies=[Depends(require(Perm.CONFIG_READ))])
