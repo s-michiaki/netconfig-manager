@@ -4,6 +4,7 @@ import { defineConfig, devices } from "@playwright/test";
  * 画面テスト（Playwright）
  *   実行: cd frontend && npm run e2e（初回は npx playwright install chromium）
  *   backend（SQLite・初期データ入り）と vite の開発サーバーを自動で起動する。Python と backend の依存パッケージが必要
+ *   csp プロジェクト（tests/csp.spec.ts）だけは、本番ビルドを本番の nginx と同じ CSP 付きで配信して確認する（4173 番）
  */
 export default defineConfig({
   testDir: "./tests",
@@ -20,7 +21,18 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } }],
+  projects: [
+    {
+      name: "chromium",
+      testIgnore: /csp\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
+    },
+    {
+      name: "csp",
+      testMatch: /csp\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 }, baseURL: "http://127.0.0.1:4173" },
+    },
+  ],
   webServer: [
     {
       command: "bash start-backend.sh", // e2e ディレクトリで実行される
@@ -36,6 +48,14 @@ export default defineConfig({
       timeout: 60_000,
       reuseExistingServer: false,
       env: { API_PROXY_TARGET: "http://127.0.0.1:8000" },
+    },
+    {
+      // csp プロジェクト用。ビルド（数秒）してから CSP 付きで配信する（設定は vite.csp.config.ts）
+      command: "npx vite build --outDir dist/e2e-csp --emptyOutDir --logLevel warn && npx vite preview -c e2e/vite.csp.config.ts",
+      cwd: "..",
+      url: "http://127.0.0.1:4173",
+      timeout: 120_000,
+      reuseExistingServer: false,
     },
   ],
 });

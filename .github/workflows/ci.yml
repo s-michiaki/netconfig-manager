@@ -64,6 +64,62 @@ jobs:
       - name: ビルド
         run: npx vite build
 
+  nginx:
+    # 本番と同じ nginx のイメージで設定を読み込み（nginx -t）、セキュリティヘッダーが付くことを確かめる
+    #   HTTPS の設定に誤りがあると 40-netconfig-tls.sh が黙って HTTP に戻すため、HTTPS で起動したことも確認する
+    #   backend は起動しない（/api や /docs は 502 になるが、ヘッダーは always 付きなので確認できる）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      IMAGE: docker.io/library/nginx:1.27-alpine  # frontend/Dockerfile の prod ステージと合わせる
+    steps:
+      - uses: actions/checkout@v4
+      - name: 確認用の証明書と HTML を用意
+        run: |
+          mkdir -p /tmp/ncm/certs /tmp/ncm/html
+          echo '<!doctype html><title>ok</title>' > /tmp/ncm/html/index.html
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost \
+            -keyout /tmp/ncm/certs/server.key -out /tmp/ncm/certs/server.crt
+      - name: HTTPS（証明書あり）で起動して確認
+        run: |
+          docker run -d --name ncm-https --add-host backend:127.0.0.1 -e HTTPS_PORT=8443 -p 8080:80 -p 8443:443 \
+            -v "$PWD/frontend/nginx:/etc/nginx/netconfig:ro" -v /tmp/ncm/certs:/etc/nginx/certs:ro \
+            -v /tmp/ncm/html:/usr/share/nginx/html:ro \
+            "$IMAGE" sh -c "sh /etc/nginx/netconfig/40-netconfig-tls.sh && nginx -t && exec nginx -g 'daemon off;'"
+          sleep 3
+          docker logs ncm-https 2>&1 | tee /tmp/ncm/https.log
+          grep -q "HTTPS で起動します" /tmp/ncm/https.log
+          grep -q "test is successful" /tmp/ncm/https.log
+          h() { curl -sk -o /dev/null -D - "$1" | tr -d '\r'; }
+          h https://127.0.0.1:8443/ | tee /tmp/ncm/top
+          grep -qix "strict-transport-security: max-age=86400" /tmp/ncm/top
+          grep -qi "^content-security-policy: default-src 'self'; script-src 'self';" /tmp/ncm/top
+          grep -qi "^x-content-type-options: nosniff" /tmp/ncm/top
+          grep -qi "^x-frame-options: DENY" /tmp/ncm/top
+          grep -qi "^referrer-policy: same-origin" /tmp/ncm/top
+          grep -qi "^permissions-policy: " /tmp/ncm/top
+          h https://127.0.0.1:8443/docs | tee /tmp/ncm/docs
+          grep -qi "^content-security-policy: .*https://cdn.jsdelivr.net" /tmp/ncm/docs
+          grep -qi "^strict-transport-security: " /tmp/ncm/docs
+          h https://127.0.0.1:8443/api/health | grep -qi "^content-security-policy: default-src 'self'; script-src 'self';"
+          # HTTP は HTTPS へ転送するだけで、HSTS は付けない（HTTP の応答の HSTS はブラウザが無視する）
+          h http://127.0.0.1:8080/ | tee /tmp/ncm/http
+          grep -qi "^location: https://127.0.0.1:8443/" /tmp/ncm/http
+          if grep -qi "strict-transport-security" /tmp/ncm/http; then echo "HTTP の応答に HSTS が付いている"; exit 1; fi
+      - name: HTTP（証明書なし）で起動して確認
+        run: |
+          docker run -d --name ncm-http --add-host backend:127.0.0.1 -p 8081:80 \
+            -v "$PWD/frontend/nginx:/etc/nginx/netconfig:ro" -v /tmp/ncm/html:/usr/share/nginx/html:ro \
+            "$IMAGE" sh -c "sh /etc/nginx/netconfig/40-netconfig-tls.sh && nginx -t && exec nginx -g 'daemon off;'"
+          sleep 3
+          docker logs ncm-http 2>&1 | grep -q "証明書が無いため HTTP で起動します"
+          curl -s -o /dev/null -D - http://127.0.0.1:8081/ | tr -d '\r' | tee /tmp/ncm/plain
+          grep -qi "^content-security-policy: default-src 'self'; script-src 'self';" /tmp/ncm/plain
+          if grep -qi "strict-transport-security" /tmp/ncm/plain; then echo "HTTP の応答に HSTS が付いている"; exit 1; fi
+      - name: 失敗時のログ
+        if: failure()
+        run: docker logs ncm-https 2>&1 || true; docker logs ncm-http 2>&1 || true
+
   e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -6,6 +6,8 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   build: {
+    // フォントは data: URL に埋め込まず、常にファイルとして出力する（CSP の font-src を 'self' だけにするため）
+    assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined),
     rollupOptions: {
       output: {
         // 全画面で使うライブラリはまとめて1つにし、画面のファイルを小さく保つ（ブラウザのキャッシュも効きやすい）

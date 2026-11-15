@@ -6,6 +6,10 @@ export const USERS = {
   viewer: { name: "view1", password: "password-1234" },
 };
 
+/** サイドメニューから開ける全画面（navigation.spec.ts・csp.spec.ts で使う） */
+export const PAGES = ["/dashboard", "/devices", "/topology", "/jump-hosts", "/collect", "/ping", "/history", "/search", "/terminal", "/schedules",
+  "/compliance", "/notifications", "/activity", "/audit", "/users", "/system"];
+
 /** ログインしてデバイス管理を開く */
 export async function login(page: Page, user: { name: string; password: string } = USERS.admin) {
   await page.goto("/login");

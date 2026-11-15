@@ -703,7 +703,7 @@ function Editor(props: EditorProps) {
     const canvas = await toCanvas(el, {
       // 白背景にするときは黒で描いて反転する（反転後に真っ白になるように）
       backgroundColor: light ? "#000000" : "#0f1117",
-      // Web フォント（外部CSS）の埋め込みはしない（閉じたネットワークでは取得できず、エラーになるだけのため）
+      // Web フォントの埋め込みはしない（書き出しの見た目を従来と同じにするため。日本語フォントは分割ファイルが多く、埋め込むと生成に時間がかかるおそれもある）
       skipFonts: true,
       width, height, pixelRatio: 2,
       style: {

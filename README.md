@@ -143,6 +143,10 @@ bash /opt/netconfig-manager/scripts/import_cert.sh
 - 証明書を再発行したときも、同じスクリプトをもう一度実行してください
 - 証明書が読み込めない状態で起動した場合は、画面に入れなくならないよう HTTP で起動します（nginx のログに理由を出力）
 - HTTP に戻す場合は `certs/server.crt`・`certs/server.key` を削除して frontend コンテナを再起動
+- HTTPS で配信しているあいだは HSTS（`Strict-Transport-Security: max-age=86400`）を付けます。一度 HTTPS で開いたブラウザは、その後 1 日はこのホストへ HTTP ではなく HTTPS で接続します（詳しくは「セキュリティ」の「セキュリティヘッダー」）
+  - **HTTPS にした後は HTTP に戻しにくくなります**: HTTP に戻しても、最後に開いてから 1 日のあいだは各ブラウザが HTTPS で接続しようとして開けません。期間が過ぎるのを待つか、ブラウザの設定で消してください（Chrome / Edge: `chrome://net-internals/#hsts`・`edge://net-internals/#hsts` の「Delete domain security policies」にホスト名を入力）
+  - 証明書の期限が切れると、HSTS の期間中はブラウザの警告画面で「続行」できません。期限切れの前に再発行して取り込んでください（「システム状態」が期限の 30 日前・7 日前に通知します）
+  - **IP アドレスで開いている場合は HSTS は効きません**（ブラウザは IP アドレスに HSTS を記録しないため）。ホスト名で開いたときだけ効きます
 
 **利用者の PC にルート CA を登録**（初回のみ。登録しないとブラウザが証明書の警告を出します）
 
@@ -545,6 +549,12 @@ API が応答していても、worker やスケジューラーが止まってい
   - Redis に接続できないときは制限せずにログインを通します（Redis が止まっても管理者が入れるように）
 - **接続元 IP**: 監査ログ・ログインの制限で使う接続元 IP は、nginx が付ける `X-Forwarded-For`（利用者が送った値は nginx で上書き）から取ります。backend のポートを外部に公開しないでください（公開すると接続元を偽装できます）
 - **コンプライアンスの正規表現**: 利用者が入力した正規表現は `regex` パッケージで照合し、1回の評価（ルール × 機器）あたり `COMPLIANCE_REGEX_TIMEOUT` 秒（既定 2 秒）で打ち切ります（照合に時間のかかるパターン＝ReDoS で API・worker が止まらないように）。打ち切った評価は「エラー」になります。保存前の「試す」はオペレーター以上
+- **セキュリティヘッダー**: 本番の nginx（`frontend/nginx/`）が、画面・API のすべての応答に次のヘッダーを付けます（開発用の vite のサーバーでは付きません）
+  - `Content-Security-Policy`（CSP。値は `frontend/nginx/csp.inc`）: スクリプト・接続先・画像・フォントを同じサーバーのものに限ります（ログインのトークンをブラウザに保存しているため、万一画面に不正なスクリプトが入り込んでも、外部のスクリプトの読み込みや外部への送信をブラウザが止めるように）。インラインのスクリプトと `eval` は許可しません。例外は、スタイルのインライン（`style-src 'unsafe-inline'`。ターミナルの表示と構成図の印刷で必要）と `data:` の画像（`img-src data:`。構成図の PNG / PDF 書き出し・印刷で必要）だけです。画面のフォント（Inter・Noto Sans JP・JetBrains Mono）はビルドに含めて同じサーバーから配信し、外部（Google Fonts など）からは読み込みません（閉じたネットワークでも表示が変わりません）
+  - `/docs`（API ドキュメント。Swagger UI）だけは、外部（cdn.jsdelivr.net）のスクリプトとインラインのスクリプトを使うため、それらを許可した別の CSP にしています（閉じたネットワークでは従来どおり表示されません）
+  - `Strict-Transport-Security`（HSTS）: HTTPS で配信しているときだけ `max-age=86400`（1 日）を付けます。自己管理の CA の証明書で運用しているため、証明書の期限切れなどで HTTPS が使えなくなったときに入れなくなる期間を短くしています。社内のほかのサブドメインを巻き込まないよう `includeSubDomains` は付けず、ブラウザへの事前登録（`preload`）もしません。HTTPS で運用していて外したい場合は `frontend/nginx/https.conf` の行を消して frontend を再ビルドしてください
+  - `X-Content-Type-Options: nosniff`・`X-Frame-Options: DENY`（CSP の `frame-ancestors 'none'` と同じく、ほかのサイトの枠内に表示させない）・`Referrer-Policy: same-origin`・`Permissions-Policy`（カメラ・マイク・位置情報などを使わない）
+  - nginx の `location` の中に `add_header` を書くと、その場所では上のヘッダーが付かなくなります。設定を変えるときは `csp.inc` の `map` で値を切り替えてください
 - **依存パッケージの脆弱性**: GitHub Actions（`.github/workflows/audit.yml`）で push のたびと毎週月曜に `pip-audit`（backend）と `npm audit --omit=dev`（frontend）を実行します
   - 例外: paramiko の `PYSEC-2026-2858`（ssh-rsa＝SHA-1 署名を許可している）は除外しています。修正版の paramiko 5 は ssh-rsa を廃止しており、ssh-rsa しか使えない古いネットワーク機器へ接続できなくなるためです。古い機器が無くなったら paramiko 5 へ更新して除外を外してください
 
@@ -586,6 +596,7 @@ ruff check --fix .    # 自動で直せるものを修正
 ```
 
 画面テスト（Playwright。`frontend/e2e/`）: backend を SQLite で起動し、初期データ（`e2e/seed.py`）を入れてから Chromium で操作します（全画面を開けるか・ログイン・権限・グループ・世代管理（2 世代・別の機器との比較、コンフィグの保存、変更へのコメント）・コンプライアンスの例外・構成図の編集と書き出し・監査ログの CSV など）。
+`csp` プロジェクト（`e2e/tests/csp.spec.ts`）だけは、本番ビルド（`dist/e2e-csp`）を本番の nginx と同じ CSP（`nginx/csp.inc` から読み取る）を付けて配信し（`e2e/vite.csp.config.ts`。4173 番）、全画面・構成図の書き出しと印刷・CSV のダウンロード・WebSocket が CSP に止められないこと、外部から何も読み込まないことを確かめます（開発サーバーはホットリロード用のインラインのスクリプトを使うため、本番と同じ CSP では確認できません）。
 
 ```bash
 cd frontend
@@ -597,7 +608,8 @@ GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自
 
 - backend: ruff と pytest（Python 3.12）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
-- e2e: 画面テスト（失敗したときはレポートとスクリーンショットを Artifacts に保存）
+- nginx: 本番と同じ nginx のイメージで設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
+- e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
 あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit`、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `deps-smoke` は、本番と同じく `requirements.txt` だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため）。
 
@@ -724,12 +736,12 @@ netconfig-manager/
 │           └── connection.py    # 接続情報（踏み台含む）の読み出し
 └── frontend/
     ├── Dockerfile               # dev / prod マルチステージ
-    ├── nginx/                   # 本番用 nginx 設定（HTTP / HTTPS を起動時に自動選択）
+    ├── nginx/                   # 本番用 nginx 設定（HTTP / HTTPS を起動時に自動選択・セキュリティヘッダー。CSP の値は csp.inc）
     ├── package.json
     ├── package-lock.json
     ├── tsconfig.json
     ├── vite.config.ts
-    ├── e2e/                     # 画面テスト（Playwright の設定・初期データ・テスト）
+    ├── e2e/                     # 画面テスト（Playwright の設定・初期データ・テスト。CSP の確認は csp.spec.ts と vite.csp.config.ts）
     └── src/
         ├── main.tsx
         ├── App.tsx              # ルーティング・ログインガード・画面の遅延読み込み
@@ -776,3 +788,4 @@ netconfig-manager/
 - **世代の比較の拡張**: 機器ごとに違って当然の行（hostname・管理 IP など）を除いた比較、左右に並べた差分表示、差分そのもののダウンロード
 - **変更へのコメントの拡張**: コメントの無い変更の一覧（説明の付いていない変更の洗い出し）、コメントでの検索、コメントが付いたときの通知
 - **モニタリング（試験導入）の本採用**: 既定を有効に切り替え。使用率のしきい値超えの通知、構成図の接続線への使用率の表示、FortiGate の VDOM・PAN-OS の複数 vsys 対応、他機種（Cisco ASA など）のヒット数
+- **CSP の強化**: 違反をブラウザから受け取って記録する仕組み（`report-to`）、`style-src 'unsafe-inline'` の撤廃（ターミナルの xterm.js などがノンスに対応したら）、HSTS の期間の延長（証明書の更新が安定したら）

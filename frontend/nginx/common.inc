@@ -5,9 +5,15 @@ index index.html;
 client_max_body_size 1m;
 server_tokens off;
 
+# セキュリティヘッダー（server に書くと、add_header の無い location すべてに付く。
+# location の中に add_header を足すと、ここのヘッダーがその location では付かなくなるので足さないこと）
 add_header X-Content-Type-Options nosniff always;
-add_header X-Frame-Options DENY always;
+add_header X-Frame-Options DENY always;  # CSP の frame-ancestors 'none' と同じ意味（古いブラウザ向けに残す）
 add_header Referrer-Policy same-origin always;
+# CSP の値は csp.inc の map で決める（/docs だけ別の値）
+add_header Content-Security-Policy $ncm_csp always;
+# このアプリで使わないブラウザの機能（カメラ・マイク・位置情報など）を無効にする
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
 
 # REST API / WebSocket（SSHターミナル・Ping監視）を backend へ中継
 location /api/ {
