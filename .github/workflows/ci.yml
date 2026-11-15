@@ -1,5 +1,5 @@
 # プッシュ・プルリクエストごとにテストとビルドを実行する
-#   backend : ruff（リンター）と pytest（SQLite・fakeredis・テスト用 SSH サーバーを使うので DB / Redis は不要）
+#   backend : ロックファイルの確認、ruff（リンター）と pytest（SQLite・fakeredis・テスト用 SSH サーバーを使うので DB / Redis は不要）
 #   frontend: 型チェック（tsc）と本番ビルド（vite build）
 #   e2e     : 画面テスト（Playwright。backend を SQLite で起動し、初期データを入れて Chromium で操作する）
 name: CI
@@ -34,7 +34,13 @@ jobs:
             backend/requirements.txt
             backend/requirements-dev.txt
       - name: 依存パッケージのインストール
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        # requirements-dev.txt はロックファイル（本番の依存も同じ版で含む）
+        run: pip install --require-hashes -r requirements-dev.txt
+      - name: ロックファイルが requirements*.in と合っているか
+        # .in を変えたのにロックを生成し直していない・ロックを手で書き換えた、を検出する
+        run: |
+          pip install uv==0.11.32
+          bash ../scripts/lock_deps.sh --check
       - name: ruff（リンター）
         run: ruff check --output-format=github .
       - name: pytest
@@ -142,7 +148,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: 依存パッケージのインストール
         run: |
-          pip install -r ../backend/requirements.txt -r ../backend/requirements-dev.txt
+          pip install --require-hashes -r ../backend/requirements-dev.txt
           npm ci
           npx playwright install --with-deps chromium
       - name: 画面テスト

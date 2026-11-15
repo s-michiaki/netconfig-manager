@@ -555,7 +555,7 @@ API が応答していても、worker やスケジューラーが止まってい
   - `Strict-Transport-Security`（HSTS）: HTTPS で配信しているときだけ `max-age=86400`（1 日）を付けます。自己管理の CA の証明書で運用しているため、証明書の期限切れなどで HTTPS が使えなくなったときに入れなくなる期間を短くしています。社内のほかのサブドメインを巻き込まないよう `includeSubDomains` は付けず、ブラウザへの事前登録（`preload`）もしません。HTTPS で運用していて外したい場合は `frontend/nginx/https.conf` の行を消して frontend を再ビルドしてください
   - `X-Content-Type-Options: nosniff`・`X-Frame-Options: DENY`（CSP の `frame-ancestors 'none'` と同じく、ほかのサイトの枠内に表示させない）・`Referrer-Policy: same-origin`・`Permissions-Policy`（カメラ・マイク・位置情報などを使わない）
   - nginx の `location` の中に `add_header` を書くと、その場所では上のヘッダーが付かなくなります。設定を変えるときは `csp.inc` の `map` で値を切り替えてください
-- **依存パッケージの脆弱性**: GitHub Actions（`.github/workflows/audit.yml`）で push のたびと毎週月曜に `pip-audit`（backend）と `npm audit --omit=dev`（frontend）を実行します
+- **依存パッケージの脆弱性**: GitHub Actions（`.github/workflows/audit.yml`）で push のたびと毎週月曜に `pip-audit`（backend）と `npm audit --omit=dev`（frontend）を実行します。backend の依存はロックファイルで全部の版を固定しており、`pip-audit` は本番に入る版そのものを検査します（更新の手順は「テスト」の「依存パッケージの更新」）
   - 例外: paramiko の `PYSEC-2026-2858`（ssh-rsa＝SHA-1 署名を許可している）は除外しています。修正版の paramiko 5 は ssh-rsa を廃止しており、ssh-rsa しか使えない古いネットワーク機器へ接続できなくなるためです。古い機器が無くなったら paramiko 5 へ更新して除外を外してください
 
 ---
@@ -577,14 +577,14 @@ PostgreSQL / Redis 不要（SQLite・fakeredis・テスト用SSHサーバーを�
 
 ```bash
 cd backend
-pip install -r requirements.txt -r requirements-dev.txt
+pip install --require-hashes -r requirements-dev.txt   # 本番の依存も同じ版で含む（Python 3.12 推奨）
 pytest
 ```
 
 コンテナ内で実行する場合:
 
 ```bash
-docker compose run --rm backend sh -c "pip install -r requirements-dev.txt && pytest"
+docker compose run --rm backend sh -c "pip install --require-hashes -r requirements-dev.txt && pytest"
 ```
 
 リンター（ruff。設定は `backend/ruff.toml`）:
@@ -606,12 +606,36 @@ PYTHON=python3 npm run e2e         # backend の依存パッケージが入っ�
 
 GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
 
-- backend: ruff と pytest（Python 3.12）
+- backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff と pytest（Python 3.12）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
 - nginx: 本番と同じ nginx のイメージで設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
-あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit`、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `deps-smoke` は、本番と同じく `requirements.txt` だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため）。
+あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit` でロックファイルに書かれた版をそのまま検査、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `deps-smoke` は、本番と同じく `requirements.txt`（ロックファイル）だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため。ロックファイルは「宣言されていない依存」の不具合もそのまま固定してしまうので、ロックを更新したときの確認として残しています）。
+
+### 依存パッケージの更新（ロックファイル）
+
+backend の依存は、人が編集する `backend/requirements.in`（直接使うパッケージ。`==` で固定）と、そこから生成するロックファイル `backend/requirements.txt`（間接的な依存も含めて全部の版とハッシュを固定）に分けています。本番のイメージは `pip install --require-hashes -r requirements.txt` で入れるので、再ビルドしても版が変わらず、ロックに無いパッケージや中身の違うファイルは入りません。開発・テスト用は `requirements-dev.in` → `requirements-dev.txt`（本番の依存も同じ版で含む）です。**ロックファイルは手で編集しないでください**（CI が検出して失敗します）。
+
+生成には [uv](https://docs.astral.sh/uv/) を使います（`pip install uv==0.11.32`。CI と同じ版）。本番のコンテナ（`python:3.12-slim`）と同じ Python 3.12 向けに、OS を問わない形で解決するので、手元の Python の版や OS は問いません。
+
+```bash
+# パッケージを追加・版を変える: backend/requirements.in（開発用は requirements-dev.in）を編集してから
+bash scripts/lock_deps.sh                  # 変えたところだけロックに反映（ほかの版はそのまま）
+
+# 間接的な依存だけを上げる（pip-audit で脆弱性が見つかったときなど）
+bash scripts/lock_deps.sh -P パッケージ名
+
+# .in で固定していない間接的な依存をすべて新しい版にする（影響が大きいので、上げたら下の確認を必ず行う）
+bash scripts/lock_deps.sh --upgrade
+
+# ロックが .in と合っているかの確認（CI と同じ）
+bash scripts/lock_deps.sh --check
+```
+
+- 更新したら、`pip install --require-hashes -r backend/requirements-dev.txt` で入れて pytest を実行し、差分（`git diff backend/requirements*.txt`）を確認して `.in` と一緒にコミットしてください。push 後は CI の `deps-smoke` で本番の依存だけでの起動も確かめられます
+- 意図して固定しているもの（`requirements.in` のコメント参照。消さないこと）: kombu 5.6.2（5.7.0 は依存の宣言漏れで本番の worker が Redis に接続できない）、paramiko 3.5.1（5 系は ssh-rsa を廃止し古い機器へ接続できなくなる）
+- 本番の Python を 3.13 などに上げるときは、`scripts/lock_deps.sh` の `--python-version` を変えてロックを生成し直してください
 
 ---
 
@@ -660,12 +684,15 @@ netconfig-manager/
 │   ├── setup.sh                 # 自動セットアップ・更新
 │   ├── check_env.sh             # 導入前チェック
 │   ├── import_cert.sh           # HTTPS 化（証明書の取り込み）
+│   ├── lock_deps.sh             # backend の依存のロックファイルの生成・確認（uv）
 │   ├── backup.sh                # バックアップ（setup.sh が毎日実行するよう登録）
 │   └── restore.sh               # バックアップからの復元
 ├── backend/
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── requirements-dev.txt     # テスト用
+│   ├── requirements.in          # 依存パッケージ（直接使うもの。人が編集する）
+│   ├── requirements.txt         # ロックファイル（全部の版とハッシュ。lock_deps.sh で生成し、手で編集しない）
+│   ├── requirements-dev.in      # テスト用の依存パッケージ
+│   ├── requirements-dev.txt     # テスト用のロックファイル（本番の依存も同じ版で含む）
 │   ├── alembic.ini              # DBマイグレーション設定
 │   ├── migrations/versions/     # マイグレーション
 │   ├── tests/                   # pytest

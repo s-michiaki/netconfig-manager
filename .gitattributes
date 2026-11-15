@@ -1,2 +1,5 @@
 # シェルスクリプトは Windows で編集・チェックアウトしても LF のまま保つ（CRLF だと Linux で動かない）
 *.sh text eol=lf
+# Python の依存のロックファイルは、Windows でチェックアウトしても LF のまま保つ（scripts/lock_deps.sh --check の比較を OS で変えないため）
+backend/requirements*.txt text eol=lf
+backend/requirements*.in text eol=lf

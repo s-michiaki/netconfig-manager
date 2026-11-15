@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# requirements.txt はロックファイル（全部の版とハッシュを固定。requirements.in から scripts/lock_deps.sh で生成）。
+# --require-hashes で、ロックに無いパッケージや中身の違うファイルは入れない（再ビルドで版が変わらないようにする）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY . .
 

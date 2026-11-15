@@ -1,0 +1,32 @@
+# 本番で使う依存パッケージ（直接使うものだけ。人が編集するのはこのファイル）
+# 全部の版を固定したロックファイル requirements.txt は、このファイルから生成する（手で編集しない）
+#   生成・更新: bash scripts/lock_deps.sh（手順は README の「依存パッケージの更新」）
+# 版は == で固定する（脆弱性対応などで意図して選んだ版を、ロックの再生成で勝手に変えないため）
+fastapi==0.162.2
+starlette==1.10.0
+uvicorn[standard]==0.30.6
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+alembic==1.13.3
+pydantic==2.9.2
+pydantic-settings==2.5.2
+celery==5.4.0
+# kombu は celery の依存。5.7.0 は Redis 用のモジュールが packaging を使うのに依存として宣言しておらず、
+# 本番のイメージ（開発用パッケージなし）では Celery が Redis に接続できなくなる（収集の受け付けが 500、スケジュールが動かない）
+kombu==5.6.2
+redis==5.1.1
+netmiko==4.4.0
+# paramiko は 3.5 系に留める。修正版の 5 系は ssh-rsa（SHA-1 署名）を廃止しており、ssh-rsa しか使えない
+# 古い機器へ接続できなくなる（audit.yml で PYSEC-2026-2858 を除外。README の「セキュリティ」参照）。
+# 3.5.1 は、cryptography 50 でパスフレーズ付き RSA 鍵を読めなくなる 3.5.0 の不具合を避けるための版
+paramiko==3.5.1
+gitpython==3.2.1
+PyJWT==2.15.1
+bcrypt==4.2.0
+cryptography==50.0.2
+croniter==3.0.3
+python-multipart==0.0.33
+websockets==13.1
+icmplib==3.0.4
+pysnmp==7.1.28
+regex==2026.9.29

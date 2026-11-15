@@ -1,9 +1,9 @@
 # 依存パッケージの確認（本番で使うパッケージだけ）
-#   backend : pip-audit（backend/requirements.txt）
-#   backend : 本番の依存だけを入れた環境で起動できるか（deps-smoke）
+#   backend : pip-audit（backend/requirements.txt。全部の版を固定したロックファイルをそのまま検査する）
+#   backend : 本番の依存（ロックファイル）だけを入れた環境で起動できるか（deps-smoke）
 #   frontend: npm audit（devDependencies を除く。high 以上で失敗）
-# push・プルリクエストのほか、新しく公開された脆弱性や、固定していない依存の新しい版による不具合に
-# 気づけるよう毎週月曜にも実行する
+# push・プルリクエストのほか、新しく公開された脆弱性に気づけるよう毎週月曜にも実行する
+# （依存はロックファイルで全部の版を固定しているので、更新は scripts/lock_deps.sh で意図して行う）
 name: Audit
 
 on:
@@ -35,12 +35,15 @@ jobs:
         # 除外している脆弱性（理由は README の「セキュリティ」を参照）
         #   PYSEC-2026-2858 paramiko: ssh-rsa（SHA-1 署名）を許可している。修正版（5.0）は ssh-rsa を廃止しており、
         #                    ssh-rsa しか使えない古いネットワーク機器へ接続できなくなるため、3.5 系のまま使う
-        run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-2858
+        # --require-hashes --disable-pip: 依存を解決し直さず、ロックファイルに書かれた版（本番に入る版）を
+        # ハッシュを確かめたうえでそのまま検査する
+        run: pip-audit -r requirements.txt --require-hashes --disable-pip --ignore-vuln PYSEC-2026-2858
 
   deps-smoke:
     # テストのジョブは開発用パッケージ（pytest など）も入れるため、本番のイメージにだけ無いパッケージに
     # 依存する不具合（例: kombu 5.7.0 が packaging を宣言していない）を見逃す。本番と同じく
-    # requirements.txt だけを入れ、worker の読み込みとタスクの登録（Redis への送信）まで確かめる
+    # requirements.txt（ロックファイル）だけを入れ、worker の読み込みとタスクの登録（Redis への送信）まで確かめる
+    # ロックファイルは「宣言されていない依存」もそのまま固定してしまうため、ロックを更新したときの確認として残す
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -63,7 +66,8 @@ jobs:
       - name: 本番の依存だけをインストール
         run: |
           python -m venv /tmp/prod
-          /tmp/prod/bin/pip install -r requirements.txt
+          /tmp/prod/bin/pip install --require-hashes -r requirements.txt
+          /tmp/prod/bin/pip check
       - name: API・worker の読み込みとタスクの登録
         run: |
           /tmp/prod/bin/python -c "
