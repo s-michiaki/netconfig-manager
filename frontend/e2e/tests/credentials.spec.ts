@@ -91,3 +91,63 @@ test("認証情報プロファイルのメニューは管理者だけに表示�
     await page.evaluate(() => localStorage.clear());
   }
 });
+
+test("ほかの管理者のプロファイルは編集・割り当てできず、引き継ぐと扱えるようになる", async ({ page }) => {
+  const NAME = "E2E-所有者テスト";
+  const OTHER = { name: "e2e-admin2", password: "password-1234" };
+  await login(page);
+  const admin = await authHeaders(page);
+  const removeProfile = async (headers: Record<string, string>) => {
+    const list: { id: string; name: string; can_manage: boolean }[] =
+      await (await page.request.get("/api/credential-profiles/", { headers })).json();
+    for (const p of list.filter((x) => x.name === NAME)) {
+      if (!p.can_manage) await page.request.post(`/api/credential-profiles/${p.id}/takeover`, { headers });
+      expect((await page.request.delete(`/api/credential-profiles/${p.id}`, { headers })).status()).toBe(204);
+    }
+  };
+  const removeUser = async () => {
+    const users: { id: string; username: string }[] = await (await page.request.get("/api/users/", { headers: admin })).json();
+    for (const u of users.filter((x) => x.username === OTHER.name)) await page.request.delete(`/api/users/${u.id}`, { headers: admin });
+  };
+  await removeProfile(admin); // 前回の失敗で残っていても同じ結果になるように
+  await removeUser();
+  try {
+    // admin がプロファイルを作る（共有なし = 所有者だけが編集・使用できる）
+    expect((await page.request.post("/api/credential-profiles/", {
+      headers: admin, data: { name: NAME, username: "netops", password: "e2e-secret-pw" },
+    })).status()).toBe(201);
+    expect((await page.request.post("/api/users/", {
+      headers: admin, data: { username: OTHER.name, password: OTHER.password, role: "admin" },
+    })).status()).toBe(201);
+    await page.locator('a[href="/credential-profiles"]').first().click();
+    const row = page.locator("tr", { hasText: NAME });
+    await expect(row).toContainText("所有者のみ");
+    await expect(row.getByRole("button", { name: "編集" })).toBeVisible();
+
+    // 別の管理者: 見えるが、編集も割り当てもできない
+    await page.evaluate(() => localStorage.clear());
+    await login(page, OTHER);
+    await page.locator('a[href="/credential-profiles"]').first().click();
+    await expect(row).toContainText("admin");
+    await expect(row).toContainText("操作できません");
+    await expect(row.getByRole("button", { name: "編集" })).toHaveCount(0);
+    await page.locator('a[href="/devices"]').first().click();
+    await page.locator(".device-card", { hasText: "SW-3F" }).getByRole("button", { name: "編集" }).click();
+    const dm = page.locator(".modal");
+    await dm.getByRole("tab", { name: "プロファイルを使う" }).click();
+    const option = dm.getByLabel("認証情報プロファイル").locator("option", { hasText: NAME });
+    await expect(option).toBeDisabled();
+    await expect(option).toContainText("使用できません");
+    await dm.getByRole("button", { name: "キャンセル" }).click();
+
+    // 引き継ぐと所有者になり、編集できる
+    await page.locator('a[href="/credential-profiles"]').first().click();
+    page.once("dialog", (d) => { expect(d.message()).toContain("監査ログに残り"); void d.accept(); });
+    await row.getByRole("button", { name: "引き継ぐ" }).click();
+    await expect(row.getByRole("button", { name: "編集" })).toBeVisible();
+    await expect(row).toContainText(OTHER.name);
+  } finally {
+    await removeProfile(await authHeaders(page));
+    await removeUser();
+  }
+});

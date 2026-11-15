@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, StringConstraints
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.api.terminal import close_user_sessions
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Role
 from app.core.security import hash_password
+from app.models.device import CredentialProfile
 from app.models.notification import NotificationSetting, UserGroupMember
 from app.models.user import User
 from app.services.audit import Audit, get_audit
@@ -218,6 +219,8 @@ async def delete_user(
     await db.execute(delete(NotificationSetting).where(
         NotificationSetting.owner_type == "user", NotificationSetting.owner_id == user.id
     ))
+    # 所有していた認証情報プロファイルは「所有者なし」にする（管理者が引き継ぐ。SQLite では SET NULL が効かないため明示的に）
+    await db.execute(update(CredentialProfile).where(CredentialProfile.owner_id == user.id).values(owner_id=None))
     await db.delete(user)
     audit("user.delete", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()

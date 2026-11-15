@@ -222,8 +222,12 @@ def _pydantic_message(err: dict) -> str:
     return "値が正しくありません"
 
 
-async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "skip") -> list[RowResult]:
-    """各行を確かめる。DB は読むだけで変更しない"""
+async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "skip",
+                   usable_profiles: set[str] | None = None) -> list[RowResult]:
+    """各行を確かめる。DB は読むだけで変更しない
+
+    usable_profiles: 取り込む人が使用できる認証情報プロファイルの ID（None は確かめない）
+    """
     from app.api.devices import DeviceCreate  # API の入力規則をそのまま使う（循環 import を避けてここで読む）
 
     groups = await _name_index(db, DeviceGroup)
@@ -274,6 +278,9 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
         group_id = _lookup(group_in, groups, "グループ", "group", errs)
         jump_id = _lookup(jump_in, jumps, "踏み台", "jump_host", errs)
         profile_id = _lookup(profile_in, profiles, "認証情報プロファイル", "credential_profile", errs)
+        if profile_id and usable_profiles is not None and profile_id not in usable_profiles:
+            errs["credential_profile"] = (f"「{profile_in}」を使用できません（使用できるのは、所有者と、"
+                                          "使用を許可されたユーザーグループのメンバーだけです）")
 
         active_in = cell("is_active").strip()
         is_active = True

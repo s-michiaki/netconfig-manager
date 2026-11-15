@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import (
     AfterValidator,
@@ -33,10 +33,11 @@ from app.core.ssh_keys import (
 )
 from app.models.compliance import ComplianceException, ComplianceResult
 from app.models.device import CollectLog, ConfigComment, CredentialProfile, Device, DeviceGroup, JumpHost
-from app.services import collect_state, device_import, inventory, login_limit
+from app.services import collect_state, device_import, inventory, login_limit, profile_access
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
 from app.services.connection import effective_credentials
+from app.services.notify import notify_profile_owner
 from app.worker import collect_all_devices, collect_device_config, mark_collect_queued
 
 router = APIRouter()
@@ -210,6 +211,23 @@ async def _check_profile(db: AsyncSession, profile_id: str) -> CredentialProfile
     return profile
 
 
+async def _require_profile_use(db: AsyncSession, user, profile: CredentialProfile) -> None:
+    """このプロファイルを機器に割り当ててよいか（所有者・管理グループ・使用を許可されたグループ）"""
+    if not (await profile_access.load(db, user)).can_use(profile):
+        raise HTTPException(status_code=403, detail=profile_access.deny_use(profile.name))
+
+
+def _notify_profile_owner(background: BackgroundTasks, profile: CredentialProfile, user, what: str,
+                          devices: list[str]) -> None:
+    """自分以外がプロファイルを機器に割り当てた・接続先を変えたときに、所有者へ知らせる"""
+    if profile.owner_id and profile.owner_id != user.id:
+        names = "、".join(devices[:10]) + (f" ほか {len(devices) - 10} 台" if len(devices) > 10 else "")
+        background.add_task(
+            notify_profile_owner, profile.owner_id, f"認証情報プロファイル「{profile.name}」{what}",
+            f"{user.username} さんが、あなたが所有する認証情報プロファイル「{profile.name}」{what}。",
+            [("操作した人", user.username), ("機器", names)])
+
+
 async def _check_group(db: AsyncSession, group_id: str | None) -> None:
     if group_id and not await db.get(DeviceGroup, group_id):
         raise HTTPException(status_code=422, detail="指定されたグループが存在しません")
@@ -260,13 +278,15 @@ async def export_devices(db: AsyncSession = Depends(get_db), audit: Audit = Depe
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require(Perm.DEVICE_WRITE))],
 )
-async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+async def create_device(payload: DeviceCreate, background: BackgroundTasks, db: AsyncSession = Depends(get_db),
+                        audit: Audit = Depends(get_audit)):
     data = payload.model_dump()
     data["credential_profile_id"] = data.get("credential_profile_id") or None
     profile = None
     if data["credential_profile_id"]:
         # プロファイルを使う機器は、機器側の認証情報を保存しない（送られてきても捨てる）
         profile = await _check_profile(db, data["credential_profile_id"])
+        await _require_profile_use(db, audit.user, profile)
         for f in CREDENTIAL_FIELDS:
             data[f] = None
     else:
@@ -289,6 +309,8 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
                      {"auth": [k for k in ("password", "private_key") if data.get(k)]})})
     await _commit_or_409(db)
     await db.refresh(device)
+    if profile is not None:
+        _notify_profile_owner(background, profile, audit.user, "が機器に割り当てられました", [device.name])
     return _to_response(device, await _refs(db))
 
 
@@ -316,6 +338,7 @@ async def import_template():
 
 @router.post("/import", dependencies=[Depends(require(Perm.DEVICE_WRITE))])
 async def import_devices(
+    background: BackgroundTasks,
     file: UploadFile = File(...),
     dry_run: bool = Form(True),  # 既定は確認だけ（うっかり登録しないように）
     skip_errors: bool = Form(False),  # True: エラーの行を飛ばして正しい行だけ登録する
@@ -337,7 +360,10 @@ async def import_devices(
     except device_import.ImportFormatError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     del raw, text
-    results = await device_import.validate(db, parsed, on_duplicate)
+    access = await profile_access.load(db, audit.user)
+    all_profiles = (await db.execute(select(CredentialProfile))).scalars().all()
+    usable = {p.id for p in all_profiles if access.can_use(p)}
+    results = await device_import.validate(db, parsed, on_duplicate, usable)
     counts = {s: sum(r.status == s for r in results) for s in ("ok", "error", "skip")}
     created: list[Device] = []
     if not dry_run and counts["ok"] and (skip_errors or not counts["error"]):
@@ -368,6 +394,10 @@ async def import_devices(
             await db.rollback()
             raise HTTPException(status_code=409, detail="ほかの操作で同じ名前の機器が登録されました。"
                                                         "もう一度「内容を確認」からやり直してください") from e
+        for p in all_profiles:  # ほかの人のプロファイルを割り当てたら、所有者へ知らせる
+            names = [d.name for d in created if d.credential_profile_id == p.id]
+            if names:
+                _notify_profile_owner(background, p, audit.user, "が機器に割り当てられました（CSV 取り込み）", names)
     return {
         "dry_run": dry_run, "encoding": encoding, "total": len(results), **counts,
         "created": len(created), "registered": bool(created), "ignored_columns": parsed.ignored_columns,
@@ -437,7 +467,8 @@ async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
 async def update_device(
-    device_id: str, payload: DeviceUpdate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)
+    device_id: str, payload: DeviceUpdate, background: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    audit: Audit = Depends(get_audit),
 ):
     device = await _get_or_404(db, device_id)
     data = payload.model_dump(exclude_unset=True)
@@ -448,6 +479,18 @@ async def update_device(
             profile = await _check_profile(db, data["credential_profile_id"])
     use_profile = data.get("credential_profile_id", device.credential_profile_id)
     leaving_profile = bool(device.credential_profile_id) and not use_profile
+    assigning = bool(profile) and profile.id != device.credential_profile_id
+    if assigning:
+        await _require_profile_use(db, audit.user, profile)
+    # プロファイルを使い続ける機器の接続先（ホスト・ポート・踏み台）を変えるのも「使用」に当たる。
+    # 接続先を書き換えると、次の接続でプロファイルのパスワードがそこへ送られるため
+    retarget = [k for k in ("hostname", "port") if data.get(k) is not None and data[k] != getattr(device, k)]
+    if "jump_host_id" in data and (data["jump_host_id"] or None) != device.jump_host_id:
+        retarget.append("jump_host_id")  # 踏み台の付け替え・取り外し
+    kept_profile = None
+    if retarget and use_profile and use_profile == device.credential_profile_id:
+        kept_profile = await _check_profile(db, use_profile)
+        await _require_profile_use(db, audit.user, kept_profile)
     if use_profile:
         # プロファイルを使う機器では、機器側の認証情報の入力は使わない（保存もしない）
         for f in (*CREDENTIAL_FIELDS, "clear_password", "clear_private_key", "clear_enable_secret"):
@@ -500,6 +543,10 @@ async def update_device(
         raise HTTPException(status_code=422, detail="パスワードとSSH秘密鍵の両方を削除することはできません")
     await _commit_or_409(db)
     await db.refresh(device)
+    if assigning:
+        _notify_profile_owner(background, profile, audit.user, "が機器に割り当てられました", [device.name])
+    elif kept_profile is not None:
+        _notify_profile_owner(background, kept_profile, audit.user, "を使う機器の接続先が変更されました", [device.name])
     return _to_response(device, await _refs(db))
 
 

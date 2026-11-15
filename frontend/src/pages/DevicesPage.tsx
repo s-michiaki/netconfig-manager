@@ -223,6 +223,11 @@ function DeviceModal({
   const showAuthMode = profiles.length > 0 || form.auth_mode === "profile";
   const useProfile = form.auth_mode === "profile";
   const selectedProfile = profiles.find((p) => p.id === form.credential_profile_id);
+  // この機器が使っているプロファイルを自分が使用できない場合は、接続先を変えられない
+  // （接続先を書き換えると、次の接続でプロファイルのパスワードがそこへ送られるため。サーバー側でも断る）
+  const currentProfile = isEdit ? profiles.find((p) => p.id === device.credential_profile_id) : undefined;
+  const lockTarget = !!currentProfile && !currentProfile.can_use && useProfile
+    && form.credential_profile_id === device?.credential_profile_id;
   // 保存済みの「この機器だけの認証情報」があるか（プロファイルを使っていた機器は機器側に何も持っていない）
   const ownSaved = isEdit && !device.credential_profile_id;
   const leavingProfile = isEdit && !!device.credential_profile_id && !useProfile;
@@ -237,6 +242,13 @@ function DeviceModal({
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <p className="modal-title">{isEdit ? "デバイス編集" : "デバイス追加"}</p>
+        {lockTarget && (
+          <p className="form-hint platform-note" style={{ margin: "0 0 12px" }}>
+            ⓘ この機器は認証情報プロファイル「{currentProfile.name}」を使っています。あなたはこのプロファイルを使用できないため、
+            接続先（IP アドレス・ポート・踏み台）は変更できません。変更するときは、プロファイルの所有者
+            {currentProfile.owner_name ? `（${currentProfile.owner_name}）` : ""}に使用の許可を依頼してください。
+          </p>
+        )}
         <div className="form-group">
           <label className="form-label">ホスト名（識別名）</label>
           <input value={form.name} onChange={(e) => set("name", e.target.value)} />
@@ -250,7 +262,7 @@ function DeviceModal({
         </div>
         <div className="form-group">
           <label className="form-label">IPアドレス / FQDN</label>
-          <input value={form.hostname} onChange={(e) => set("hostname", e.target.value)} />
+          <input value={form.hostname} onChange={(e) => set("hostname", e.target.value)} disabled={lockTarget} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
           <div className="form-group">
@@ -266,14 +278,16 @@ function DeviceModal({
           </div>
           <div className="form-group">
             <label className="form-label">SSHポート</label>
-            <input type="number" min={1} max={65535} value={form.port} onChange={(e) => set("port", +e.target.value)} />
+            <input type="number" min={1} max={65535} value={form.port} onChange={(e) => set("port", +e.target.value)}
+              disabled={lockTarget} />
           </div>
         </div>
         {platformInfo?.note && <p className="form-hint platform-note">ⓘ {platformInfo.note}</p>}
         <div className="form-group">
           <label className="form-label">接続経路</label>
           <div style={{ display: "flex", gap: 8 }}>
-            <select value={form.jump_host_id} onChange={(e) => { set("jump_host_id", e.target.value); setReach(null); }}>
+            <select value={form.jump_host_id} disabled={lockTarget}
+              onChange={(e) => { set("jump_host_id", e.target.value); setReach(null); }}>
               <option value="">直接接続</option>
               {jumpHosts.map((j) => <option key={j.id} value={j.id}>踏み台経由: {j.name}（{j.hostname}）</option>)}
             </select>
@@ -306,8 +320,18 @@ function DeviceModal({
             <select id="dev-profile" value={form.credential_profile_id}
               onChange={(e) => set("credential_profile_id", e.target.value)}>
               <option value="">（選んでください）</option>
-              {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}（{p.username}）</option>)}
+              {profiles.map((p) => (
+                // 使用できないプロファイルは選べない（この機器がいま使っているものは、そのまま残せる）
+                <option key={p.id} value={p.id} disabled={!p.can_use && p.id !== device?.credential_profile_id}>
+                  {p.name}（{p.username}）{p.can_use ? "" : " — 使用できません"}
+                </option>
+              ))}
             </select>
+            {profiles.some((p) => !p.can_use) && (
+              <p className="cp-hint" style={{ marginTop: 6 }}>
+                「使用できません」のプロファイルは、所有者か、使用を許可されたユーザーグループのメンバーだけが割り当てられます。
+              </p>
+            )}
             {selectedProfile && (
               <p className="form-hint platform-note" style={{ margin: "8px 0 0" }}>
                 ユーザー名 {selectedProfile.username} ·{" "}

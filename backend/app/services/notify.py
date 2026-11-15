@@ -50,9 +50,11 @@ TIMEOUT_SEC = 10
 MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
 EVENTS = ("change", "violation", "failure", "system")
-EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知"}
+EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
+                "profile": "認証情報プロファイルの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
-                 "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました"}
+                 "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
+                 "profile": "認証情報プロファイルへの操作を所有者に通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
@@ -365,6 +367,60 @@ async def notify_system(db: AsyncSession, title: str, body: str, facts: list[tup
         (d, _message(d.kind, title, facts or [], url, "システムの状態を画面で確認", 0x34D399 if ok else 0xEF4444, body), None)
         for d in dests
     ], None)
+
+
+async def resolve_user_destinations(db: AsyncSession, user_id: str) -> list[Destination]:
+    """特定のユーザー本人に届く通知先（個人の設定。グループの設定を引き継いでいる場合は所属グループの設定）。
+
+    本人あての連絡なので、通知する内容の選択（on_*）と対象の機器グループは見ない
+    """
+    user = await db.get(User, user_id)
+    if user is None or not user.is_active:
+        return []
+    dests: dict[tuple[str, str], Destination] = {}
+
+    def add(s: NotificationSetting, label: str) -> None:
+        for kind, url in setting_webhooks(s).items():
+            d = dests.setdefault((kind, url), Destination(kind, url))
+            d.setting_ids.add(s.id)
+            d.via.add(label)
+
+    own = (await db.execute(select(NotificationSetting).where(
+        NotificationSetting.owner_type == "user", NotificationSetting.owner_id == user_id))).scalars().first()
+    mode = own.mode if own else "inherit"
+    if mode == "custom":
+        add(own, f"ユーザー: {user.username}")
+    elif mode == "inherit":
+        group_ids = (await db.execute(
+            select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id))).scalars().all()
+        if group_ids:
+            groups = {g.id: g.name for g in (await db.execute(
+                select(UserGroup).where(UserGroup.id.in_(group_ids)))).scalars()}
+            for gs in (await db.execute(select(NotificationSetting).where(
+                    NotificationSetting.owner_type == "group", NotificationSetting.owner_id.in_(group_ids)))).scalars():
+                if gs.mode == "custom" and gs.owner_id in groups:
+                    add(gs, f"グループ: {groups[gs.owner_id]}")
+    return list(dests.values())
+
+
+async def notify_profile_owner(owner_id: str, title: str, body: str, facts: list[tuple[str, str]]) -> dict:
+    """認証情報プロファイルの所有者へ、ほかの人の操作（編集・割り当て・引き継ぎなど）を知らせる。
+
+    API の応答を待たせないよう、応答を返したあとに別の DB セッションで送る（失敗しても操作は取り消さない）
+    """
+    from app.core.database import AsyncSessionLocal  # 循環 import を避けてここで読む
+
+    try:
+        async with AsyncSessionLocal() as db:
+            dests = await resolve_user_destinations(db, owner_id)
+            url = _page_url("/credential-profiles")
+            return await _deliver(db, "profile", [
+                (d, _message(d.kind, title, facts, url, "認証情報プロファイルを画面で確認", 0xF59E0B, body), None)
+                for d in dests
+            ], None)
+    except Exception:  # noqa: BLE001 - 通知は付加的な処理。失敗しても呼び出し元へ伝えない
+        logger.exception("認証情報プロファイルの所有者への通知に失敗しました")
+        return {"sent": 0, "failed": 0}
 
 
 async def wants_any(db: AsyncSession, event: str) -> bool:

@@ -52,6 +52,7 @@ ACTIONS = {
     "credential_profile.create": "認証情報プロファイル登録",
     "credential_profile.update": "認証情報プロファイル変更",
     "credential_profile.delete": "認証情報プロファイル削除",
+    "credential_profile.takeover": "認証情報プロファイルの引き継ぎ",
     "schedule.create": "スケジュール作成",
     "schedule.update": "スケジュール変更",
     "schedule.delete": "スケジュール削除",

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.device import DeviceGroup
+from app.models.device import CredentialProfileAccess, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
 from app.services.audit import Audit, get_audit
@@ -318,6 +318,8 @@ async def delete_group(group_id: str, db: AsyncSession = Depends(get_db), audit:
     await db.execute(delete(NotificationSetting).where(
         NotificationSetting.owner_type == "group", NotificationSetting.owner_id == g.id
     ))
+    # 認証情報プロファイルの共有範囲からも外す（SQLite では外部キーの CASCADE が効かないため明示的に）
+    await db.execute(delete(CredentialProfileAccess).where(CredentialProfileAccess.group_id == g.id))
     await db.delete(g)
     audit("user_group.delete", target_type="user_group", target_id=g.id, target_name=g.name)
     await db.commit()

@@ -48,8 +48,30 @@ class CredentialProfile(Base):
     private_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     key_passphrase: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    # 所有者（作成した人）。編集・削除・共有範囲の変更ができる。ユーザーを削除すると NULL（管理者が引き継ぐ）
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", name="fk_credential_profiles_owner_id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class CredentialProfileAccess(Base):
+    """認証情報プロファイルの共有範囲（ユーザーグループ単位）
+
+    access = "manage": 所有者と同じく編集・削除・共有範囲の変更ができる（使用もできる）
+    access = "use"   : 機器への割り当てと、そのプロファイルを使う機器の接続先の変更ができる
+    """
+
+    __tablename__ = "credential_profile_access"
+
+    profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("credential_profiles.id", name="fk_cpa_profile_id", ondelete="CASCADE"), primary_key=True
+    )
+    group_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_groups.id", name="fk_cpa_group_id", ondelete="CASCADE"), primary_key=True
+    )
+    access: Mapped[str] = mapped_column(String(8), nullable=False)  # manage / use
 
 
 class DeviceGroup(Base):
