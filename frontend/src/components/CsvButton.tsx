@@ -15,26 +15,43 @@ function filenameOf(header: string, fallback: string): string {
   return m ? m[1] : fallback;
 }
 
-/** ファイルをダウンロードする（認証ヘッダーが要るため blob で受け取る） */
-export async function downloadFile(path: string, params: Record<string, unknown>, fallback: string) {
-  const r = await api.get<Blob>(path, { params, responseType: "blob" });
-  const url = URL.createObjectURL(r.data);
+/** 受け取った blob をファイルとして保存する */
+function saveBlob(data: Blob, disposition: string, fallback: string) {
+  const url = URL.createObjectURL(data);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filenameOf(String(r.headers["content-disposition"] ?? ""), fallback);
+  a.download = filenameOf(disposition, fallback);
   document.body.appendChild(a);
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+/** ファイルをダウンロードする（認証ヘッダーが要るため blob で受け取る） */
+export async function downloadFile(path: string, params: Record<string, unknown>, fallback: string) {
+  const r = await api.get<Blob>(path, { params, responseType: "blob" });
+  saveBlob(r.data, String(r.headers["content-disposition"] ?? ""), fallback);
+}
+
+/**
+ * 条件を本文で送ってダウンロードする（検索語など URL・アクセスログに残したくない条件用）。
+ * 応答ヘッダーを返す（件数などを画面で知らせるため）
+ */
+export async function downloadFilePost(path: string, body: unknown, fallback: string) {
+  const r = await api.post<Blob>(path, body, { responseType: "blob" });
+  saveBlob(r.data, String(r.headers["content-disposition"] ?? ""), fallback);
+  return r.headers;
+}
+
 /** 絞り込みと同じ条件で CSV をダウンロードする */
 export const downloadCsv = downloadFile;
 
-export function CsvButton({ onClick }: { onClick: () => Promise<void> }) {
+export function CsvButton({ onClick, disabled = false, title = "今の絞り込み条件で出力します（最大10万件）" }: {
+  onClick: () => Promise<void>; disabled?: boolean; title?: string;
+}) {
   const [busy, setBusy] = useState(false);
   return (
-    <button className="btn" disabled={busy} title="今の絞り込み条件で出力します（最大10万件）"
+    <button className="btn" disabled={busy || disabled} title={title}
       onClick={async () => { setBusy(true); try { await onClick(); } finally { setBusy(false); } }}>
       {busy ? "出力中..." : "CSV 出力"}
     </button>

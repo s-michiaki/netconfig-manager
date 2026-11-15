@@ -86,3 +86,86 @@ def test_search_device_limits():
     # 空文字に一致する正規表現（^）は行として数える
     count, lines = config_search.search_device(config_search.build_pattern("^", "regex", True), "a\nb\n", 0, time.monotonic() + 5)
     assert count == 2 and lines[0]["ranges"] == []
+
+
+def test_search_platform_filter_and_csv_export():
+    import csv
+    import io
+
+    with TestClient(app) as c:
+        admin = login(c, "admin", "initial-pass-123")
+        uid = uuid.uuid4().hex[:6]
+        ids = {}
+        for n, platform in (("ios", "cisco_ios"), ("fgt", "fortinet"), ("ios2", "cisco_ios")):
+            ids[n] = c.post("/api/devices/", json=dict(name=f"exp-{n}-{uid}", hostname=f"10.8.0.{len(ids) + 1}",
+                                                       platform=platform, username="u", password="p"),
+                            headers=admin).json()["id"]
+        mark = f"EXP{uid}"
+        # 画面の表示上限（50 行）を超える一致・数式に見える行・長い行
+        cs.save_config(ids["ios"], "hostname ios\n" + "".join(f" description {mark}-{i}\n" for i in range(70))
+                       + f"={mark}+1\n" + f"{mark} " + "x" * 1000 + "\n", "test")
+        cs.save_config(ids["fgt"], f"config system global\n    set hostname {mark}\nend\n", "test")
+        cs.save_config(ids["ios2"], "hostname ios2\n", "test")
+
+        def search(**kw):
+            return c.post("/api/configs/search", json=kw, headers=admin)
+
+        # 機種で絞る
+        d = search(query=mark, platform="fortinet").json()
+        assert [x["name"] for x in d["devices"]] == [f"exp-fgt-{uid}"]
+        assert all(x["platform"] == "fortinet" for x in d["devices"] + d["unmatched"] + d["not_collected"])
+        d = search(query=mark, platform="cisco_ios").json()
+        assert [x["name"] for x in d["devices"]] == [f"exp-ios-{uid}"] and f"exp-ios2-{uid}" in [x["name"] for x in d["unmatched"]]
+
+        def export(**kw):
+            return c.post("/api/configs/search/export", json=kw, headers=admin)
+
+        r = export(query=mark, context=3)
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+        assert 'filename="config_search_' in r.headers["content-disposition"]
+        assert r.text.startswith("﻿")
+        rows = list(csv.reader(io.StringIO(r.text.lstrip("﻿"))))
+        assert rows[0] == ["機器名", "ホスト / IP", "機種", "グループ", "世代", "行番号", "一致した行"]
+        body = [x for x in rows[1:] if x[0].endswith(uid)]
+        ios = [x for x in body if x[0] == f"exp-ios-{uid}"]
+        # 50 行を超えても一致した行はすべて出す（前後の行は含めない）
+        assert len(ios) == 72 and len(body) == 73
+        assert ios[0][1:6] == ["10.8.0.1", cs.PLATFORMS["cisco_ios"].label, "", ios[0][4], "2"] and len(ios[0][4]) == 7
+        assert ios[0][6] == f" description {mark}-0" and ios[69][5] == "71"
+        assert ios[70][6] == f"'={mark}+1"  # 数式として実行されないよう ' を付ける
+        assert len(ios[71][6]) == config_search.MAX_LINE_LENGTH + 1  # 長い行は検索と同じく切る
+        fgt = [x for x in body if x[0] == f"exp-fgt-{uid}"]
+        assert fgt == [[f"exp-fgt-{uid}", "10.8.0.2", cs.PLATFORMS["fortinet"].label, "", fgt[0][4], "2", f"    set hostname {mark}"]]
+        assert [x[0] for x in body] == sorted(x[0] for x in body)  # 機器名順
+        assert r.headers["x-search-rows"] == str(len(rows) - 1) and r.headers["x-search-timed-out"] == "0"
+        assert r.headers["x-search-total-lines"] == str(len(rows) - 1)
+        # 機種で絞った CSV
+        r = export(query=mark, platform="fortinet")
+        assert [x[0] for x in csv.reader(io.StringIO(r.text.lstrip("﻿")))][1:] == [f"exp-fgt-{uid}"]
+
+        # 監査ログには件数と条件だけを残し、検索語は残さない
+        log = c.get("/api/audit/logs", params={"action": "config.search_export"}, headers=admin).json()["items"][0]
+        assert '"rows": 1' in log["detail"] and '"platform": "fortinet"' in log["detail"] and mark not in log["detail"]
+        # 入力の誤り・権限
+        assert export(query="(", mode="regex").status_code == 422
+        assert export(query=" ").status_code == 422
+        assert c.post("/api/configs/search/export", json={"query": mark}).status_code == 401
+        name = f"expv-{uid}"
+        c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"}, headers=admin)
+        assert c.post("/api/configs/search/export", json={"query": mark},
+                      headers=login(c, name, "password-1234")).status_code == 200
+
+
+def test_search_total_line_limit():
+    """CSV 用の合計の上限（max_total_lines）で返す行を打ち切り、件数は全部数える"""
+    import uuid as _uuid
+
+    ids = [str(_uuid.uuid4()) for _ in range(2)]
+    for i in ids:
+        cs.save_config(i, "".join(f"line {n}\n" for n in range(30)), "test")
+    targets = [config_search.Target(i, f"t{n}", "h", "cisco_ios", None) for n, i in enumerate(ids)]
+    res = config_search.search(targets, "line", max_lines=100, max_total_lines=45)
+    assert [len(h.lines) for h in res.hits] == [30, 15] and res.total_lines == 60
+    # 既定（画面）は機器ごとに 50 行まで
+    res = config_search.search(targets, "line")
+    assert [len(h.lines) for h in res.hits] == [30, 30]

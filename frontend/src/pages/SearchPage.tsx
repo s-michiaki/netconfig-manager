@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import { CsvButton, downloadFilePost } from "../components/CsvButton";
+import { usePlatforms } from "../platforms";
 
 /**
  * コンフィグ検索: 全機器の最新コンフィグを文字列・正規表現で横断検索する。
@@ -15,6 +17,9 @@ interface Result {
   devices: Hit[]; unmatched: Target[]; not_collected: Target[]; timed_out: Target[];
 }
 interface Group { id: string; name: string; }
+interface SearchRequest {
+  query: string; mode: string; case_sensitive: boolean; context: number; group_id: string | null; platform: string | null;
+}
 
 /** 一致した部分を強調して1行を表示する */
 function Highlighted({ text, ranges }: { text: string; ranges: [number, number][] }) {
@@ -43,9 +48,13 @@ export default function SearchPage() {
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [context, setContext] = useState(0);
   const [groupId, setGroupId] = useState("");
+  const [platform, setPlatform] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
+  const { groups: platformGroups, label: platformLabel } = usePlatforms();
   const [result, setResult] = useState<Result | null>(null);
-  const [searched, setSearched] = useState("");
+  // 最後に検索したときの条件（CSV はこの条件で出力する。入力欄を変えてから押しても結果とずれないように）
+  const [lastRequest, setLastRequest] = useState<SearchRequest | null>(null);
+  const [csvNote, setCsvNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -58,17 +67,39 @@ export default function SearchPage() {
     if (!query.trim()) return;
     setBusy(true);
     setError("");
+    setCsvNote("");
+    const req: SearchRequest = {
+      query, mode, case_sensitive: caseSensitive, context, group_id: groupId || null, platform: platform || null,
+    };
     try {
-      const r = await api.post<Result>("/configs/search", {
-        query, mode, case_sensitive: caseSensitive, context, group_id: groupId || null,
-      });
+      const r = await api.post<Result>("/configs/search", req);
       setResult(r.data);
-      setSearched(query);
+      setLastRequest(req);
     } catch (err) {
       setError(errorMessage(err));
       setResult(null);
+      setLastRequest(null);
     } finally {
       setBusy(false);
+    }
+  };
+
+  // 検索結果の CSV（一致した行をすべて。検索語は URL に載せないよう POST で送る）
+  const exportCsv = async () => {
+    if (!lastRequest) return;
+    setError("");
+    setCsvNote("");
+    try {
+      const h = await downloadFilePost("/configs/search/export", lastRequest, "config_search.csv");
+      const rows = Number(h["x-search-rows"] ?? 0);
+      const total = Number(h["x-search-total-lines"] ?? 0);
+      const timedOut = Number(h["x-search-timed-out"] ?? 0);
+      const notes = [];
+      if (total > rows) notes.push(`上限のため ${total} 行のうち ${rows} 行だけを出力しました`);
+      if (timedOut) notes.push(`時間内に調べきれなかった機器が ${timedOut} 台あり、その機器の行は含まれていません`);
+      setCsvNote(notes.join("。"));
+    } catch (err) {
+      setError(errorMessage(err, "CSV を出力できませんでした"));
     }
   };
 
@@ -85,7 +116,7 @@ export default function SearchPage() {
             <input className="mono" value={query} onChange={(e) => setQuery(e.target.value)} maxLength={200} autoFocus
                    placeholder={mode === "regex" ? "例: ^ip route 0\\.0\\.0\\.0 " : "例: 192.168.10.1 / vlan 120"} />
           </label>
-          <label className="audit-field">
+          <label className="audit-field srch-field-narrow">
             <span className="form-label">探し方</span>
             <select value={mode} onChange={(e) => setMode(e.target.value)}>
               <option value="contains">文字列を含む</option>
@@ -101,6 +132,17 @@ export default function SearchPage() {
             </select>
           </label>
           <label className="audit-field">
+            <span className="form-label">機種</span>
+            <select value={platform} onChange={(e) => setPlatform(e.target.value)}>
+              <option value="">すべて</option>
+              {platformGroups.map(([vendor, list]) => (
+                <optgroup key={vendor} label={vendor}>
+                  {list.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+          <label className="audit-field srch-field-narrow">
             <span className="form-label">前後の行</span>
             <select value={context} onChange={(e) => setContext(Number(e.target.value))}>
               <option value={0}>表示しない</option>
@@ -119,10 +161,15 @@ export default function SearchPage() {
 
         {result && (
           <>
-            <p className="srch-summary">
-              <b>{result.matched}</b> 台で <b>{result.total_lines}</b> 行が一致（{result.searched} 台を検索）
-              <span className="topo-muted">　「<span className="mono">{searched}</span>」</span>
-            </p>
+            <div className="srch-summary-row">
+              <p className="srch-summary">
+                <b>{result.matched}</b> 台で <b>{result.total_lines}</b> 行が一致（{result.searched} 台を検索）
+                <span className="topo-muted">　「<span className="mono">{lastRequest?.query}</span>」</span>
+              </p>
+              <CsvButton onClick={exportCsv} disabled={!result.total_lines}
+                title="この検索で一致した行をすべて CSV で出力します（表示の 50 行の制限とは別。最大10万行）" />
+            </div>
+            {csvNote && <div className="srch-note srch-note-warn">{csvNote}</div>}
             {result.timed_out.length > 0 && (
               <div className="srch-note srch-note-warn">
                 時間内に調べきれなかった機器が {result.timed_out.length} 台あります。正規表現を単純にするか、機器グループで絞ってください。
@@ -133,6 +180,7 @@ export default function SearchPage() {
               <section key={d.id} className="card srch-device">
                 <header>
                   <b>{d.name}</b> <span className="topo-muted mono">{d.hostname}</span>
+                  <span className="topo-muted topo-small">{platformLabel(d.platform)}</span>
                   {d.group && <span className="badge badge-neutral">{d.group}</span>}
                   <span className="topo-muted topo-small">{d.count} 行</span>
                   <span style={{ flex: 1 }} />

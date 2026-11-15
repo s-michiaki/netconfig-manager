@@ -81,6 +81,7 @@ ACTIONS = {
     "monitor.snmp_delete": "SNMP の設定の削除",
     "monitor.fw_collect": "FW ヒット数の取得",
     "activity.export": "アクティビティログの CSV 出力",
+    "config.search_export": "コンフィグ検索結果の CSV 出力",
 }
 
 MAX_DETAIL_LENGTH = 4000

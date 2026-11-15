@@ -16,9 +16,10 @@ test("閲覧者がコンフィグを横断検索し、一致した機器とし�
   await expect(rest).toContainText("Core-SW01");
 
   // 正規表現・前後の行・グループの絞り込み
-  await page.locator("select").nth(0).selectOption("regex");
-  await page.locator("select").nth(1).selectOption({ label: "本社" });
-  await page.locator("select").nth(2).selectOption("1");
+  // （select は並び順ではなくラベルで選ぶ。項目を足しても壊れないように）
+  await page.getByLabel("探し方").selectOption("regex");
+  await page.getByLabel("機器グループ").selectOption({ label: "本社" });
+  await page.getByLabel("前後の行").selectOption("1");
   await page.locator("input.mono").fill("^interface .*0/2$");
   await page.getByRole("button", { name: "検索" }).click();
   await expect(page.locator(".srch-summary")).toContainText("1 台で 1 行が一致（3 台を検索）");
@@ -32,4 +33,32 @@ test("閲覧者がコンフィグを横断検索し、一致した機器とし�
   await page.getByRole("button", { name: "検索" }).click();
   await page.locator(".srch-device").first().getByRole("link", { name: /世代管理で開く/ }).click();
   await expect(page).toHaveURL(/\/history\?device=/);
+});
+
+test("機種で絞り込み、検索結果の一致した行を CSV で出力できる", async ({ page }) => {
+  await login(page, USERS.viewer);
+  await page.goto("/search");
+  await page.locator("input.mono").fill("interface");
+  // CSV のリクエストに検索語が URL として載らないことも確かめる
+  const urls: string[] = [];
+  page.on("request", (r) => urls.push(r.url()));
+  await page.getByRole("button", { name: "検索" }).click();
+  await expect(page.locator(".srch-summary")).toContainText("4 台で 6 行が一致（4 台を検索）");
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "CSV 出力" }).click()]);
+  expect(dl.suggestedFilename()).toMatch(/^config_search_\d{8}-\d{6}\.csv$/);
+  const csv = (await (await import("node:fs/promises")).readFile((await dl.path())!, "utf-8")).replace(/^\uFEFF/, "");
+  const lines = csv.trim().split("\r\n");
+  expect(lines[0]).toBe("機器名,ホスト / IP,機種,グループ,世代,行番号,一致した行");
+  expect(lines).toHaveLength(7);
+  expect(lines[1]).toMatch(/^Core-SW01,10\.0\.1\.1,.*,本社,[0-9a-f]{7},3,interface GigabitEthernet0\/1$/);
+  expect(urls.filter((u) => u.includes("interface"))).toEqual([]);
+
+  // 機種で絞る（初期データの機器はすべて Cisco IOS）
+  await page.getByLabel("機種").selectOption("fortinet");
+  await page.getByRole("button", { name: "検索" }).click();
+  await expect(page.locator(".srch-summary")).toContainText("0 台で 0 行が一致（0 台を検索）");
+  await expect(page.getByRole("button", { name: "CSV 出力" })).toBeDisabled();
+  await page.getByLabel("機種").selectOption("cisco_ios");
+  await page.getByRole("button", { name: "検索" }).click();
+  await expect(page.locator(".srch-summary")).toContainText("4 台で 6 行が一致（4 台を検索）");
 });

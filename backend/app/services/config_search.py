@@ -4,6 +4,7 @@
 - 文字列（そのまま含む）と正規表現のどちらも regex パッケージで照合し、時間を制限する
   （利用者が入力した正規表現で CPU を使い切らないため。コンプライアンスと同じ考え方）
 - 結果が大きくなりすぎないよう、機器ごとの表示行数と行の長さに上限を設ける
+  （CSV 出力では max_lines・max_total_lines を指定して一致した行をすべて受け取る。時間の制限は同じ）
 """
 import time
 from dataclasses import dataclass, field
@@ -79,8 +80,9 @@ def _clip(text: str) -> str:
     return text if len(text) <= MAX_LINE_LENGTH else text[:MAX_LINE_LENGTH] + "…"
 
 
-def search_device(rx: regex.Pattern, text: str, context: int, end: float) -> tuple[int, list[dict]]:
-    """1台分。戻り値は (一致した行数, 表示する行)。時間切れは TimeoutError"""
+def search_device(rx: regex.Pattern, text: str, context: int, end: float,
+                  max_lines: int = MAX_LINES_PER_DEVICE) -> tuple[int, list[dict]]:
+    """1台分。戻り値は (一致した行数, 表示する行（max_lines まで）)。時間切れは TimeoutError"""
     lines = text.splitlines()
     count, out = 0, []
     for i, line in enumerate(lines):
@@ -98,7 +100,7 @@ def search_device(rx: regex.Pattern, text: str, context: int, end: float) -> tup
         if not ranges:
             continue
         count += 1
-        if len(out) < MAX_LINES_PER_DEVICE:
+        if len(out) < max_lines:
             out.append({
                 "line": i + 1, "text": _clip(line),
                 "ranges": [[s, min(e, MAX_LINE_LENGTH)] for s, e in ranges if s < MAX_LINE_LENGTH and e > s],
@@ -109,10 +111,12 @@ def search_device(rx: regex.Pattern, text: str, context: int, end: float) -> tup
 
 
 def search(targets: list[Target], query: str, mode: str = "contains", case_sensitive: bool = False,
-           context: int = 0) -> SearchResult:
+           context: int = 0, max_lines: int = MAX_LINES_PER_DEVICE, max_total_lines: int | None = None) -> SearchResult:
+    """max_lines: 機器ごとに返す行の上限。max_total_lines: 全機器で返す行の合計の上限（CSV 出力用。件数は全部数える）"""
     rx = build_pattern(query, mode, case_sensitive)
     res = SearchResult()
     overall = time.monotonic() + TOTAL_TIMEOUT_SEC
+    returned = 0
     for t in targets:
         if time.monotonic() >= overall:
             res.timed_out.append(t)
@@ -123,7 +127,9 @@ def search(targets: list[Target], query: str, mode: str = "contains", case_sensi
             continue
         try:
             # 1台あたりの上限はコンプライアンスの正規表現と同じ設定を使う
-            count, lines = search_device(rx, text, context, min(overall, time.monotonic() + settings.COMPLIANCE_REGEX_TIMEOUT))
+            limit = max_lines if max_total_lines is None else max(0, min(max_lines, max_total_lines - returned))
+            count, lines = search_device(rx, text, context,
+                                         min(overall, time.monotonic() + settings.COMPLIANCE_REGEX_TIMEOUT), limit)
         except TimeoutError:
             res.timed_out.append(t)
             continue
@@ -132,4 +138,5 @@ def search(targets: list[Target], query: str, mode: str = "contains", case_sensi
             continue
         res.hits.append(DeviceHit(target=t, count=count, commit=_commit(t.id), lines=lines))
         res.total_lines += count
+        returned += len(lines)
     return res

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.config_comments import comment_dict, comments_for
 from app.api.deps import require
 from app.core.config import settings
-from app.core.csv_export import content_disposition
+from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import Device, DeviceGroup
@@ -19,6 +19,7 @@ from app.services import config_search
 from app.services.audit import Audit, get_audit
 from app.services.config_service import (
     MAX_COMPARE_LINES,
+    PLATFORMS,
     compare_texts,
     get_config_content,
     get_config_diff,
@@ -166,14 +167,17 @@ class SearchRequest(BaseModel):
     platform: str | None = None
 
 
+def platform_label(platform: str) -> str:
+    spec = PLATFORMS.get(platform)
+    return spec.label if spec else platform
+
+
 def _target_dict(t: config_search.Target) -> dict:
     return {"id": t.id, "name": t.name, "hostname": t.hostname, "platform": t.platform, "group": t.group}
 
 
-# 検索語を URL（アクセスログ）に残さないよう POST にしている
-@router.post("/search", dependencies=[Depends(require(Perm.CONFIG_READ))])
-async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)):
-    """全機器（または絞り込んだ機器）の最新コンフィグを横断検索する"""
+async def _search_targets(db: AsyncSession, body: SearchRequest) -> list[config_search.Target]:
+    """検索条件の確認と、対象の機器（機器グループ・機種で絞る。名前順）"""
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="検索する文字列を入力してください")
     try:
@@ -189,7 +193,14 @@ async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)
         q = q.where(Device.platform == body.platform)
     devices = (await db.execute(q)).scalars().all()
     groups = {g.id: g.name for g in (await db.execute(select(DeviceGroup))).scalars().all()}
-    targets = [config_search.Target(d.id, d.name, d.hostname, d.platform, groups.get(d.group_id)) for d in devices]
+    return [config_search.Target(d.id, d.name, d.hostname, d.platform, groups.get(d.group_id)) for d in devices]
+
+
+# 検索語を URL（アクセスログ）に残さないよう POST にしている
+@router.post("/search", dependencies=[Depends(require(Perm.CONFIG_READ))])
+async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)):
+    """全機器（または絞り込んだ機器）の最新コンフィグを横断検索する"""
+    targets = await _search_targets(db, body)
     res = await run_in_threadpool(config_search.search, targets, body.query, body.mode, body.case_sensitive, body.context)
     return {
         "searched": len(targets) - len(res.not_collected) - len(res.timed_out),
@@ -201,3 +212,35 @@ async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)
         "not_collected": [_target_dict(t) for t in res.not_collected],
         "timed_out": [_target_dict(t) for t in res.timed_out],
     }
+
+
+@router.post("/search/export", dependencies=[Depends(require(Perm.CONFIG_READ))])
+async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+    """検索結果の CSV（機器・行番号・一致した行）。画面の表示（機器ごとに 50 行）とは別に、一致した行をすべて出す
+
+    - 合計の上限は MAX_EXPORT_ROWS 行、時間の制限は検索と同じ。前後の行は含めない。1 行は検索と同じ長さで切る
+    - 調べきれなかった機器の数・上限で打ち切ったかは応答ヘッダーで返す（画面で知らせる）
+    - 検索語は URL にも監査ログにも残さない（出力した件数と絞り込み条件だけを残す）
+    """
+    targets = await _search_targets(db, body)
+    res = await run_in_threadpool(
+        config_search.search, targets, body.query, body.mode, body.case_sensitive, 0,
+        MAX_EXPORT_ROWS, MAX_EXPORT_ROWS,
+    )
+    rows = [
+        [h.target.name, h.target.hostname, platform_label(h.target.platform), h.target.group or "",
+         (h.commit or "")[:7], ln["line"], ln["text"]]
+        for h in res.hits for ln in h.lines
+    ]
+    truncated = res.total_lines > len(rows)
+    audit("config.search_export", detail={
+        "rows": len(rows), "devices": len(res.hits), "truncated": truncated, "timed_out": len(res.timed_out),
+        "mode": body.mode, "group_id": body.group_id, "platform": body.platform,
+    })
+    await db.commit()
+    resp = csv_response(["機器名", "ホスト / IP", "機種", "グループ", "世代", "行番号", "一致した行"], rows,
+                        export_name("config_search"))
+    resp.headers["X-Search-Rows"] = str(len(rows))
+    resp.headers["X-Search-Total-Lines"] = str(res.total_lines)
+    resp.headers["X-Search-Timed-Out"] = str(len(res.timed_out))
+    return resp
