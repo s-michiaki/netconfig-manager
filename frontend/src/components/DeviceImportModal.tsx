@@ -12,6 +12,7 @@ interface ImportRow {
   platform: string;
   group: string | null;
   jump_host: string | null;
+  credential_profile: string | null;
   status: "ok" | "error" | "skip";
   errors: string[];
   warnings: string[];
@@ -118,7 +119,8 @@ export default function DeviceImportModal({ onClose, onDone }: { onClose: () => 
           <>
             <p className="topo-muted topo-small imp-help">
               {"1 行目は列の見出しです（台帳 CSV と同じ見出し＋「ユーザー名」「パスワード」など）。"
-                + "機種は ID か表示名、グループ・踏み台は登録済みの名前で指定します。SSH 鍵は CSV では登録できません。"
+                + "機種は ID か表示名、グループ・踏み台・認証情報プロファイルは登録済みの名前で指定します"
+                + "（認証情報プロファイルを指定した行は、ユーザー名・パスワードを空にします）。SSH 鍵は CSV では登録できません。"
                 + "Excel で編集すると、数字だけ・先頭が 0 のパスワードが変わることがあります（列を「文字列」にしてください）。"}
             </p>
             <div className="imp-pick">
@@ -162,7 +164,10 @@ export default function DeviceImportModal({ onClose, onDone }: { onClose: () => 
                           <td>{r.name}</td>
                           <td>{r.hostname}</td>
                           <td>{r.platform}</td>
-                          <td>{r.group ?? ""}{r.jump_host ? ` / 踏み台 ${r.jump_host}` : ""}</td>
+                          <td>
+                            {r.group ?? ""}{r.jump_host ? ` / 踏み台 ${r.jump_host}` : ""}
+                            {r.credential_profile ? ` / 認証 ${r.credential_profile}` : ""}
+                          </td>
                           <td>
                             <span className={`badge ${STATUS_LABEL[r.status][1]}`}>{STATUS_LABEL[r.status][0]}</span>
                             {r.errors.map((m) => <div key={m} className="imp-msg imp-ng">{m}</div>)}

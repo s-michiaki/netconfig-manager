@@ -32,6 +32,7 @@ const CollectPage = lazyPage(() => import("./pages/CollectPage"));
 const CompliancePage = lazyPage(() => import("./pages/CompliancePage"));
 const HistoryPage = lazyPage(() => import("./pages/HistoryPage"));
 const JumpHostsPage = lazyPage(() => import("./pages/JumpHostsPage"));
+const CredentialProfilesPage = lazyPage(() => import("./pages/CredentialProfilesPage"));
 const NotificationsPage = lazyPage(() => import("./pages/NotificationsPage"));
 const PingPage = lazyPage(() => import("./pages/PingPage"));
 const SchedulePage = lazyPage(() => import("./pages/SchedulePage"));
@@ -48,6 +49,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; featur
   { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
   { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
   { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
+  { path: "/credential-profiles", label: "認証情報プロファイル", icon: "🪪", perm: PERM.DEVICE_WRITE },
   { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
   { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
   // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
@@ -192,6 +194,8 @@ function Layout() {
           <Route path="/topology" element={<RequirePerm perm={PERM.TOPOLOGY_READ}><TopologyPage /></RequirePerm>} />
           <Route path="/topology/:mapId" element={<RequirePerm perm={PERM.TOPOLOGY_READ}><TopologyPage /></RequirePerm>} />
           <Route path="/jump-hosts" element={<RequirePerm perm={PERM.DEVICE_WRITE}><JumpHostsPage /></RequirePerm>} />
+          <Route path="/credential-profiles"
+            element={<RequirePerm perm={PERM.DEVICE_WRITE}><CredentialProfilesPage /></RequirePerm>} />
           <Route path="/collect" element={<RequirePerm perm={PERM.COLLECT}><CollectPage /></RequirePerm>} />
           <Route path="/history" element={<RequirePerm perm={PERM.CONFIG_READ}><HistoryPage /></RequirePerm>} />
           <Route path="/search" element={<RequirePerm perm={PERM.CONFIG_READ}><SearchPage /></RequirePerm>} />

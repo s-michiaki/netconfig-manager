@@ -5,6 +5,7 @@ import { PERM, useAuth } from "../auth";
 import { downloadCsv } from "../components/CsvButton";
 import DeviceImportModal from "../components/DeviceImportModal";
 import { usePlatforms } from "../platforms";
+import type { CredentialProfile } from "./CredentialProfilesPage";
 
 interface Device {
   id: string;
@@ -12,9 +13,10 @@ interface Device {
   hostname: string;
   platform: string;
   port: number;
-  username: string;
+  username: string | null; // 接続に使うユーザー名（プロファイルを使う機器はプロファイルのもの）
   description: string | null;
   is_active: boolean;
+  // has_* と key_info は接続に実際に使う認証情報（プロファイルを使う機器はプロファイルのもの）
   has_enable_secret: boolean;
   has_password: boolean;
   has_private_key: boolean;
@@ -23,6 +25,8 @@ interface Device {
   group_id: string | null;
   group_name: string | null;
   jump_host_name: string | null;
+  credential_profile_id: string | null;
+  credential_profile_name: string | null;
   read_timeout: number | null;
   // 機器台帳（収集のときに自動で読み取る。未取得・対象外の機種は null）
   model: string | null;
@@ -58,13 +62,15 @@ const EMPTY_FORM = {
   clear_enable_secret: false, jump_host_id: "", group_id: "",
   private_key: "", key_passphrase: "", clear_password: false, clear_private_key: false,
   read_timeout: "", // 空欄 = 既定値
+  auth_mode: "own" as "own" | "profile", // profile: 認証情報プロファイルを使う / own: この機器だけの認証情報
+  credential_profile_id: "",
 };
 
 function DeviceModal({
-  device, jumpHosts, groups, defaultGroupId, onClose, onSave,
+  device, jumpHosts, groups, profiles, defaultGroupId, onClose, onSave,
 }: {
-  device: Device | null; jumpHosts: JumpHostOption[]; groups: DeviceGroup[]; defaultGroupId?: string;
-  onClose: () => void; onSave: () => void;
+  device: Device | null; jumpHosts: JumpHostOption[]; groups: DeviceGroup[]; profiles: CredentialProfile[];
+  defaultGroupId?: string; onClose: () => void; onSave: () => void;
 }) {
   const isEdit = device !== null;
   const [form, setForm] = useState(() =>
@@ -72,7 +78,9 @@ function DeviceModal({
       ? {
           ...EMPTY_FORM,
           name: device.name, hostname: device.hostname, platform: device.platform, port: device.port,
-          username: device.username, description: device.description ?? "", is_active: device.is_active,
+          username: device.username ?? "", description: device.description ?? "", is_active: device.is_active,
+          auth_mode: device.credential_profile_id ? "profile" : "own",
+          credential_profile_id: device.credential_profile_id ?? "",
           jump_host_id: device.jump_host_id ?? "",
           group_id: device.group_id ?? "",
           read_timeout: device.read_timeout != null ? String(device.read_timeout) : "",
@@ -92,23 +100,28 @@ function DeviceModal({
   const handleSubmit = async () => {
     setSaving(true);
     setError("");
-    const body = {
+    const common = {
       name: form.name,
       hostname: form.hostname,
       platform: form.platform,
       port: form.port,
-      username: form.username,
       description: form.description || null,
       is_active: form.is_active,
       jump_host_id: form.jump_host_id || null,
       group_id: form.group_id || null,
       read_timeout: form.read_timeout.trim() ? Number(form.read_timeout) : null,
+    };
+    // プロファイルを使う機器には、機器側の認証情報を送らない（サーバーでも保存しない）
+    const body = useProfile ? { ...common, credential_profile_id: form.credential_profile_id } : {
+      ...common,
+      credential_profile_id: null,
+      username: form.username,
       // 編集時、空欄のパスワードは「変更しない」
       password: form.password || undefined,
       private_key: form.private_key || undefined,
       key_passphrase: form.key_passphrase || undefined,
       enable_secret: form.enable_secret || undefined,
-      ...(isEdit
+      ...(ownSaved
         ? {
             clear_enable_secret: form.clear_enable_secret,
             clear_password: form.clear_password,
@@ -159,11 +172,19 @@ function DeviceModal({
   const { groups: platformGroups, byId: platformById } = usePlatforms();
   const platformInfo = platformById[form.platform];
 
-  const willHavePassword = (isEdit && device.has_password && !form.clear_password) || !!form.password;
-  const willHaveKey = (isEdit && device.has_private_key && !form.clear_private_key) || !!form.private_key;
+  // プロファイルが 0 件で、この機器もプロファイルを使っていなければ切り替えは出さない（従来どおりの画面）
+  const showAuthMode = profiles.length > 0 || form.auth_mode === "profile";
+  const useProfile = form.auth_mode === "profile";
+  const selectedProfile = profiles.find((p) => p.id === form.credential_profile_id);
+  // 保存済みの「この機器だけの認証情報」があるか（プロファイルを使っていた機器は機器側に何も持っていない）
+  const ownSaved = isEdit && !device.credential_profile_id;
+  const leavingProfile = isEdit && !!device.credential_profile_id && !useProfile;
+  const willHavePassword = (ownSaved && device.has_password && !form.clear_password) || !!form.password;
+  const willHaveKey = (ownSaved && device.has_private_key && !form.clear_private_key) || !!form.private_key;
   const timeoutValid = !form.read_timeout.trim() || (/^\d+$/.test(form.read_timeout.trim())
     && Number(form.read_timeout) >= 10 && Number(form.read_timeout) <= 600);
-  const canSave = form.name && form.hostname && form.username && (willHavePassword || willHaveKey) && timeoutValid;
+  const authValid = useProfile ? !!form.credential_profile_id : !!form.username && (willHavePassword || willHaveKey);
+  const canSave = form.name && form.hostname && authValid && timeoutValid;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -221,76 +242,115 @@ function DeviceModal({
             </p>
           )}
         </div>
-        <div className="form-group">
-          <label className="form-label">ユーザー名</label>
-          <input value={form.username} onChange={(e) => set("username", e.target.value)} autoComplete="off" />
-        </div>
-        <p className="section-label" style={{ marginTop: 6 }}>認証（パスワード・SSH秘密鍵のどちらか、または両方）</p>
-        <div className="form-group">
-          <label className="form-label">
-            パスワード{isEdit && device.has_password ? "（設定済み。変更時のみ入力）" : ""}
-          </label>
-          <input type="password" autoComplete="new-password" value={form.password}
-            onChange={(e) => set("password", e.target.value)} disabled={form.clear_password} />
-          {isEdit && device.has_password && (
-            <label className="form-check" style={{ marginTop: 6 }}>
-              <input type="checkbox" checked={form.clear_password} onChange={(e) => set("clear_password", e.target.checked)} />
-              パスワードを削除する（鍵認証のみにする）
+        {showAuthMode && (
+          <div className="form-group">
+            <span className="form-label">認証情報</span>
+            <div className="seg-tabs" role="tablist" aria-label="認証情報">
+              <button type="button" role="tab" aria-selected={useProfile} className={`seg-tab${useProfile ? " active" : ""}`}
+                onClick={() => set("auth_mode", "profile")}>プロファイルを使う</button>
+              <button type="button" role="tab" aria-selected={!useProfile} className={`seg-tab${!useProfile ? " active" : ""}`}
+                onClick={() => set("auth_mode", "own")}>この機器だけの認証情報を入力する</button>
+            </div>
+          </div>
+        )}
+        {useProfile ? (
+          <div className="form-group">
+            <label className="form-label" htmlFor="dev-profile">認証情報プロファイル</label>
+            <select id="dev-profile" value={form.credential_profile_id}
+              onChange={(e) => set("credential_profile_id", e.target.value)}>
+              <option value="">（選んでください）</option>
+              {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}（{p.username}）</option>)}
+            </select>
+            {selectedProfile && (
+              <p className="form-hint platform-note" style={{ margin: "8px 0 0" }}>
+                ユーザー名 {selectedProfile.username} ·{" "}
+                {[selectedProfile.has_password && "パスワード", selectedProfile.has_private_key && `秘密鍵（${selectedProfile.key_info ?? ""}）`,
+                  selectedProfile.has_enable_secret && "Enable"].filter(Boolean).join("・")}
+                <br />
+                プロファイルの値で接続します（この機器だけの認証情報は保存しません）。
+                {ownSaved && " 保存すると、この機器に入っていた認証情報は消えます。"}
+              </p>
+            )}
+          </div>
+        ) : (
+          <>
+            {leavingProfile && (
+              <p className="form-hint platform-note">
+                ⓘ プロファイルを外すと、この機器のユーザー名と、パスワードまたは SSH 秘密鍵の入力が必要です。
+              </p>
+            )}
+          <div className="form-group">
+            <label className="form-label" htmlFor="dev-user">ユーザー名</label>
+            <input id="dev-user" value={form.username} onChange={(e) => set("username", e.target.value)} autoComplete="off" />
+          </div>
+          <p className="section-label" style={{ marginTop: 6 }}>認証（パスワード・SSH秘密鍵のどちらか、または両方）</p>
+          <div className="form-group">
+            <label className="form-label">
+              パスワード{ownSaved && device.has_password ? "（設定済み。変更時のみ入力）" : ""}
             </label>
-          )}
-        </div>
-        <div className="form-group">
-          <label className="form-label">
-            SSH秘密鍵（OpenSSH / PEM 形式）{isEdit && device.has_private_key ? `— 設定済み: ${device.key_info ?? ""}` : "（任意）"}
-          </label>
-          <textarea
-            className="mono"
-            rows={4}
-            value={form.private_key}
-            onChange={(e) => set("private_key", e.target.value)}
-            disabled={form.clear_private_key}
-            placeholder={isEdit && device.has_private_key ? "変更する場合のみ貼り付け" : "-----BEGIN OPENSSH PRIVATE KEY-----\n..."}
-            spellCheck={false}
-            style={{ fontSize: 11, resize: "vertical" }}
-          />
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-            <label className="btn" style={{ padding: "2px 10px", fontSize: 11, cursor: "pointer" }}>
-              ファイルから読み込む
-              <input type="file" onChange={loadKeyFile} style={{ display: "none" }} disabled={form.clear_private_key} />
-            </label>
-            {isEdit && device.has_private_key && (
-              <label className="form-check">
-                <input type="checkbox" checked={form.clear_private_key}
-                  onChange={(e) => set("clear_private_key", e.target.checked)} />
-                秘密鍵を削除する
+            <input type="password" autoComplete="new-password" value={form.password}
+              onChange={(e) => set("password", e.target.value)} disabled={form.clear_password} />
+            {ownSaved && device.has_password && (
+              <label className="form-check" style={{ marginTop: 6 }}>
+                <input type="checkbox" checked={form.clear_password} onChange={(e) => set("clear_password", e.target.checked)} />
+                パスワードを削除する（鍵認証のみにする）
               </label>
             )}
           </div>
-        </div>
-        {(form.private_key || (isEdit && device.has_private_key && !form.clear_private_key)) && (
           <div className="form-group">
-            <label className="form-label">鍵のパスフレーズ（鍵が保護されている場合）</label>
-            <input type="password" autoComplete="new-password" value={form.key_passphrase}
-              onChange={(e) => set("key_passphrase", e.target.value)} />
-          </div>
-        )}
-        {!(willHavePassword || willHaveKey) && (
-          <p className="form-error">パスワードとSSH秘密鍵の少なくとも一方が必要です</p>
-        )}
-        <div className="form-group">
-          <label className="form-label">
-            Enableシークレット（任意{isEdit && device.has_enable_secret ? "・設定済み。変更時のみ入力" : ""}）
-          </label>
-          <input type="password" autoComplete="new-password" value={form.enable_secret}
-            onChange={(e) => set("enable_secret", e.target.value)} disabled={form.clear_enable_secret} />
-          {isEdit && device.has_enable_secret && (
-            <label className="form-check" style={{ marginTop: 6 }}>
-              <input type="checkbox" checked={form.clear_enable_secret}
-                onChange={(e) => set("clear_enable_secret", e.target.checked)} />
-              Enableシークレットを削除する
+            <label className="form-label">
+              SSH秘密鍵（OpenSSH / PEM 形式）{ownSaved && device.has_private_key ? `— 設定済み: ${device.key_info ?? ""}` : "（任意）"}
             </label>
+            <textarea
+              className="mono"
+              rows={4}
+              value={form.private_key}
+              onChange={(e) => set("private_key", e.target.value)}
+              disabled={form.clear_private_key}
+              placeholder={ownSaved && device.has_private_key ? "変更する場合のみ貼り付け" : "-----BEGIN OPENSSH PRIVATE KEY-----\n..."}
+              spellCheck={false}
+              style={{ fontSize: 11, resize: "vertical" }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+              <label className="btn" style={{ padding: "2px 10px", fontSize: 11, cursor: "pointer" }}>
+                ファイルから読み込む
+                <input type="file" onChange={loadKeyFile} style={{ display: "none" }} disabled={form.clear_private_key} />
+              </label>
+              {ownSaved && device.has_private_key && (
+                <label className="form-check">
+                  <input type="checkbox" checked={form.clear_private_key}
+                    onChange={(e) => set("clear_private_key", e.target.checked)} />
+                  秘密鍵を削除する
+                </label>
+              )}
+            </div>
+          </div>
+          {(form.private_key || (ownSaved && device.has_private_key && !form.clear_private_key)) && (
+            <div className="form-group">
+              <label className="form-label">鍵のパスフレーズ（鍵が保護されている場合）</label>
+              <input type="password" autoComplete="new-password" value={form.key_passphrase}
+                onChange={(e) => set("key_passphrase", e.target.value)} />
+            </div>
           )}
-        </div>
+          {!(willHavePassword || willHaveKey) && (
+            <p className="form-error">パスワードとSSH秘密鍵の少なくとも一方が必要です</p>
+          )}
+          <div className="form-group">
+            <label className="form-label">
+              Enableシークレット（任意{ownSaved && device.has_enable_secret ? "・設定済み。変更時のみ入力" : ""}）
+            </label>
+            <input type="password" autoComplete="new-password" value={form.enable_secret}
+              onChange={(e) => set("enable_secret", e.target.value)} disabled={form.clear_enable_secret} />
+            {ownSaved && device.has_enable_secret && (
+              <label className="form-check" style={{ marginTop: 6 }}>
+                <input type="checkbox" checked={form.clear_enable_secret}
+                  onChange={(e) => set("clear_enable_secret", e.target.checked)} />
+                Enableシークレットを削除する
+              </label>
+            )}
+          </div>
+          </>
+        )}
         <div className="form-group">
           <label className="form-label">応答待ち時間（秒・任意）</label>
           <input type="number" min={10} max={600} value={form.read_timeout}
@@ -519,6 +579,9 @@ function DeviceCard({
       {d.jump_host_name && (
         <p className="device-card-info" style={{ marginTop: 2 }}>↪ 踏み台経由: {d.jump_host_name}</p>
       )}
+      {d.credential_profile_name && (
+        <p className="device-card-info device-card-profile" style={{ marginTop: 2 }}>🪪 認証: {d.credential_profile_name}</p>
+      )}
       {showGroup && (
         <p className="device-card-info device-card-group" style={{ marginTop: 4 }}>
           <span className="grp-dot" style={{ background: groupColor ?? "#4a5178" }} />
@@ -545,6 +608,7 @@ export default function DevicesPage() {
   const [collecting, setCollecting] = useState(false);
   const [message, setMessage] = useState("");
   const [jumpHosts, setJumpHosts] = useState<JumpHostOption[]>([]);
+  const [profiles, setProfiles] = useState<CredentialProfile[]>([]);
   const [error, setError] = useState("");
   // 表示の設定はブラウザに覚えておく
   const [view, setView] = useState<"group" | "list">(() => readPref("devices:view", "group"));
@@ -567,6 +631,10 @@ export default function DevicesPage() {
     load();
     api.get<JumpHostOption[]>("/jump-hosts/").then((r) => setJumpHosts(r.data)).catch(() => undefined);
   }, []);
+  // 認証情報プロファイルは編集画面を開くときに読み直す（別の画面で追加した直後でも選べるように）
+  useEffect(() => {
+    if (modal) api.get<CredentialProfile[]>("/credential-profiles/").then((r) => setProfiles(r.data)).catch(() => undefined);
+  }, [modal]);
 
   // 絞り込みで指定していたグループが削除されたら解除する
   useEffect(() => {
@@ -664,7 +732,7 @@ export default function DevicesPage() {
   return (
     <div className="page">
       {modal && (
-        <DeviceModal device={modal.device} jumpHosts={jumpHosts} groups={groups} defaultGroupId={modal.groupId}
+        <DeviceModal device={modal.device} jumpHosts={jumpHosts} groups={groups} profiles={profiles} defaultGroupId={modal.groupId}
           onClose={() => setModal(null)} onSave={load} />
       )}
       {managing && <GroupManagerModal groups={groups} onClose={() => setManaging(false)} onChanged={load} />}

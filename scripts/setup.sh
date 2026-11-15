@@ -268,7 +268,7 @@ if [ "$FIRST_INSTALL" -eq 1 ]; then
   chmod 600 "$TMP_ENV"
   cat > "$TMP_ENV" <<EOF
 # NetConfig Manager 設定（setup.sh が $TS に生成）
-# ※ DEVICE_ENCRYPTION_KEY を失うと登録済みの機器・踏み台のパスワードを復号できなくなります
+# ※ DEVICE_ENCRYPTION_KEY を失うと登録済みの機器・踏み台・認証情報プロファイルのパスワードを復号できなくなります
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 SECRET_KEY=${SECRET_KEY}
 DEVICE_ENCRYPTION_KEY=${DEVICE_ENCRYPTION_KEY}

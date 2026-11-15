@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Literal
 
@@ -15,6 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.credential_profiles import key_info
 from app.api.deps import require
 from app.api.monitoring import delete_device_monitoring
 from app.core.config import settings
@@ -24,19 +26,21 @@ from app.core.permissions import Perm
 from app.core.ssh_keys import (
     MAX_PRIVATE_KEY_LENGTH,
     PrivateKeyError,
-    key_summary,
     load_private_key,
     normalize_private_key,
 )
 from app.models.compliance import ComplianceException, ComplianceResult
-from app.models.device import ConfigComment, Device, DeviceGroup, JumpHost
+from app.models.device import ConfigComment, CredentialProfile, Device, DeviceGroup, JumpHost
 from app.services import device_import, inventory
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
+from app.services.connection import effective_credentials
 from app.worker import collect_all_devices, collect_device_config
 
 router = APIRouter()
 
+# 機器側の認証情報の項目（認証情報プロファイルを使う機器では、どれも保存しない）
+CREDENTIAL_FIELDS = ("username", "password", "private_key", "key_passphrase", "enable_secret")
 
 
 def _check_platform(v: str) -> str:
@@ -65,7 +69,9 @@ class DeviceCreate(BaseModel):
     hostname: Host
     platform: Platform
     port: Port = 22
-    username: Username
+    # 認証情報プロファイルを使うときは、username・password・private_key・key_passphrase・enable_secret は使わない
+    credential_profile_id: str | None = None
+    username: Username | None = None
     # 認証はパスワード・SSH秘密鍵のどちらか、または両方
     password: Secret | None = None
     private_key: PrivateKey | None = None
@@ -79,6 +85,10 @@ class DeviceCreate(BaseModel):
 
     @model_validator(mode="after")
     def _need_auth(self):
+        if self.credential_profile_id:
+            return self  # 認証情報はプロファイルのものを使う
+        if not self.username:
+            raise ValueError("ユーザー名を入力してください（認証情報プロファイルを使う場合は不要です）")
         if not self.password and not self.private_key:
             raise ValueError("パスワードとSSH秘密鍵の少なくとも一方を指定してください")
         return self
@@ -86,7 +96,9 @@ class DeviceCreate(BaseModel):
 
 class DeviceUpdate(BaseModel):
     """部分更新。password / private_key / key_passphrase / enable_secret は空文字または未指定なら変更しない。
-    削除したい場合は clear_password / clear_private_key / clear_enable_secret を指定する"""
+    削除したい場合は clear_password / clear_private_key / clear_enable_secret を指定する。
+    credential_profile_id を指定すると機器側の認証情報は消し、null を明示してプロファイルを外すときは
+    username と password / private_key の入力が必要"""
 
     name: Name | None = None
     hostname: Host | None = None
@@ -104,6 +116,7 @@ class DeviceUpdate(BaseModel):
     is_active: bool | None = None
     jump_host_id: str | None = None  # null を明示すると直接接続に戻す
     group_id: str | None = None  # null を明示すると未分類に戻す
+    credential_profile_id: str | None = None  # null を明示するとこの機器だけの認証情報に戻す
     read_timeout: ReadTimeoutSec | None = None  # null を明示すると既定値に戻す
 
 
@@ -115,15 +128,18 @@ class DeviceResponse(BaseModel):
     hostname: str
     platform: str
     port: int
-    username: str
+    username: str | None  # 接続に使うユーザー名（プロファイルを使う機器はプロファイルのもの）
     description: str | None
     is_active: bool
+    # 以下の has_* と key_info は、接続に実際に使う認証情報（プロファイルを使う機器はプロファイルのもの）を表す
     has_enable_secret: bool = False
     has_password: bool = False
     has_private_key: bool = False
     key_info: str | None = None  # 例: "ssh-ed25519 SHA256:..."（秘密鍵そのものは返さない）
     jump_host_id: str | None = None
     jump_host_name: str | None = None
+    credential_profile_id: str | None = None
+    credential_profile_name: str | None = None
     read_timeout: int | None = None
     group_id: str | None = None
     group_name: str | None = None
@@ -135,29 +151,41 @@ class DeviceResponse(BaseModel):
     inventory_at: datetime | None = None
 
 
-def _to_response(device: Device, names: dict[str, str] | None = None) -> DeviceResponse:
-    """names は踏み台・グループの id → 名前（_ref_names）"""
-    resp = DeviceResponse.model_validate(device)
-    resp.has_enable_secret = bool(device.enable_secret)
-    resp.has_password = bool(device.password)
-    resp.has_private_key = bool(device.private_key)
-    if device.private_key:
-        try:
-            resp.key_info = key_summary(load_private_key(device.private_key, device.key_passphrase))
-        except PrivateKeyError:
-            resp.key_info = "読み込めない鍵"
-    if device.jump_host_id and names:
-        resp.jump_host_name = names.get(device.jump_host_id)
-    if device.group_id and names:
-        resp.group_name = names.get(device.group_id)
-    return resp
+@dataclass
+class _Refs:
+    """一覧の組み立てに使う参照先（機器ごとに DB を引かないよう、まとめて読んでおく）"""
+
+    names: dict[str, str]  # 踏み台・グループ・プロファイルの id → 名前（どれも UUID なので1つの辞書にまとめる）
+    profiles: dict[str, CredentialProfile]
+    key_infos: dict[str, str | None] = field(default_factory=dict)  # プロファイルごとの鍵の表示（同じ鍵を何度も読まない）
 
 
-async def _ref_names(db: AsyncSession) -> dict[str, str]:
-    """踏み台とグループの id → 名前（どちらも UUID なので1つの辞書にまとめる）"""
+async def _refs(db: AsyncSession) -> _Refs:
     names = dict((await db.execute(select(JumpHost.id, JumpHost.name))).all())
     names.update(dict((await db.execute(select(DeviceGroup.id, DeviceGroup.name))).all()))
-    return names
+    profiles = {p.id: p for p in (await db.execute(select(CredentialProfile))).scalars().all()}
+    names.update({pid: p.name for pid, p in profiles.items()})
+    return _Refs(names, profiles)
+
+
+def _to_response(device: Device, refs: _Refs) -> DeviceResponse:
+    resp = DeviceResponse.model_validate(device)
+    profile = refs.profiles.get(device.credential_profile_id) if device.credential_profile_id else None
+    cred = effective_credentials(device, profile)  # 接続と同じ関数で決める（表示と実際の接続を食い違わせない）
+    resp.username = cred.username
+    resp.has_enable_secret = bool(cred.enable_secret)
+    resp.has_password = bool(cred.password)
+    resp.has_private_key = bool(cred.private_key)
+    if profile is not None:
+        if profile.id not in refs.key_infos:
+            refs.key_infos[profile.id] = key_info(profile)
+        resp.key_info = refs.key_infos[profile.id]
+    else:
+        resp.key_info = key_info(cred)
+    resp.jump_host_name = refs.names.get(device.jump_host_id) if device.jump_host_id else None
+    resp.group_name = refs.names.get(device.group_id) if device.group_id else None
+    resp.credential_profile_name = profile.name if profile is not None else None
+    return resp
 
 
 def _validated_key(private_key: str, passphrase: str | None) -> str:
@@ -171,6 +199,13 @@ def _validated_key(private_key: str, passphrase: str | None) -> str:
 async def _check_jump_host(db: AsyncSession, jump_host_id: str | None) -> None:
     if jump_host_id and not await db.get(JumpHost, jump_host_id):
         raise HTTPException(status_code=422, detail="指定された踏み台サーバが存在しません")
+
+
+async def _check_profile(db: AsyncSession, profile_id: str) -> CredentialProfile:
+    profile = await db.get(CredentialProfile, profile_id)
+    if not profile:
+        raise HTTPException(status_code=422, detail="指定された認証情報プロファイルが存在しません")
+    return profile
 
 
 async def _check_group(db: AsyncSession, group_id: str | None) -> None:
@@ -196,22 +231,24 @@ async def _commit_or_409(db: AsyncSession) -> None:
 @router.get("/", response_model=list[DeviceResponse], dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def list_devices(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Device).order_by(Device.name))
-    names = await _ref_names(db)
-    return [_to_response(d, names) for d in result.scalars().all()]
+    refs = await _refs(db)
+    return [_to_response(d, refs) for d in result.scalars().all()]
 
 
 @router.get("/export", dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def export_devices(db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
-    """機器台帳を CSV で出力する（認証情報は含めない）"""
+    """機器台帳を CSV で出力する（認証情報は含めない。認証情報プロファイルは名前だけ出す）"""
     devices = (await db.execute(select(Device).order_by(Device.name))).scalars().all()
-    names = await _ref_names(db)
+    names = (await _refs(db)).names
     audit("device.export", detail={"rows": len(devices)})
     await db.commit()
     header = ["名前", "ホスト / IP", "ポート", "グループ", "機種", "モデル", "シリアル番号", "OS バージョン",
-              "機器側のホスト名", f"機器情報の取得日時（{settings.TIMEZONE}）", "踏み台", "有効", "説明"]
+              "機器側のホスト名", f"機器情報の取得日時（{settings.TIMEZONE}）", "踏み台", "認証情報プロファイル",
+              "有効", "説明"]
     rows = [[d.name, d.hostname, d.port, names.get(d.group_id), PLATFORMS[d.platform].label if d.platform in PLATFORMS
              else d.platform, d.model, d.serial_number, d.os_version, d.reported_hostname, d.inventory_at,
-             names.get(d.jump_host_id), d.is_active, d.description] for d in devices]
+             names.get(d.jump_host_id), names.get(d.credential_profile_id), d.is_active, d.description]
+            for d in devices]
     return csv_response(header, rows, export_name("devices"))
 
 
@@ -223,12 +260,20 @@ async def export_devices(db: AsyncSession = Depends(get_db), audit: Audit = Depe
 )
 async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     data = payload.model_dump()
-    for f in ("password", "enable_secret", "key_passphrase"):
-        data[f] = data.get(f) or None
-    if data.get("private_key"):
-        data["private_key"] = _validated_key(data["private_key"], data["key_passphrase"])
+    data["credential_profile_id"] = data.get("credential_profile_id") or None
+    profile = None
+    if data["credential_profile_id"]:
+        # プロファイルを使う機器は、機器側の認証情報を保存しない（送られてきても捨てる）
+        profile = await _check_profile(db, data["credential_profile_id"])
+        for f in CREDENTIAL_FIELDS:
+            data[f] = None
     else:
-        data["private_key"] = data["key_passphrase"] = None
+        for f in ("password", "enable_secret", "key_passphrase"):
+            data[f] = data.get(f) or None
+        if data.get("private_key"):
+            data["private_key"] = _validated_key(data["private_key"], data["key_passphrase"])
+        else:
+            data["private_key"] = data["key_passphrase"] = None
     data["jump_host_id"] = data.get("jump_host_id") or None
     await _check_jump_host(db, data["jump_host_id"])
     data["group_id"] = data.get("group_id") or None
@@ -238,10 +283,11 @@ async def create_device(payload: DeviceCreate, db: AsyncSession = Depends(get_db
     audit("device.create", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname, "platform": device.platform, "port": device.port,
                   "username": device.username, "jump_host_id": device.jump_host_id, "group_id": device.group_id,
-                  "auth": [k for k in ("password", "private_key") if data.get(k)]})
+                  **({"credential_profile": profile.name, "auth": ["credential_profile"]} if profile else
+                     {"auth": [k for k in ("password", "private_key") if data.get(k)]})})
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device, await _ref_names(db))
+    return _to_response(device, await _refs(db))
 
 
 class DeviceDefaults(BaseModel):
@@ -298,13 +344,18 @@ async def import_devices(
                 continue
             data = {**r.data, "private_key": None, "key_passphrase": None}
             data["enable_secret"] = data.get("enable_secret") or None
+            if data.get("credential_profile_id"):
+                for f in CREDENTIAL_FIELDS:
+                    data[f] = None  # プロファイルを使う行は、機器側の認証情報を保存しない
             device = Device(id=str(uuid.uuid4()), **data)
             db.add(device)
             created.append(device)
+            auth = ({"credential_profile": r.credential_profile, "auth": ["credential_profile"]}
+                    if device.credential_profile_id else {"auth": ["password"]})
             audit("device.create", target_type="device", target_id=device.id, target_name=device.name,
                   detail={"hostname": device.hostname, "platform": device.platform, "port": device.port,
                           "username": device.username, "jump_host_id": device.jump_host_id,
-                          "group_id": device.group_id, "auth": ["password"], "via": "csv"})
+                          "group_id": device.group_id, **auth, "via": "csv"})
         audit("device.import", detail={"rows": len(results), "created": len(created), "skipped": counts["skip"],
                                        "errors": counts["error"], "skip_errors": skip_errors,
                                        "on_duplicate": on_duplicate, "encoding": encoding,
@@ -349,7 +400,7 @@ async def trigger_collect_all(db: AsyncSession = Depends(get_db), audit: Audit =
 
 @router.get("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
-    return _to_response(await _get_or_404(db, device_id), await _ref_names(db))
+    return _to_response(await _get_or_404(db, device_id), await _refs(db))
 
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
@@ -358,8 +409,21 @@ async def update_device(
 ):
     device = await _get_or_404(db, device_id)
     data = payload.model_dump(exclude_unset=True)
-    audit("device.update", target_type="device", target_id=device.id, target_name=device.name,
-          detail=changed_fields(data, {"password", "private_key", "key_passphrase", "enable_secret"}))
+    profile = None
+    if "credential_profile_id" in data:
+        data["credential_profile_id"] = data["credential_profile_id"] or None
+        if data["credential_profile_id"]:
+            profile = await _check_profile(db, data["credential_profile_id"])
+    use_profile = data.get("credential_profile_id", device.credential_profile_id)
+    leaving_profile = bool(device.credential_profile_id) and not use_profile
+    if use_profile:
+        # プロファイルを使う機器では、機器側の認証情報の入力は使わない（保存もしない）
+        for f in (*CREDENTIAL_FIELDS, "clear_password", "clear_private_key", "clear_enable_secret"):
+            data.pop(f, None)
+    detail = changed_fields(data, {"password", "private_key", "key_passphrase", "enable_secret"})
+    if "credential_profile_id" in data:
+        detail["credential_profile"] = profile.name if profile else None  # 付け替えを名前でも残す
+    audit("device.update", target_type="device", target_id=device.id, target_name=device.name, detail=detail)
     clear_enable = data.pop("clear_enable_secret", False)
     clear_password = data.pop("clear_password", False)
     clear_key = data.pop("clear_private_key", False)
@@ -391,11 +455,20 @@ async def update_device(
     elif new_passphrase and device.private_key:
         _validated_key(device.private_key, new_passphrase)  # 鍵はそのままでパスフレーズだけ変更
         device.key_passphrase = new_passphrase
-    if not device.password and not device.private_key:
+    if use_profile:
+        # 古い秘密の値を残さない（プロファイルを外した後に、知らないうちに古い値で接続しないように）
+        for f in CREDENTIAL_FIELDS:
+            setattr(device, f, None)
+    elif leaving_profile and (not device.username or not (device.password or device.private_key)):
+        raise HTTPException(status_code=422, detail="認証情報プロファイルを外すときは、この機器のユーザー名と、"
+                                                    "パスワードまたはSSH秘密鍵を入力してください")
+    elif not device.username:
+        raise HTTPException(status_code=422, detail="ユーザー名を入力してください")
+    elif not device.password and not device.private_key:
         raise HTTPException(status_code=422, detail="パスワードとSSH秘密鍵の両方を削除することはできません")
     await _commit_or_409(db)
     await db.refresh(device)
-    return _to_response(device, await _ref_names(db))
+    return _to_response(device, await _refs(db))
 
 
 @router.delete(

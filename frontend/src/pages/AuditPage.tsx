@@ -47,6 +47,7 @@ const CATEGORIES: [string, string][] = [
   ["device.", "機器"],
   ["device_group.", "グループ"],
   ["jump_host.", "踏み台"],
+  ["credential_profile.", "認証情報プロファイル"],
   ["schedule.", "スケジュール"],
   ["collect.", "収集"],
   ["config.", "コンフィグ"],
@@ -71,6 +72,7 @@ const FIELD_LABELS: Record<string, string> = {
   devices: "機器数", rules: "ルール数", checked: "検査件数", address: "アドレス",
   mode: "方式", discord_webhook: "Discord", slack_webhook: "Slack", all_devices: "全機器", device_groups: "機器グループ数",
   include_ungrouped: "未分類を含む", members: "メンバー数", discord: "Discord", slack: "Slack",
+  credential_profile_id: "認証情報プロファイル(ID)", credential_profile: "認証情報プロファイル",
   group_id: "グループ", group: "グループ", color: "色", old_name: "変更前の名前", moved_to_ungrouped: "未分類に戻した台数",
 };
 

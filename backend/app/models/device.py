@@ -30,6 +30,28 @@ class JumpHost(Base):
     devices: Mapped[list["Device"]] = relationship("Device", back_populates="jump_host")
 
 
+class CredentialProfile(Base):
+    """認証情報プロファイル。同じアカウントを使う複数の機器で共有する（パスワードの変更が 1 か所で済む）
+
+    機器が credential_profile_id でこれを選ぶと、機器側の認証情報は使わず、こちらの値で接続する
+    （解決は services/connection.py の effective_credentials の 1 か所）
+    """
+
+    __tablename__ = "credential_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 認証はパスワード・秘密鍵のどちらか、または両方（すべて機器と同じ方法で暗号化して保存）
+    password: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    private_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    key_passphrase: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    enable_secret: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class DeviceGroup(Base):
     """機器のグループ（拠点・用途など）。機器は1つのグループにだけ所属できる（未所属も可）"""
 
@@ -52,7 +74,8 @@ class Device(Base):
     hostname: Mapped[str] = mapped_column(String(256), nullable=False)
     platform: Mapped[str] = mapped_column(String(64), nullable=False)  # cisco_ios, juniper_junos, etc.
     port: Mapped[int] = mapped_column(Integer, default=22)
-    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 認証情報プロファイルを使う機器では username・password・private_key・key_passphrase・enable_secret は NULL
+    username: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 認証はパスワード・SSH秘密鍵のどちらか、または両方。Fernet で暗号化して保存（DEVICE_ENCRYPTION_KEY）
     password: Mapped[str | None] = mapped_column(EncryptedString(256), nullable=True)
     private_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
@@ -70,6 +93,10 @@ class Device(Base):
     group_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("device_groups.id", name="fk_devices_group_id"), nullable=True
     )
+    # 認証情報プロファイル（NULL ならこの機器だけの認証情報を使う）。使用中のプロファイルは削除できない
+    credential_profile_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("credential_profiles.id", name="fk_devices_credential_profile_id"), nullable=True
+    )
     # 機器台帳（収集のときに show version などから自動で読み取る。services/inventory.py）
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     serial_number: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -80,6 +107,7 @@ class Device(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     jump_host: Mapped["JumpHost | None"] = relationship("JumpHost", back_populates="devices")
+    credential_profile: Mapped["CredentialProfile | None"] = relationship("CredentialProfile")
     config_snapshots: Mapped[list["ConfigSnapshot"]] = relationship(
         "ConfigSnapshot", back_populates="device", cascade="all, delete-orphan"
     )

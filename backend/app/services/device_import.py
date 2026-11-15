@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.device import Device, DeviceGroup, JumpHost
+from app.models.device import CredentialProfile, Device, DeviceGroup, JumpHost
 from app.services.config_service import PLATFORMS
 
 MAX_IMPORT_ROWS = 500  # 1 回に取り込める行数（見出し・空行・コメント行を除く）
@@ -37,6 +37,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "group": ("グループ", "group"),
     "platform": ("機種", "platform"),
     "jump_host": ("踏み台", "jump_host"),
+    "credential_profile": ("認証情報プロファイル", "credential_profile", "profile"),
     "is_active": ("有効", "active", "is_active"),
     "username": ("ユーザー名", "username"),
     "password": ("パスワード", "password"),
@@ -44,6 +45,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "read_timeout": ("応答待ち時間（秒）", "応答待ち時間", "read_timeout"),
     "description": ("説明", "description"),
 }
+# ユーザー名・パスワードの列は必須（認証情報プロファイルを指定した行だけ、値を空にできる）
 REQUIRED = ("name", "hostname", "platform", "username", "password")
 LABELS = {k: v[0] for k, v in COLUMNS.items()}  # 項目名 → エラーメッセージに出す列名
 
@@ -134,6 +136,7 @@ class RowResult:
     platform: str  # 表示名（分からなければ入力のまま）
     group: str | None
     jump_host: str | None
+    credential_profile: str | None = None
     status: str = "ok"  # ok（登録できる） / error / skip（同じ名前の機器が既にある）
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -141,7 +144,8 @@ class RowResult:
 
     def public(self) -> dict:
         return {"line": self.line, "name": self.name, "hostname": self.hostname, "platform": self.platform,
-                "group": self.group, "jump_host": self.jump_host, "status": self.status,
+                "group": self.group, "jump_host": self.jump_host, "credential_profile": self.credential_profile,
+                "status": self.status,
                 "errors": self.errors, "warnings": self.warnings}
 
 
@@ -178,7 +182,7 @@ def _parse_bool(text: str) -> bool | None:
 
 
 async def _name_index(db: AsyncSession, model) -> dict[str, list[tuple[str, str]]]:
-    """グループ・踏み台の、比較用の名前 → [(id, 名前)]（同じになる名前が複数あれば曖昧）"""
+    """グループ・踏み台・認証情報プロファイルの、比較用の名前 → [(id, 名前)]（同じになる名前が複数あれば曖昧）"""
     index: dict[str, list[tuple[str, str]]] = {}
     for rid, name in (await db.execute(select(model.id, model.name))).all():
         index.setdefault(_norm(name), []).append((rid, name))
@@ -187,7 +191,7 @@ async def _name_index(db: AsyncSession, model) -> dict[str, list[tuple[str, str]
 
 def _lookup(value: str | None, index: dict[str, list[tuple[str, str]]], label: str, key: str,
             errs: dict[str, str]) -> str | None:
-    """グループ・踏み台の名前 → ID。見つからない・曖昧なら errs に文を足して None"""
+    """グループ・踏み台・認証情報プロファイルの名前 → ID。見つからない・曖昧なら errs に文を足して None"""
     if not value:
         return None
     hits = index.get(_norm(value), [])
@@ -224,6 +228,7 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
 
     groups = await _name_index(db, DeviceGroup)
     jumps = await _name_index(db, JumpHost)
+    profiles = await _name_index(db, CredentialProfile)
     existing = dict((await db.execute(select(Device.name, Device.hostname))).all())
     existing_fold = {n.casefold(): n for n in existing}
     hosts: dict[str, str] = {}  # ホスト / IP（小文字）→ その機器の名前
@@ -243,10 +248,11 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
         platform_in = cell("platform").strip()
         group_in = cell("group").strip() or None
         jump_in = cell("jump_host").strip() or None
+        profile_in = cell("credential_profile").strip() or None
         platform_id = resolve_platform(platform_in) if platform_in else None
         row = RowResult(line=line, name=name, hostname=hostname,
                         platform=PLATFORMS[platform_id].label if platform_id else platform_in,
-                        group=group_in, jump_host=jump_in)
+                        group=group_in, jump_host=jump_in, credential_profile=profile_in)
         errs: dict[str, str] = {}  # 項目名 → 文（1 列に 1 つ）
 
         if not platform_in:
@@ -256,12 +262,18 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
                                 "例: cisco_ios、Cisco IOS）")
 
         password = cell("password")
-        if not password:
+        if profile_in:
+            # 認証情報はプロファイルのものを使う。この行のユーザー名・パスワードは使わない（保存もしない）
+            if cell("username").strip() or password or cell("enable_secret"):
+                row.warnings.append("認証情報プロファイルを使うため、この行のユーザー名・パスワード・"
+                                    "Enable パスワードは使いません")
+        elif not password:
             errs["password"] = ("空です（SSH 鍵は CSV では登録できません。パスワードを入力するか、"
-                                "機器を 1 台ずつ登録してください）")
+                                "認証情報プロファイルを指定するか、機器を 1 台ずつ登録してください）")
 
         group_id = _lookup(group_in, groups, "グループ", "group", errs)
         jump_id = _lookup(jump_in, jumps, "踏み台", "jump_host", errs)
+        profile_id = _lookup(profile_in, profiles, "認証情報プロファイル", "credential_profile", errs)
 
         active_in = cell("is_active").strip()
         is_active = True
@@ -280,6 +292,9 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
             "description": _unquote(cell("description").strip()) or None,
             "is_active": is_active, "group_id": group_id, "jump_host_id": jump_id,
         }
+        if profile_in:
+            # プロファイルが見つからない行もエラーは上で出したので、仮の ID で検証する（登録はされない）
+            body.update(credential_profile_id=profile_id or "-", username=None, password=None, enable_secret=None)
         for key in ("port", "read_timeout"):
             v = unicodedata.normalize("NFKC", cell(key)).strip()
             if v:
@@ -331,13 +346,15 @@ async def validate(db: AsyncSession, parsed: ParsedCsv, on_duplicate: str = "ski
 
 def template_rows() -> tuple[list[str], list[list]]:
     """ひな形 CSV の見出しと例。例のパスワードは空にして、そのまま取り込んでも登録されないようにする"""
-    header = [LABELS[k] for k in ("name", "hostname", "port", "group", "platform", "jump_host", "is_active",
-                                  "username", "password", "enable_secret", "read_timeout", "description")]
+    header = [LABELS[k] for k in ("name", "hostname", "port", "group", "platform", "jump_host",
+                                  "credential_profile", "is_active", "username", "password", "enable_secret",
+                                  "read_timeout", "description")]
     rows = [
-        ["# # で始まる行は読み飛ばします。必須: 名前・ホスト / IP・機種・ユーザー名・パスワード。"
-         "機種は ID（cisco_ios など）か表示名（Cisco IOS など）。グループ・踏み台は登録済みの名前。"
+        ["# # で始まる行は読み飛ばします。必須: 名前・ホスト / IP・機種・ユーザー名・パスワード"
+         "（認証情報プロファイルを指定した行は、ユーザー名・パスワードを空にします）。"
+         "機種は ID（cisco_ios など）か表示名（Cisco IOS など）。グループ・踏み台・認証情報プロファイルは登録済みの名前。"
          "パスワードは平文です。取り込んだらこのファイルを削除してください"] + [""] * (len(header) - 1),
-        ["本社-コアSW", "192.0.2.1", 22, "", "Cisco IOS", "", "はい", "admin", "", "", "", "例: 本社 1F"],
-        ["支店-RT", "192.0.2.2", "", "", "yamaha", "", "はい", "admin", "", "", 60, ""],
+        ["本社-コアSW", "192.0.2.1", 22, "", "Cisco IOS", "", "", "はい", "admin", "", "", "", "例: 本社 1F"],
+        ["支店-RT", "192.0.2.2", "", "", "yamaha", "", "", "はい", "admin", "", "", 60, ""],
     ]
     return header, rows
