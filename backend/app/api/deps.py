@@ -23,6 +23,14 @@ async def _load_active_user(db: AsyncSession, token: str) -> User | None:
     # パスワード変更・リセット後は、それ以前に発行されたトークンを無効にする
     if payload.get("pwv") != password_fingerprint(user.hashed_password):
         return None
+    # 管理者による強制ログアウト・無効化の後は、それ以前に発行されたトークンを無効にする
+    # （tv を持たない以前のトークンは 0 とみなす。列の既定値も 0 なので、更新直後にログイン中の人は切れない）
+    try:
+        tv = int(payload.get("tv", 0))
+    except (TypeError, ValueError):
+        return None
+    if tv != (user.token_version or 0):
+        return None
     return user
 
 

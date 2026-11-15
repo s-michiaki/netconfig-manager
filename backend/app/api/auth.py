@@ -120,7 +120,7 @@ async def login(
         )
     await login_limit.record_success(form_data.username, ip)
     await record_now(db, make_log("auth.login", user=user, ip=ip))
-    return {"access_token": create_access_token(user.id, user.hashed_password), "token_type": "bearer"}
+    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
 
 
 @router.get("/me", response_model=UserInfo)
@@ -144,7 +144,7 @@ async def change_password(
     await db.commit()
     logger.info("パスワード変更 user=%s", user.username)
     # 変更前のトークンは無効になるため、新しいトークンを返す
-    return {"access_token": create_access_token(user.id, user.hashed_password), "token_type": "bearer"}
+    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
 
 
 async def ensure_initial_admin(db: AsyncSession) -> None:

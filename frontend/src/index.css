@@ -426,6 +426,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-dirty { font-size: 12px; color: var(--color-warning); }
 .topo-undo { font-size: 16px; line-height: 1; padding: 4px 10px; }
 .topo-notice { font-size: 12px; color: var(--color-success); }
+.users-notice { font-size: 12px; color: var(--color-success); margin-bottom: 10px; }
 /* 表示・非表示でボタンの位置が変わらない枠（幅は「未保存の変更あり」「保存中...」「書き出し ▾」が入る大きさ） */
 .topo-dirty-slot { display: inline-block; min-width: 8.5em; font-size: 12px; text-align: right; }
 .topo-save { min-width: 6.75em; justify-content: center; }

@@ -36,6 +36,7 @@ ACTIONS = {
     "user.create": "ユーザー作成",
     "user.update": "ユーザー変更",
     "user.delete": "ユーザー削除",
+    "user.logout": "ユーザーの強制ログアウト",
     "device.create": "機器登録",
     "device.update": "機器変更",
     "device.export": "機器台帳の CSV 出力",

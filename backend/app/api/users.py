@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import NewPassword
 from app.api.deps import get_current_user
+from app.api.terminal import close_user_sessions
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Role
 from app.core.security import hash_password
@@ -50,6 +51,10 @@ class UserResponse(BaseModel):
     role_label: str
     is_active: bool
     created_at: datetime | None
+
+
+class ForceLogoutResponse(BaseModel):
+    closed_terminals: int  # 切断した、接続中のターミナルの数
 
 
 class RoleInfo(BaseModel):
@@ -147,22 +152,53 @@ async def update_user(
     if payload.role is not None and payload.role.value != user.role:
         changes.append(f"role {user.role}->{payload.role.value}")
         user.role = payload.role.value
+    revoke = ""  # 既存のログイン（トークン・接続中のターミナル）を切る理由
     if payload.is_active is not None and payload.is_active != user.is_active:
         changes.append(f"is_active->{payload.is_active}")
         user.is_active = payload.is_active
+        if not payload.is_active:
+            # 無効化の前に発行したトークンが、有効に戻したときに復活しないようにする
+            user.token_version = (user.token_version or 0) + 1
+            revoke = "ユーザーの無効化"
     if payload.password:
         if is_self:
             raise HTTPException(status_code=400, detail="自分のパスワードは「パスワード変更」から変更してください")
         user.hashed_password = await run_in_threadpool(hash_password, payload.password)
         changes.append("password reset")
+        revoke = revoke or "パスワードのリセット"
     if changes:
         audit("user.update", target_type="user", target_id=user.id, target_name=user.username,
               detail={"changes": changes})
     await db.commit()
     await db.refresh(user)
+    if revoke:
+        await close_user_sessions(user.id, revoke)
     if changes:
         logger.info("ユーザー更新 by=%s user=%s %s", me.username, user.username, ", ".join(changes))
     return _to_response(user)
+
+
+@router.post("/{user_id}/logout", response_model=ForceLogoutResponse)
+async def force_logout(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
+):
+    """パスワードを変えずに、そのユーザーの既存のログインを切る（再ログインは可能）"""
+    user = await _get_or_404(db, user_id)
+    if user.id == me.id:
+        raise HTTPException(
+            status_code=400, detail="自分自身はログアウトさせられません（サイドバーの「ログアウト」を使ってください）"
+        )
+    user.token_version = (user.token_version or 0) + 1
+    await db.commit()
+    closed = await close_user_sessions(user.id, "管理者による強制ログアウト")
+    audit("user.logout", target_type="user", target_id=user.id, target_name=user.username,
+          detail={"closed_terminals": closed})
+    await db.commit()
+    logger.info("強制ログアウト by=%s user=%s terminals=%d", me.username, user.username, closed)
+    return ForceLogoutResponse(closed_terminals=closed)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -185,4 +221,5 @@ async def delete_user(
     await db.delete(user)
     audit("user.delete", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()
+    await close_user_sessions(user.id, "ユーザーの削除")
     logger.info("ユーザー削除 by=%s user=%s", me.username, user.username)

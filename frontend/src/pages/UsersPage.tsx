@@ -119,6 +119,7 @@ export default function UsersPage() {
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [modal, setModal] = useState<{ user: User | null } | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const load = () =>
     api.get<User[]>("/users/").then((r) => setUsers(r.data)).catch((e) => setError(errorMessage(e)));
@@ -128,9 +129,27 @@ export default function UsersPage() {
     api.get<RoleInfo[]>("/users/roles").then((r) => setRoles(r.data)).catch((e) => setError(errorMessage(e)));
   }, []);
 
+  // パスワードは変えずに、その人の既存のログインを切る（再ログインは可能）
+  const forceLogout = async (u: User) => {
+    if (!confirm(
+      `ユーザー「${u.username}」をログアウトさせますか？\n` +
+      "ログイン中の画面・API の利用と、開いているターミナルが切れます。パスワードは変わらず、再ログインはできます。",
+    )) return;
+    setError("");
+    setNotice("");
+    try {
+      const r = await api.post<{ closed_terminals: number }>(`/users/${u.id}/logout`);
+      const n = r.data.closed_terminals;
+      setNotice(`「${u.username}」をログアウトさせました${n ? `（開いていたターミナル ${n} 件も切断）` : ""}`);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
   const del = async (u: User) => {
     if (!confirm(`ユーザー「${u.username}」を削除しますか？`)) return;
     setError("");
+    setNotice("");
     try {
       await api.delete(`/users/${u.id}`);
       load();
@@ -149,6 +168,7 @@ export default function UsersPage() {
 
       <div className="page-body">
         {error && <p className="form-error">{error}</p>}
+        {notice && <p className="users-notice" role="status">{notice}</p>}
         <p className="section-label">ユーザー ({users.length}人)</p>
         <table className="data-table">
           <thead>
@@ -185,6 +205,12 @@ export default function UsersPage() {
                       <div style={{ display: "flex", gap: 6 }}>
                         <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setModal({ user: u })}>
                           編集
+                        </button>
+                        <button
+                          className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => forceLogout(u)}
+                          title="パスワードを変えずに、ログイン中の画面・API・開いているターミナルを切ります"
+                        >
+                          ログアウトさせる
                         </button>
                         <button className="btn btn-danger" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => del(u)}>
                           削除

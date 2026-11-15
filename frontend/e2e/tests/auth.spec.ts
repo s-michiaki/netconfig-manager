@@ -40,3 +40,25 @@ test("ログアウトするとログイン画面に戻る", async ({ page }) => 
   await page.getByText("ログアウト").click();
   await expect(page).toHaveURL(/\/login/);
 });
+
+test("管理者がユーザーをログアウトさせると、その人の画面はログイン画面に戻る", async ({ page, browser }) => {
+  // 閲覧者が別のブラウザでログインしている
+  const other = await browser.newContext();
+  const viewer = await other.newPage();
+  await login(viewer, USERS.viewer);
+
+  await login(page);
+  await page.goto("/users");
+  const row = page.locator("tr", { has: page.getByText(USERS.viewer.name, { exact: true }) });
+  // 自分の行には出さない
+  await expect(page.locator("tr", { hasText: "自分" }).getByRole("button", { name: "ログアウトさせる" })).toHaveCount(0);
+  page.once("dialog", (d) => d.accept());
+  await row.getByRole("button", { name: "ログアウトさせる" }).click();
+  await expect(page.locator(".users-notice")).toHaveText(`「${USERS.viewer.name}」をログアウトさせました`);
+
+  // 次の API 呼び出しで切られる。パスワードは変わらないので、そのまま再ログインできる
+  await viewer.goto("/devices");
+  await expect(viewer).toHaveURL(/\/login/);
+  await login(viewer, USERS.viewer);
+  await other.close();
+});

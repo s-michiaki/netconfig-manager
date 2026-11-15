@@ -34,12 +34,16 @@ def password_fingerprint(hashed_password: str) -> str:
     return hashlib.sha256(hashed_password.encode()).hexdigest()[:16]
 
 
-def create_access_token(user_id: str, hashed_password: str) -> str:
-    """ロールはトークンに入れず、リクエストごとにDBから読む（ロール変更を即時反映するため）"""
+def create_access_token(user_id: str, hashed_password: str, token_version: int = 0) -> str:
+    """ロールはトークンに入れず、リクエストごとにDBから読む（ロール変更を即時反映するため）
+
+    tv: users.token_version（管理者による強制ログアウト・無効化で上がる）。照合は app/api/deps.py
+    """
     now = datetime.now(UTC)
     payload = {
         "sub": user_id,
         "pwv": password_fingerprint(hashed_password),
+        "tv": token_version,
         "iat": now,
         "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     }

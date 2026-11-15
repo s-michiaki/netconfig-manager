@@ -1,5 +1,7 @@
 """ロールごとの権限（RBAC）のテスト"""
+import asyncio
 import json
+import time
 from unittest import mock
 
 import pytest
@@ -126,6 +128,132 @@ def test_deactivate_and_password_reset_revoke_tokens(client, users):
     assert r.status_code == 200
     assert client.get("/api/devices/", headers=op).status_code == 401  # リセット前のトークンは無効
     login(client, "op1", "reset-pass-5678")
+
+
+def test_reactivate_does_not_restore_old_tokens(client, users):
+    """無効化 → 有効化しても、無効化の前に発行したトークンは使えないまま"""
+    r = client.post("/api/users/", json={"username": "react1", "password": "password-1234", "role": "viewer"},
+                    headers=users["admin"])
+    uid = r.json()["id"]
+    old = login(client, "react1", "password-1234")
+    client.patch(f"/api/users/{uid}", json={"is_active": False}, headers=users["admin"])
+    client.patch(f"/api/users/{uid}", json={"is_active": True}, headers=users["admin"])
+    assert client.get("/api/devices/", headers=old).status_code == 401
+    assert client.get("/api/devices/", headers=login(client, "react1", "password-1234")).status_code == 200
+    assert client.delete(f"/api/users/{uid}", headers=users["admin"]).status_code == 204
+
+
+def test_force_logout(client, users):
+    admin = users["admin"]
+    r = client.post("/api/users/", json={"username": "kick1", "password": "password-1234", "role": "operator"},
+                    headers=admin)
+    uid = r.json()["id"]
+    a = login(client, "kick1", "password-1234")
+    b = login(client, "kick1", "password-1234")  # 別の端末からのログイン
+    other = login(client, "view1", "password-1234")
+
+    async def hashed():
+        from app.core.database import AsyncSessionLocal
+        from app.models.user import User
+        async with AsyncSessionLocal() as db:
+            return (await db.get(User, uid)).hashed_password
+    before = asyncio.run(hashed())
+    # 管理者のみ・自分自身は不可・存在しないユーザーは 404
+    assert client.post(f"/api/users/{uid}/logout", headers=a).status_code == 403  # オペレーター（本人）
+    assert client.post(f"/api/users/{uid}/logout", headers=other).status_code == 403  # 閲覧者
+    me = client.get("/api/auth/me", headers=admin).json()
+    assert client.post(f"/api/users/{me['id']}/logout", headers=admin).status_code == 400
+    assert client.post("/api/users/no-such-user/logout", headers=admin).status_code == 404
+
+    r = client.post(f"/api/users/{uid}/logout", headers=admin)
+    assert r.status_code == 200 and r.json() == {"closed_terminals": 0}
+    # その人の既存のトークンはすべて無効。パスワードは変わらず、同じパスワードで再ログインできる
+    assert client.get("/api/devices/", headers=a).status_code == 401
+    assert client.get("/api/devices/", headers=b).status_code == 401
+    assert asyncio.run(hashed()) == before
+    new = login(client, "kick1", "password-1234")
+    assert client.get("/api/devices/", headers=new).status_code == 200
+    # 新しいトークンでパスワードを変更しても、切られない（再発行に番号を引き継ぐ）
+    r = client.post("/api/auth/change-password",
+                    json={"current_password": "password-1234", "new_password": "password-5678"}, headers=new)
+    assert client.get("/api/devices/", headers={"Authorization": f"Bearer {r.json()['access_token']}"}).status_code == 200
+    # ほかのユーザーには影響しない
+    assert client.get("/api/devices/", headers=other).status_code == 200
+    # 監査ログ
+    log = client.get("/api/audit/logs", params={"action": "user.logout"}, headers=admin).json()["items"][0]
+    assert log["target_name"] == "kick1"
+    assert client.delete(f"/api/users/{uid}", headers=admin).status_code == 204
+
+
+def test_token_without_version_is_still_valid(client, users):
+    """強制ログアウトの機能を入れる前に発行したトークン（tv なし）は、番号 0 のユーザーでは有効のまま"""
+    from datetime import UTC, datetime, timedelta
+
+    import jwt
+
+    from app.core.config import settings
+    from app.core.security import password_fingerprint
+
+    r = client.post("/api/users/", json={"username": "legacy1", "password": "password-1234", "role": "viewer"},
+                    headers=users["admin"])
+    uid = r.json()["id"]
+
+    async def user_row():
+        from app.core.database import AsyncSessionLocal
+        from app.models.user import User
+        async with AsyncSessionLocal() as db:
+            u = await db.get(User, uid)
+            return u.hashed_password, u.token_version
+    hashed, tv = asyncio.run(user_row())
+    assert tv == 0
+    now = datetime.now(UTC)
+
+    def token(**extra):
+        payload = {"sub": uid, "pwv": password_fingerprint(hashed), "iat": now, "exp": now + timedelta(minutes=5)}
+        payload.update(extra)
+        return {"Authorization": f"Bearer {jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)}"}
+    assert client.get("/api/devices/", headers=token()).status_code == 200
+    assert client.get("/api/devices/", headers=token(tv="abc")).status_code == 401
+    assert client.get("/api/devices/", headers=token(tv=1)).status_code == 401
+    client.post(f"/api/users/{uid}/logout", headers=users["admin"])
+    assert client.get("/api/devices/", headers=token()).status_code == 401  # 強制ログアウト後は tv なしも無効
+    assert client.delete(f"/api/users/{uid}", headers=users["admin"]).status_code == 204
+
+
+def test_force_logout_closes_open_terminal(client, users):
+    """接続中のターミナルも切り、記録の終了理由に残す"""
+    import fake_sshd
+
+    admin = users["admin"]
+    port, _, _ = fake_sshd.start()
+    did = client.post("/api/devices/", json=dict(name=f"kick-sw-{port}", hostname="127.0.0.1", port=port,
+                                                 platform="cisco_ios", username="admin", password="pw"),
+                      headers=admin).json()["id"]
+    r = client.post("/api/users/", json={"username": "kick2", "password": "password-1234", "role": "operator"},
+                    headers=admin)
+    uid = r.json()["id"]
+    tok = login(client, "kick2", "password-1234")["Authorization"].split()[1]
+    with client.websocket_connect(f"/api/terminal/ws/{did}") as ws:
+        ws.send_text(json.dumps({"type": "auth", "token": tok}))
+        assert "R1#" in ws.receive_text()
+        r = client.post(f"/api/users/{uid}/logout", headers=admin)
+        assert r.status_code == 200 and r.json() == {"closed_terminals": 1}
+        out = ""
+        with pytest.raises(WebSocketDisconnect) as e:
+            while True:
+                out += ws.receive_text()
+        assert e.value.code == 4401 and "強制ログアウト" in out
+    # 記録（SSH の切断と保存）は切断後の後片付けで行うので、少し待つ
+    for _ in range(50):
+        items = client.get("/api/audit/terminal-sessions", params={"username": "kick2"}, headers=admin).json()["items"]
+        if items and items[0]["end_reason"]:
+            break
+        time.sleep(0.1)
+    assert items[0]["end_reason"] == "管理者が切断（管理者による強制ログアウト）"
+    log = client.get("/api/audit/logs", params={"action": "user.logout"}, headers=admin).json()["items"][0]
+    assert log["target_name"] == "kick2" and "1" in str(log["detail"])
+    client.delete(f"/api/devices/{did}", headers=admin)
+    assert client.delete(f"/api/users/{uid}", headers=admin).status_code == 204
 
 
 def test_change_password_returns_new_token(client, users):

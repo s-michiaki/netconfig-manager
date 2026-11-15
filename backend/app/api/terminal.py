@@ -11,6 +11,9 @@ WebSocket SSHターミナル
   サーバー -> クライアント : 端末に表示するテキスト（そのまま xterm に write する）
 
 監査: 接続・切断を操作履歴に残し、画面出力を asciicast v2 形式で記録する（app/services/audit.py）
+
+認証の照合は接続の最初（と SSH の接続後にもう一度）だけ行う。接続中に管理者が強制ログアウト・無効化・
+パスワードのリセット・削除をしたときは、close_user_sessions でそのユーザーのターミナルを切る（API が 1 プロセスのとき）
 """
 import asyncio
 import codecs
@@ -18,6 +21,7 @@ import json
 import logging
 import threading
 import uuid
+from dataclasses import dataclass
 
 import paramiko
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -31,6 +35,7 @@ from app.core.ssh_jump import JumpHostError, connect_jump, open_tunnel
 from app.core.ssh_keys import PrivateKeyError, load_private_key
 from app.core.timeutil import utcnow
 from app.models.audit import TerminalSession
+from app.models.user import User
 from app.services.audit import TerminalRecorder, make_log
 from app.services.config_service import DeviceConnectionInfo
 from app.services.connection import load_connection_info
@@ -46,6 +51,45 @@ MIN_SIZE, MAX_SIZE = 1, 1000
 
 # 切断後の後片付けタスク（途中で破棄されないよう参照を保持する）
 _cleanup_tasks: set[asyncio.Task] = set()
+
+
+@dataclass(eq=False)
+class _LiveTerminal:
+    websocket: WebSocket
+    revoked: str | None = None  # 管理者の操作で切ったときの理由（記録の終了理由に使う）
+
+
+# 接続中のターミナル（ユーザー ID ごと）。管理者が強制ログアウト・無効化・パスワードのリセット・削除をしたときに切るため。
+# プロセス内の記録なので、API を 1 プロセスで動かしている場合（既定の構成）だけ有効。
+# 複数のプロセス（uvicorn --workers など）にすると、ほかのプロセスが受け持つ接続は切れない
+_live: dict[str, set[_LiveTerminal]] = {}
+
+
+async def close_user_sessions(user_id: str, reason: str) -> int:
+    """そのユーザーの接続中のターミナルを切る。切った数を返す（SSH の切断と記録は各接続の後片付けで行う）"""
+    targets = list(_live.get(user_id, ()))
+    for t in targets:
+        t.revoked = reason
+        try:
+            await t.websocket.send_text(f"\r\n[{reason}のため、ターミナルを切断しました]\r\n")
+            await t.websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="revoked")
+        except Exception:  # noqa: BLE001 - すでに切れている
+            pass
+    return len(targets)
+
+
+def _register(user_id: str, websocket: WebSocket) -> _LiveTerminal:
+    live = _LiveTerminal(websocket)
+    _live.setdefault(user_id, set()).add(live)
+    return live
+
+
+def _unregister(user_id: str, live: _LiveTerminal) -> None:
+    group = _live.get(user_id)
+    if group is not None:
+        group.discard(live)
+        if not group:
+            del _live[user_id]
 
 
 def _clamp_size(value, default: int) -> int:
@@ -148,7 +192,16 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
         return
     cols = _clamp_size(first.get("cols"), 120)
     rows = _clamp_size(first.get("rows"), 40)
+    # 以降は管理者の強制ログアウトなどで切れるよう登録しておく（解除は _session の終わり）
+    live = _register(user.id, websocket)
+    try:
+        await _session(websocket, device_id, user, str(first.get("token", "")), cols, rows, live)
+    finally:
+        _unregister(user.id, live)
 
+
+async def _session(websocket: WebSocket, device_id: str, user: User, token: str, cols: int, rows: int,
+                   live: _LiveTerminal) -> None:
     # --- 2. デバイス取得
     device = await _load_device(device_id)
     if device is None:
@@ -175,8 +228,15 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
             reason = describe_ssh_error(e)
         await _save(make_log("terminal.open", user=user, ip=ip, success=False,
                              detail={"error": reason, "via": via}, **target))
-        await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
-        await websocket.close()
+        if live.revoked is None:
+            await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
+            await websocket.close()
+        return
+    # 接続を待つ間に強制ログアウトなどがあった場合（認証の照合と登録の間に起きた場合も含め、ここで確かめ直す）
+    if live.revoked is not None or await authenticate_token(token) is None:
+        await loop.run_in_executor(None, session.close)
+        if live.revoked is None:
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
         return
 
     # --- 監査: セッションを登録し、画面出力の記録を開始する
@@ -257,7 +317,10 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
             recorder.close()
             ended = utcnow()
             record.ended_at = ended
-            record.end_reason = "機器側で終了" if remote_closed.is_set() else "利用者が切断"
+            record.end_reason = (
+                f"管理者が切断（{live.revoked}）" if live.revoked
+                else "機器側で終了" if remote_closed.is_set() else "利用者が切断"
+            )
             record.bytes_out = recorder.bytes
             record.truncated = recorder.truncated
             await _save(record, make_log(
