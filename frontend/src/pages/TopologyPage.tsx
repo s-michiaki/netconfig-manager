@@ -748,7 +748,8 @@ function Editor(props: EditorProps) {
       if (kind === "png") {
         const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
         if (!blob) throw new Error("画像を生成できませんでした");
-        download(blob, `${fileBase()}.png`);
+        // 白背景は名前で区別できるようにする（PDF・印刷は常に白背景なので付けない）
+        download(blob, `${fileBase()}${light ? "_白背景" : ""}.png`);
       } else if (kind === "pdf") {
         // PDF ライブラリは出力するときだけ読み込む
         const { jsPDF } = await import("jspdf");
@@ -866,7 +867,8 @@ img{display:block;max-width:100%;max-height:${landscape ? "250mm" : "370mm"};mar
           )}
         </div>
         <div className="topo-header-right">
-          {notice && <span className="topo-notice">{notice}</span>}
+          {/* 通知はヘッダーの下に重ねて出す（並びに入れると、出入りのたびにボタンの位置がずれるため） */}
+          {notice && <span className="topo-notice topo-notice-float" role="status">{notice}</span>}
           {editing && (
             <label className="form-check">
               <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} />
@@ -877,12 +879,13 @@ img{display:block;max-width:100%;max-height:${landscape ? "250mm" : "370mm"};mar
           {canWrite && (
             editing ? (
               <>
-                {dirty && <span className="topo-dirty">未保存の変更あり</span>}
+                {/* 「未保存」の表示は常に同じ幅の枠を取り、出ても消えても右のボタンが動かないようにする */}
+                <span className="topo-dirty-slot">{dirty && <span className="topo-dirty">未保存の変更あり</span>}</span>
                 <button className="btn topo-undo" onClick={undo} disabled={!historyLen.past} title="取り消す（Ctrl+Z）" aria-label="取り消す">↶</button>
                 <button className="btn topo-undo" onClick={redo} disabled={!historyLen.future} title="やり直す（Ctrl+Shift+Z / Ctrl+Y）" aria-label="やり直す">↷</button>
                 <button className="btn" onClick={discard} disabled={!dirty} title="保存済みの状態に戻す">変更を破棄</button>
                 <button className="btn" onClick={toggleEditing}>編集を終了</button>
-                <button className="btn btn-primary" onClick={save} disabled={saving || !dirty}>
+                <button className="btn btn-primary topo-save" onClick={save} disabled={saving || !dirty}>
                   {saving ? "保存中..." : "保存"}
                 </button>
               </>
@@ -1430,7 +1433,7 @@ function ExportMenu({ disabled, busy, onExport }: {
   };
   return (
     <div className="topo-export" ref={ref}>
-      <button className="btn" disabled={disabled} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
+      <button className="btn topo-export-btn" disabled={disabled} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open}>
         {busy ? "出力中..." : "書き出し ▾"}
       </button>
       {open && (
