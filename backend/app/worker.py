@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
-from app.services import fw_hits, inventory, monitoring, system
+from app.services import collect_state, fw_hits, inventory, monitoring, system
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -113,6 +113,17 @@ def _redis() -> redis.Redis:
 def _run_async(coro):
     """Celeryの同期コンテキストで非同期DBアクセスを実行するヘルパー"""
     return asyncio.run(coro)
+
+
+def mark_collect_queued(device_id: str, triggered_by: str = "manual") -> None:
+    """画面に「収集待ち」と出せるよう、収集を依頼した時点で状態を記録する（すでに動いている機器は上書きしない）"""
+    collect_state.mark(_redis(), device_id, "queued", triggered_by, only_if_idle=True)
+
+
+def enqueue_collect(device_id: str, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None):
+    """1 台の収集を依頼する"""
+    mark_collect_queued(device_id, triggered_by)
+    return collect_device_config.delay(device_id, triggered_by, actor, ref)
 
 
 async def _get_device(device_id: str) -> DeviceConnectionInfo | None:
@@ -224,6 +235,8 @@ def collect_device_config(
             logger.exception("アクティビティログの記録に失敗しました")
         return {"success": False, "skipped": True, "error": "同じデバイスの収集が実行中です"}
 
+    will_retry = False
+    collect_state.mark(_redis(), device_id, "running", triggered_by)
     try:
         device = _run_async(_get_device(device_id))
         if not device:
@@ -261,6 +274,11 @@ def collect_device_config(
             send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
                                            ref)
     finally:
+        # やり直す場合は「再試行待ち」、それ以外（成功・失敗・例外）は状態を消す
+        if will_retry:
+            collect_state.mark(_redis(), device_id, "retry", triggered_by)
+        else:
+            collect_state.clear(_redis(), device_id)
         try:
             lock.release()
         except redis.exceptions.LockError:
@@ -464,7 +482,7 @@ def collect_all_devices(
     actor = _actor(triggered_by, actor)
     ref = ref or self.request.id
     device_ids = _run_async(_active_device_ids(group_id))
-    task_ids = [collect_device_config.delay(device_id, triggered_by, actor, ref).id for device_id in device_ids]
+    task_ids = [enqueue_collect(device_id, triggered_by, actor, ref).id for device_id in device_ids]
     if triggered_by != "schedule":  # スケジュールは schedule.run で記録済み
         where = f"グループ「{_run_async(_group_name(group_id))}」の" if group_id else ""
         _run_async(_record("collect.batch", f"{where}有効な機器 {len(task_ids)} 台の収集を開始しました",
@@ -576,7 +594,7 @@ def dispatch_schedules_at(now: datetime) -> dict:
         elif target.startswith("group:"):
             collect_all_devices.delay("schedule", actor, ref, target.split(":", 1)[1])
         else:
-            collect_device_config.delay(target, "schedule", actor, ref)
+            enqueue_collect(target, "schedule", actor, ref)
         dispatched.append(schedule_id)
         logger.info("スケジュール実行: %s (kind=%s target=%s)", schedule_id, kind, target)
     return {"dispatched": dispatched}

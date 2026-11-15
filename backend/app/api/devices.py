@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -12,7 +13,8 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-from sqlalchemy import delete, select
+from redis.exceptions import RedisError
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,12 +32,12 @@ from app.core.ssh_keys import (
     normalize_private_key,
 )
 from app.models.compliance import ComplianceException, ComplianceResult
-from app.models.device import ConfigComment, CredentialProfile, Device, DeviceGroup, JumpHost
-from app.services import device_import, inventory
+from app.models.device import CollectLog, ConfigComment, CredentialProfile, Device, DeviceGroup, JumpHost
+from app.services import collect_state, device_import, inventory, login_limit
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
 from app.services.connection import effective_credentials
-from app.worker import collect_all_devices, collect_device_config
+from app.worker import collect_all_devices, collect_device_config, mark_collect_queued
 
 router = APIRouter()
 
@@ -378,6 +380,36 @@ async def device_defaults():
     return DeviceDefaults(read_timeout=settings.SSH_READ_TIMEOUT)
 
 
+@router.get("/collect-status", dependencies=[Depends(require(Perm.DEVICE_READ))])
+async def collect_status(db: AsyncSession = Depends(get_db)):
+    """機器ごとの収集の状態。デバイス管理の画面が数秒おきに読む
+
+    active: いま動いている機器だけ（queued=待ち / running=収集中 / retry=再試行待ち）
+    last  : 最後の収集の結果（一度も収集していない機器は含まない）
+    """
+    ids = (await db.execute(select(Device.id))).scalars().all()
+    active: dict[str, dict] = {}
+    available = True
+    if ids:
+        try:
+            raws = await login_limit.client().mget([collect_state.key(i) for i in ids])
+        except RedisError:  # Redis が使えないときは「動いているかは分からない」として、最後の結果だけ返す
+            raws, available = [], False
+        now = datetime.now().timestamp()
+        for device_id, raw in zip(ids, raws, strict=False):
+            v = collect_state.parse(raw)
+            if v:
+                active[device_id] = {"state": v["state"], "seconds": max(0, int(now - float(v.get("since") or now))),
+                                     "triggered_by": v.get("triggered_by")}
+    latest = select(CollectLog.device_id, func.max(CollectLog.started_at).label("at")).group_by(
+        CollectLog.device_id).subquery()
+    logs = (await db.execute(select(CollectLog).join(
+        latest, (CollectLog.device_id == latest.c.device_id) & (CollectLog.started_at == latest.c.at)))).scalars().all()
+    last = {log.device_id: {"status": log.status, "at": log.finished_at or log.started_at,
+                            "message": (log.message or "")[:300] or None} for log in logs}
+    return {"active": active, "last": last, "available": available}
+
+
 @router.get("/platforms", response_model=list[PlatformInfo], dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def list_platforms():
     """対応プラットフォームの一覧（画面の選択肢・表示名・構成図の既定アイコンに使う）"""
@@ -491,6 +523,7 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
 async def trigger_collect(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """単一デバイスのコンフィグ収集をトリガー"""
     device = await _get_or_404(db, device_id)
+    await run_in_threadpool(mark_collect_queued, device_id, "manual")
     task = collect_device_config.delay(device_id, "manual", audit.user.username)
     audit("collect.run", target_type="device", target_id=device.id, target_name=device.name,
           detail={"task_id": task.id})

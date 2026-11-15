@@ -101,3 +101,57 @@ test("CSV 取り込みは管理者だけに表示する", async ({ page }) => {
     await page.evaluate(() => localStorage.clear());
   }
 });
+
+test("収集の状態（待ち・収集中・失敗・完了）をカードに表示し、終わったら知らせる", async ({ page }) => {
+  // 実際の収集は SSH 機器が要るので、状態の API の応答を差し替えて画面の表示を確かめる
+  const ids: Record<string, string> = {};
+  let phase: "running" | "done" = "running";
+  await page.route("**/api/devices/collect-status", async (route) => {
+    const at = new Date().toISOString().replace("Z", "");
+    if (!ids["Core-SW01"]) return route.fulfill({ json: { available: true, active: {}, last: {} } }); // 機器の一覧を読む前
+    const body = phase === "running"
+      ? {
+          available: true,
+          active: {
+            [ids["Core-SW01"]]: { state: "running", seconds: 75, triggered_by: "manual" },
+            [ids["SW-2F"]]: { state: "queued", seconds: 3, triggered_by: "manual" },
+            [ids["SW-3F"]]: { state: "retry", seconds: 10, triggered_by: "manual" },
+          },
+          last: { [ids["SW-3F"]]: { status: "failed", at, message: "接続がタイムアウトしました" } },
+        }
+      : {
+          available: true,
+          active: {},
+          last: {
+            [ids["Core-SW01"]]: { status: "success", at, message: null },
+            [ids["SW-2F"]]: { status: "success", at, message: null },
+            [ids["SW-3F"]]: { status: "failed", at, message: "認証に失敗しました" },
+          },
+        };
+    await route.fulfill({ json: body });
+  });
+  page.on("response", async (r) => {
+    if (r.url().endsWith("/api/devices/") && r.request().method() === "GET" && r.ok()) {
+      for (const d of (await r.json()) as { id: string; name: string }[]) ids[d.name] = d.id;
+    }
+  });
+  await login(page, USERS.viewer);
+  const card = (name: string) => page.locator(".device-card", { hasText: name });
+  // 機器の ID が分かった状態で開き直す（最初の確認から差し替えた応答を返すため）
+  await expect(card("Core-SW01")).toBeVisible();
+  await page.reload();
+  await expect(card("Core-SW01").locator(".collect-st")).toContainText("収集中… 1 分 15 秒");
+  await expect(card("SW-2F").locator(".collect-st")).toHaveText("⏳ 収集待ち");
+  await expect(card("SW-3F").locator(".collect-st")).toContainText("再試行待ち（接続がタイムアウトしました）");
+  await expect(card("DC-SW01").locator(".collect-st")).toHaveText("未収集");
+  await expect(page.locator(".collect-summary")).toHaveText("収集中 1 台・待ち 2 台");
+
+  // すべて終わると、まとめの表示が消えて結果を知らせる
+  phase = "done";
+  await expect(page.getByText("収集が終わりました（成功 2 台・失敗 1 台）")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".collect-summary")).toHaveCount(0);
+  await expect(card("Core-SW01").locator(".collect-st")).toContainText("✓ 収集");
+  const failed = card("SW-3F").locator(".collect-st");
+  await expect(failed).toContainText("✗ 収集失敗");
+  await expect(failed).toHaveAttribute("title", "認証に失敗しました");
+});

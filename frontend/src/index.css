@@ -899,3 +899,15 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .imp-ng { color: var(--color-danger); }
 .imp-warn-text { color: var(--color-warning); }
 .imp-platforms { columns: 2; font-size: 12px; margin: 8px 0 0 16px; }
+
+/* ---- デバイス管理: 収集の状態 ---- */
+.collect-st { display: flex; align-items: center; gap: 6px; font-size: 11px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.collect-ok { color: var(--color-muted); }
+.collect-none { color: var(--color-muted); }
+.collect-failed { color: var(--color-danger); }
+.collect-queued { color: var(--color-warning); }
+.collect-running { color: var(--color-accent); font-weight: 600; }
+.collect-spin { width: 10px; height: 10px; flex-shrink: 0; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: collect-spin 0.9s linear infinite; }
+@keyframes collect-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .collect-spin { animation-duration: 3s; } }
+.collect-summary { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-accent); font-weight: 600; }

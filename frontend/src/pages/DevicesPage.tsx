@@ -1,4 +1,4 @@
-import React, { ChangeEvent, useEffect, useMemo, useState } from "react";
+import React, { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
@@ -34,6 +34,53 @@ interface Device {
   os_version: string | null;
   reported_hostname: string | null;
   inventory_at: string | null;
+}
+
+// ---- 収集の状態（GET /devices/collect-status）
+interface CollectActive { state: "queued" | "running" | "retry"; seconds: number; triggered_by: string | null; }
+interface CollectLast { status: "success" | "failed"; at: string; message: string | null; }
+interface CollectStatus { active: Record<string, CollectActive>; last: Record<string, CollectLast>; available: boolean; }
+
+const COLLECT_POLL_FAST = 2500; // 収集が動いている間・依頼した直後の更新間隔（ミリ秒）
+const COLLECT_POLL_IDLE = 15000; // 何も動いていないとき（スケジュールや他の人が始めた収集に気づくため）
+const COLLECT_BOOST = 30000; // 依頼してから worker が取りかかるまでの間も、短い間隔で確認する時間
+
+function fmtCollectAt(iso: string): string {
+  const d = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z");
+  return d.toLocaleString("ja-JP", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+function fmtElapsed(sec: number): string {
+  return sec < 60 ? `${sec} 秒` : `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`;
+}
+
+/** カードに出す収集の状態。動いていれば「待ち・収集中・再試行待ち」、そうでなければ最後の結果 */
+function CollectState({ active, last }: { active?: CollectActive; last?: CollectLast }) {
+  if (active?.state === "running") {
+    return (
+      <p className="collect-st collect-running" title="コンフィグを収集しています">
+        <span className="collect-spin" aria-hidden="true" />収集中… {fmtElapsed(active.seconds)}
+      </p>
+    );
+  }
+  if (active?.state === "queued") {
+    return <p className="collect-st collect-queued" title="収集を依頼しました。順番を待っています">⏳ 収集待ち</p>;
+  }
+  if (active?.state === "retry") {
+    return (
+      <p className="collect-st collect-queued" title="一時的な失敗のため、少し待ってからやり直します">
+        ↻ 再試行待ち{last?.status === "failed" && last.message ? `（${last.message.slice(0, 40)}）` : ""}
+      </p>
+    );
+  }
+  if (!last) return <p className="collect-st collect-none">未収集</p>;
+  if (last.status === "failed") {
+    return (
+      <p className="collect-st collect-failed" title={last.message ?? "収集に失敗しました"}>
+        ✗ 収集失敗 {fmtCollectAt(last.at)}
+      </p>
+    );
+  }
+  return <p className="collect-st collect-ok" title="最後の収集は成功しました">✓ 収集 {fmtCollectAt(last.at)}</p>;
 }
 
 /** 台帳の項目をカーソルを合わせたときに表示する文章 */
@@ -532,8 +579,10 @@ function writePref(key: string, value: unknown) {
 }
 
 function DeviceCard({
-  d, canWrite, canTerminal, selecting, selected, showGroup, groupColor, onToggle, onOpen, onEdit, onDelete,
+  d, canWrite, canTerminal, selecting, selected, showGroup, groupColor, collectActive, collectLast,
+  onToggle, onOpen, onEdit, onDelete,
 }: {
+  collectActive?: CollectActive; collectLast?: CollectLast;
   d: Device; canWrite: boolean; canTerminal: boolean; selecting: boolean; selected: boolean; showGroup: boolean;
   groupColor: string | null; onToggle: () => void; onOpen: () => void;
   onEdit: (e: React.MouseEvent) => void; onDelete: (e: React.MouseEvent) => void;
@@ -588,6 +637,7 @@ function DeviceCard({
           {d.group_name ?? "未分類"}
         </p>
       )}
+      <CollectState active={collectActive} last={collectLast} />
       {canTerminal && !selecting && (
         <p style={{ fontSize: 11, color: "var(--color-accent)", marginTop: 8 }}>クリックでターミナルを開く →</p>
       )}
@@ -631,6 +681,64 @@ export default function DevicesPage() {
     load();
     api.get<JumpHostOption[]>("/jump-hosts/").then((r) => setJumpHosts(r.data)).catch(() => undefined);
   }, []);
+
+  // ---- 収集の状態を定期的に読む。動いている間と依頼した直後は短い間隔、それ以外は長い間隔
+  const [collectStatus, setCollectStatus] = useState<CollectStatus | null>(null);
+  const boostUntil = useRef(0);
+  const watched = useRef<Set<string>>(new Set()); // 今回の収集で動いていた機器（終わったときの集計用）
+  const pollNow = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      window.clearTimeout(timer);
+      let busy = false;
+      try {
+        const { data } = await api.get<CollectStatus>("/devices/collect-status");
+        if (stopped) return;
+        setCollectStatus(data);
+        const ids = Object.keys(data.active);
+        busy = ids.length > 0;
+        ids.forEach((id) => watched.current.add(id));
+        if (!busy && watched.current.size > 0) {
+          // 動いていた収集がすべて終わった: 結果をまとめて知らせ、一覧（機器台帳の項目など）を読み直す
+          const done = [...watched.current];
+          watched.current = new Set();
+          boostUntil.current = 0;
+          const failed = done.filter((id) => data.last[id]?.status === "failed").length;
+          setMessage(failed
+            ? `収集が終わりました（成功 ${done.length - failed} 台・失敗 ${failed} 台）。失敗した機器はカードの「✗ 収集失敗」にカーソルを合わせると理由が出ます。`
+            : `収集が終わりました（${done.length} 台すべて成功）。`);
+          load();
+        }
+      } catch {
+        /* 一時的に読めなくても、次の回でやり直す */
+      }
+      if (stopped) return;
+      timer = window.setTimeout(tick, busy || Date.now() < boostUntil.current ? COLLECT_POLL_FAST : COLLECT_POLL_IDLE);
+    };
+    pollNow.current = () => { void tick(); };
+    void tick();
+    // 別のタブから戻ってきたときはすぐ読み直す
+    const onVisible = () => { if (document.visibilityState === "visible") void tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /** 収集を依頼した直後に呼ぶ: しばらく短い間隔で状態を確認する */
+  const watchCollect = () => {
+    boostUntil.current = Date.now() + COLLECT_BOOST;
+    pollNow.current();
+  };
+  const activeCounts = useMemo(() => {
+    const c = { running: 0, waiting: 0 };
+    Object.values(collectStatus?.active ?? {}).forEach((a) => { if (a.state === "running") c.running += 1; else c.waiting += 1; });
+    return c;
+  }, [collectStatus]);
   // 認証情報プロファイルは編集画面を開くときに読み直す（別の画面で追加した直後でも選べるように）
   useEffect(() => {
     if (modal) api.get<CredentialProfile[]>("/credential-profiles/").then((r) => setProfiles(r.data)).catch(() => undefined);
@@ -648,7 +756,8 @@ export default function DevicesPage() {
     setError("");
     try {
       await api.post("/devices/collect/all");
-      setMessage("全デバイスの収集をキューに投入しました。結果は「世代管理」で確認できます。");
+      setMessage("全機器の収集を依頼しました。進み具合は各機器のカードに表示します。");
+      watchCollect();
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -660,7 +769,8 @@ export default function DevicesPage() {
     setError("");
     try {
       await api.post(`/device-groups/${groupId}/collect`);
-      setMessage(`グループ「${name}」の機器の収集をキューに投入しました。結果は「アクティビティ」「世代管理」で確認できます。`);
+      setMessage(`グループ「${name}」の機器の収集を依頼しました。進み具合は各機器のカードに表示します。`);
+      watchCollect();
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -724,6 +834,7 @@ export default function DevicesPage() {
     <DeviceCard
       key={d.id} d={d} canWrite={canWrite} canTerminal={canTerminal} selecting={selecting}
       selected={selected.has(d.id)} showGroup={showGroup} groupColor={d.group_id ? colorOf.get(d.group_id) ?? null : null}
+      collectActive={collectStatus?.active[d.id]} collectLast={collectStatus?.last[d.id]}
       onToggle={() => toggle(d.id)} onOpen={() => navigate(`/terminal/${d.id}`)}
       onEdit={(e) => { e.stopPropagation(); setModal({ device: d }); }} onDelete={(e) => deleteDevice(d, e)}
     />
@@ -782,6 +893,15 @@ export default function DevicesPage() {
           </select>
           <input className="dev-search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="名前・IP・モデル・S/N" aria-label="名前・IP・モデル・S/N" />
           <span className="topo-muted topo-small">{visible.length} / {devices.length}台</span>
+          {(activeCounts.running > 0 || activeCounts.waiting > 0) && (
+            <span className="collect-summary" role="status">
+              <span className="collect-spin" aria-hidden="true" />
+              収集中 {activeCounts.running} 台{activeCounts.waiting > 0 ? `・待ち ${activeCounts.waiting} 台` : ""}
+            </span>
+          )}
+          {collectStatus && !collectStatus.available && (
+            <span className="topo-muted topo-small" title="Redis に接続できないため、収集が動いているかを表示できません">収集の進み具合を取得できません</span>
+          )}
           {canWrite && groups.length > 0 && (
             <button className={`btn${selecting ? " btn-primary" : ""}`} style={{ marginLeft: "auto" }}
               onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}>
