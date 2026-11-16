@@ -143,13 +143,16 @@ def test_options_and_rotation(env):
     assert "logs --timestamps --since 72h bect" in (tmp_path / "calls.log").read_text()  # 行数の上限なし
     # 古いものは消す（保存先にたまり続けない）
     out = tmp_path / "out"
+    for old in out.glob("netconfig-logs-*.tar.gz"):  # ここまでに作ったものは片付けて、古いものだけの状態から始める
+        old.unlink()
     for i in range(6):
         p = out / f"netconfig-logs-20260101-00000{i}.tar.gz"
         p.write_bytes(b"x")
         os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))
     assert run(e, "--keep", "2").returncode == 0
     left = sorted(x.name for x in out.glob("netconfig-logs-*.tar.gz"))
-    assert len(left) == 2 and "netconfig-logs-20260101-000005.tar.gz" in left
+    # 残るのは、いま作ったものと、古いものの中でいちばん新しい 1 つ
+    assert len(left) == 2 and left[0] == "netconfig-logs-20260101-000005.tar.gz" and left[1] > "netconfig-logs-2026"
     # 引数の誤り
     assert run(e, "--days", "abc").returncode == 1 and run(e, "--nope").returncode == 1
     assert "使い方" in run(e, "--help").stdout
