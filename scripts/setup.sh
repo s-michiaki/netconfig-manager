@@ -422,6 +422,8 @@ if [ "$READY" -ne 1 ]; then
   echo ""
   echo "■ backend のログ（末尾）"
   sudo podman-compose -f "$COMPOSE_FILE" logs --tail 30 backend 2>/dev/null | sed 's/^/  /' || true
+  echo ""
+  echo "調査用のログをまとめるには: bash $INSTALL_DIR/scripts/collect_logs.sh"
   exit 1
 fi
 
@@ -449,6 +451,7 @@ elif ! sudo podman exec "$BACKEND_CT" python -m app.tools.selfcheck 2>&1 | sed '
   done
   echo ""
   echo "画面の「システム状態」でも確認できます。原因が分からない場合は、上のログを開発者に伝えてください。"
+  echo "調査用のログをまとめるには: bash $INSTALL_DIR/scripts/collect_logs.sh"
   exit 1
 fi
 
