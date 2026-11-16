@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
-import { CsvButton, downloadCsv } from "../components/CsvButton";
+import { CsvButton, downloadCsv, downloadFile } from "../components/CsvButton";
 
 interface AuditLog {
   id: string;
@@ -33,6 +33,7 @@ interface TerminalSessionItem {
   bytes_out: number;
   truncated: boolean;
   has_recording: boolean;
+  has_text: boolean; // 読める形のテキスト（色や制御文字を除いたもの）があるか
 }
 
 interface Page<T> { items: T[]; total: number; }
@@ -448,6 +449,80 @@ function Player({ session, onClose }: { session: TerminalSessionItem; onClose: (
   );
 }
 
+// ---- ターミナルの記録のテキスト（画面に最終的に出た文字）
+interface TextHitLine { line: number; text: string; ranges: [number, number][]; }
+interface TextHit extends TerminalSessionItem { count: number; lines: TextHitLine[]; }
+interface TextSearchResult {
+  items: TextHit[]; searched: number; without_text: number; unreadable: number; timed_out: boolean; more: boolean;
+  max_lines: number;
+}
+
+/** 一致した部分を強調して 1 行を表示する */
+function Marked({ text, ranges }: { text: string; ranges: [number, number][] }) {
+  const parts: React.ReactNode[] = [];
+  let pos = 0;
+  ranges.forEach(([s, e], i) => {
+    if (s < pos) return;
+    parts.push(text.slice(pos, s), <mark key={i}>{text.slice(s, e)}</mark>);
+    pos = e;
+  });
+  parts.push(text.slice(pos));
+  return <>{parts}</>;
+}
+
+/** テキストを読む画面。色や制御文字、打ち直しの跡を除いた、画面に最終的に出た文字を上から読める */
+function TextViewer({ session, line, onClose }: { session: TerminalSessionItem; line?: number; onClose: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const target = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    api.get<string>(`/audit/terminal-sessions/${session.id}/text`, { responseType: "text", transformResponse: (d) => d })
+      .then((r) => setText(r.data))
+      .catch((e) => setError(errorMessage(e)));
+  }, [session.id]);
+  useEffect(() => {
+    target.current?.scrollIntoView({ block: "center" });
+  }, [text]);
+  const lines = text === null ? [] : text.replace(/\n$/, "").split("\n");
+  const save = () => downloadFile(`/audit/terminal-sessions/${session.id}/text`, { download: true },
+    `terminal_${session.device_name ?? "device"}.txt`).catch((e) => setError(errorMessage(e)));
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal audit-player" onClick={(e) => e.stopPropagation()}>
+        <div className="audit-player-head">
+          <div>
+            <p className="modal-title" style={{ marginBottom: 2 }}>{session.username}@{session.device_name} のテキスト</p>
+            <p className="topo-muted topo-small">
+              {fmtDate(session.started_at)} 〜 {session.ended_at ? fmtDate(session.ended_at) : "（終了時刻なし）"}
+              {session.truncated ? " ・上限に達したため途中までの記録です" : ""}
+              {text !== null ? ` ・${lines.length} 行` : ""}
+            </p>
+          </div>
+          <button className="btn" onClick={onClose}>閉じる</button>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        {text === null && !error && <p className="topo-muted">読み込み中…</p>}
+        {text !== null && (
+          <div className="audit-text mono" role="document" aria-label="ターミナルのテキスト">
+            {lines.map((l, i) => (
+              <div key={i} ref={i + 1 === line ? target : undefined} className={`audit-text-line${i + 1 === line ? " audit-text-hit" : ""}`}>
+                <span className="srch-no">{i + 1}</span><span>{l}</span>
+              </div>
+            ))}
+            {!lines.length && <p className="topo-muted">出力はありませんでした。</p>}
+          </div>
+        )}
+        <div className="audit-player-controls">
+          <span className="topo-muted topo-small">
+            色や制御文字、打ち直しの跡を除いた、画面に最終的に出た文字です。vi などの全画面表示は正しく再現されません（その場合は「再生」で確認）。
+          </span>
+          <button className="btn" style={{ marginLeft: "auto" }} onClick={save} disabled={text === null}>ファイルに保存（.txt）</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SessionsTab() {
   const [username, setUsername] = useState("");
   const [device, setDevice] = useState("");
@@ -455,6 +530,29 @@ function SessionsTab() {
   const [page, setPage] = useState<Page<TerminalSessionItem> | null>(null);
   const [error, setError] = useState("");
   const [playing, setPlaying] = useState<TerminalSessionItem | null>(null);
+  const [reading, setReading] = useState<{ session: TerminalSessionItem; line?: number } | null>(null);
+  // 記録の中の検索
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("contains");
+  const [found, setFound] = useState<TextSearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
+  const searchText = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    setSearching(true);
+    setError("");
+    try {
+      const r = await api.post<TextSearchResult>("/audit/terminal-sessions/search", {
+        query, mode, username: username.trim() || null, device: device.trim() || null,
+      });
+      setFound(r.data);
+    } catch (err) {
+      setError(errorMessage(err));
+      setFound(null);
+    } finally {
+      setSearching(false);
+    }
+  };
 
   const load = useCallback(async (o: number) => {
     setError("");
@@ -476,6 +574,7 @@ function SessionsTab() {
   return (
     <>
       {playing && <Player session={playing} onClose={() => setPlaying(null)} />}
+      {reading && <TextViewer session={reading.session} line={reading.line} onClose={() => setReading(null)} />}
       <form className="audit-filters" onSubmit={(e) => { e.preventDefault(); load(0); }}>
         <label className="audit-field">
           <span className="form-label">ユーザー</span>
@@ -490,7 +589,63 @@ function SessionsTab() {
       <p className="topo-muted topo-small" style={{ marginBottom: 8 }}>
         画面に表示された内容を記録しています（入力したコマンドは機器のエコーとして残ります）。キー入力そのものは、パスワードなどが含まれるため記録しません。
       </p>
+      <form className="audit-filters" onSubmit={searchText} aria-label="記録の中を探す">
+        <label className="audit-field audit-field-wide">
+          <span className="form-label">記録の中を探す（打ったコマンドや出力の文字列）</span>
+          <input className="mono" value={query} onChange={(e) => setQuery(e.target.value)} maxLength={200}
+            placeholder={mode === "regex" ? "例: ^R1#\\s*conf" : "例: show running-config / no shutdown"} />
+        </label>
+        <label className="audit-field">
+          <span className="form-label">探し方</span>
+          <select value={mode} onChange={(e) => setMode(e.target.value)}>
+            <option value="contains">文字列を含む</option>
+            <option value="regex">正規表現</option>
+          </select>
+        </label>
+        <button className="btn btn-primary" type="submit" disabled={searching || !query.trim()}>{searching ? "検索中…" : "記録を検索"}</button>
+        {found && <button className="btn" type="button" onClick={() => setFound(null)}>結果を閉じる</button>}
+      </form>
       {error && <p className="form-error">{error}</p>}
+      {found && (
+        <section className="audit-found" aria-label="記録の検索結果">
+          <p className="srch-summary">
+            <b>{found.items.length}</b> 件のセッションで一致（{found.searched} 件を検索。上のユーザー・機器の絞り込みも使います）
+          </p>
+          {(found.timed_out || found.more || found.without_text > 0 || found.unreadable > 0) && (
+            <p className="topo-muted topo-small" style={{ marginBottom: 8 }}>
+              {found.timed_out && "時間内に調べきれなかった記録があります（ユーザーや機器で絞ってください）。"}
+              {found.more && "新しい順に 300 件までを調べました。"}
+              {found.without_text > 0 && `テキストが無い記録 ${found.without_text} 件は対象外です（この機能を入れる前の記録など）。`}
+              {found.unreadable > 0 && `読めなかった記録が ${found.unreadable} 件あります。`}
+            </p>
+          )}
+          {found.items.map((h) => (
+            <div key={h.id} className="card srch-device">
+              <header>
+                <b>{h.username}@{h.device_name}</b>
+                <span className="topo-muted topo-small mono">{fmtDate(h.started_at)}</span>
+                <span className="topo-muted topo-small">{h.count} 行</span>
+                <span style={{ flex: 1 }} />
+                <button className="btn" onClick={() => setReading({ session: h, line: h.lines[0]?.line })}>テキスト</button>
+                <button className="btn" disabled={!h.has_recording} onClick={() => setPlaying(h)}>再生</button>
+              </header>
+              <div className="srch-lines mono">
+                {h.lines.map((l) => (
+                  <div key={l.line} className="srch-line audit-found-line" role="button" tabIndex={0}
+                    title="この行を開く" onClick={() => setReading({ session: h, line: l.line })}
+                    onKeyDown={(e) => { if (e.key === "Enter") setReading({ session: h, line: l.line }); }}>
+                    <span className="srch-no">{l.line}</span><span><Marked text={l.text} ranges={l.ranges} /></span>
+                  </div>
+                ))}
+              </div>
+              {h.count > h.lines.length && (
+                <p className="topo-muted topo-small srch-more">ほかに {h.count - h.lines.length} 行あります（表示は {found.max_lines} 行まで）</p>
+              )}
+            </div>
+          ))}
+          {!found.items.length && <p className="topo-muted">一致する記録はありませんでした。</p>}
+        </section>
+      )}
       {page && (
         <>
           <div className="audit-bar">
@@ -520,8 +675,12 @@ function SessionsTab() {
                     <td>{s.via ?? "直接"}</td>
                     <td className="nowrap">{s.end_reason ?? (s.ended_at ? "—" : "接続中または不明")}</td>
                     <td className="nowrap topo-small">{fmtBytes(s.bytes_out)}{s.truncated ? "（上限）" : ""}</td>
-                    <td>
-                      <button className="btn" disabled={!s.has_recording} onClick={() => setPlaying(s)}>再生</button>
+                    <td className="nowrap">
+                      <button className="btn" disabled={!s.has_recording} onClick={() => setPlaying(s)}>再生</button>{" "}
+                      <button className="btn" disabled={!s.has_text} onClick={() => setReading({ session: s })}
+                        title={s.has_text ? "画面に出た文字をテキストで読む・保存する" : "テキストの記録がありません（この機能を入れる前の記録など）"}>
+                        テキスト
+                      </button>
                     </td>
                   </tr>
                 ))}

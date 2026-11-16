@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     TERMINAL_LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
     # 記録を DEVICE_ENCRYPTION_KEY で暗号化して保存する（.cast.enc）。false で従来どおり平文（.cast）
     TERMINAL_LOG_ENCRYPT: bool = True
+    # ターミナルの記録を、読める形のテキスト（色や制御文字を除いたもの）でも保存する。監査ログで読む・検索する・渡すため
+    TERMINAL_LOG_TEXT: bool = True
     # システムの状態の確認と異常の通知（services/system.py）
     SYSTEM_WATCHDOG_ENABLED: bool = True  # API のプロセスで定期的に確認し、異常を通知する
     SYSTEM_CHECK_INTERVAL_SEC: int = Field(default=60, ge=10)

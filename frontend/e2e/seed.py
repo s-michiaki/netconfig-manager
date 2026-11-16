@@ -68,6 +68,24 @@ def main() -> None:
             # ダッシュボードの「直近の変更」に出す世代（実際は収集のときに worker が記録する）
             db.add(ConfigSnapshot(device_id=devs["Core-SW01"]["id"], commit_hash=second.commit_hash, collected_at=utcnow(),
                                   lines_added=second.added, lines_removed=second.removed, triggered_by="schedule"))
+            # ターミナルの記録（実際は SSH ターミナルの切断時に保存する）。色・打ち直しを含む出力を 1 件
+            import uuid
+            from datetime import timedelta
+
+            from app.models.audit import TerminalSession
+            from app.services.audit import TerminalRecorder
+
+            sid, started = str(uuid.uuid4()), utcnow() - timedelta(minutes=30)
+            rec = TerminalRecorder(sid, started, 100, 30, "admin@Core-SW01")
+            rec.output("Core-SW01#show clcok\b \b\b \b\b \bock\r\n12:00:00.000 JST Mon Nov 16 2026\r\n")
+            rec.output("Core-SW01#\x1b[1mshow ip interface brief\x1b[0m\r\nVlan10   10.0.1.1   YES manual up   up\r\n")
+            rec.output(" --More-- \r         \rVlan20   10.0.2.1   YES manual up   up\r\nCore-SW01#exit\r\n")
+            rec.close()
+            rec.write_text()
+            db.add(TerminalSession(id=sid, username="admin", device_id=devs["Core-SW01"]["id"], device_name="Core-SW01",
+                                   device_host="10.0.1.1", ip="127.0.0.1", started_at=started,
+                                   ended_at=started + timedelta(minutes=2), end_reason="利用者が切断",
+                                   log_file=rec.rel_path, bytes_out=rec.bytes, truncated=False, cols=100, rows=30))
             await db.commit()
     asyncio.run(inventory())
     print("seeded")

@@ -23,6 +23,7 @@ from app.core.timeutil import utcnow
 from app.models.activity import ActivityLog
 from app.models.audit import AuditLog, TerminalSession
 from app.models.user import User
+from app.services import terminal_text
 from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ ACTIONS = {
     "user_group.create": "ユーザーグループ作成",
     "user_group.update": "ユーザーグループ変更",
     "user_group.delete": "ユーザーグループ削除",
+    "audit.search_recording": "ターミナル記録の検索",
     "audit.view_recording": "ターミナル記録の閲覧",
     "audit.export": "監査ログの CSV 出力",
     "monitor.snmp_update": "SNMP の設定",
@@ -253,6 +255,38 @@ class TerminalRecorder:
                     pass
                 self._f = None
 
+    def write_text(self) -> bool:
+        """記録を読めるテキストに直して、並べて保存する（close のあとに呼ぶ。失敗しても記録そのものには影響させない）"""
+        if not settings.TERMINAL_LOG_TEXT or not self.path.is_file():
+            return False
+        try:
+            text = terminal_text.cast_to_text(read_recording(self.path))
+            out = text_path_for(self.path)
+            tmp = out.with_name(out.name + ".tmp")
+            lines = text.splitlines()
+            tmp.write_text("".join((encrypt_line(x) if self.encrypt else x) + "\n" for x in lines), encoding="utf-8")
+            tmp.replace(out)
+            return True
+        except (OSError, InvalidToken, ValueError) as e:
+            logger.error("ターミナルの記録をテキストにできませんでした (%s): %s", self.path, e)
+            return False
+
+
+def text_path_for(cast_path: Path) -> Path:
+    """再生用の記録（<id>.cast / <id>.cast.enc）に対応するテキストの置き場所（<id>.txt / <id>.txt.enc）"""
+    name = cast_path.name
+    enc = name.endswith(".enc")
+    stem = name[: -len(".cast.enc")] if enc else name[: -len(".cast")] if name.endswith(".cast") else name
+    return cast_path.with_name(stem + (".txt.enc" if enc else ".txt"))
+
+
+def read_text_log(path: Path) -> str:
+    """テキストの記録を読む（.enc は 1 行ずつ復号する）。空行も 1 行として保つ"""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    if not path.name.endswith(".enc"):
+        return raw
+    return "".join(decrypt_line(line) + "\n" for line in raw.splitlines())
+
 
 def read_recording(path: Path) -> str:
     """記録を asciicast v2 のテキストとして読む（.enc は1行ずつ復号する。壊れた行は飛ばす）"""
@@ -287,6 +321,11 @@ def encrypt_existing_recordings(base: Path | None = None) -> list[tuple[str, str
     return moved
 
 
+def text_path(session: TerminalSession) -> Path | None:
+    p = recording_path(session)
+    return text_path_for(p) if p is not None else None
+
+
 def recording_path(session: TerminalSession) -> Path | None:
     if not session.log_file:
         return None
@@ -313,8 +352,9 @@ async def purge_old(db: AsyncSession, now: datetime | None = None) -> dict:
         cutoff = now - timedelta(days=settings.TERMINAL_LOG_RETENTION_DAYS)
         old = (await db.execute(select(TerminalSession).where(TerminalSession.started_at < cutoff))).scalars().all()
         for s in old:
-            p = recording_path(s)
-            if p is not None:
+            for p in (recording_path(s), text_path(s)):  # 再生用の記録と、テキストの両方
+                if p is None:
+                    continue
                 try:
                     p.unlink(missing_ok=True)
                 except OSError as e:

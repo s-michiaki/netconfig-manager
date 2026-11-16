@@ -315,6 +315,8 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             await loop.run_in_executor(None, session.close)
             await loop.run_in_executor(None, reader.join, 2)  # 出力の書き込みが終わるのを待つ
             recorder.close()
+            # 読める形のテキストも保存する（大きな記録でも応答を止めないよう、別スレッドで変換する）
+            await loop.run_in_executor(None, recorder.write_text)
             ended = utcnow()
             record.ended_at = ended
             record.end_reason = (
