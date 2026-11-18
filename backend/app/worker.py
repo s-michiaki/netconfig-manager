@@ -6,6 +6,7 @@ Celeryワーカー定義
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
+  （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
 - poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
 収集の結果・スケジュールの実行などはアクティビティログに記録する（ref で同じ実行の記録をまとめる）
@@ -27,7 +28,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
-from app.services import collect_state, fw_hits, inventory, monitoring, system
+from app.services import collect_state, failure_batch, fw_hits, inventory, monitoring, system
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -38,7 +39,7 @@ from app.services.config_service import (
     collect_config_sync,
 )
 from app.services.connection import load_connection_info
-from app.services.notify import notify_change, notify_failure, notify_violations, wants_any
+from app.services.notify import notify_change, notify_failure, notify_failures, notify_violations, wants_any
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,12 @@ celery_app.conf.update(
         "dispatch-due-schedules": {
             "task": "app.worker.dispatch_due_schedules",
             "schedule": 60.0,
+        },
+        # 収集失敗の通知のまとめ: 予約した送信が失われた（worker の再起動など）ときに、残った分を送る
+        "flush-failure-notifications": {
+            "task": "app.worker.flush_failure_notifications",
+            "schedule": 300.0,
+            "kwargs": {"stale_only": True},
         },
         "recheck-expired-exceptions": {
             "task": "app.worker.recheck_expired_exceptions",
@@ -266,7 +273,7 @@ def collect_device_config(
         if not result.success and not will_retry:
             try:
                 if _run_async(_wants("failure")):
-                    send_failure_notification.delay(device_id, result.error or "", triggered_by, ref)
+                    queue_failure_notification(device_id, result.error or "", triggered_by, ref)
             except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
                 logger.exception("収集失敗の通知を投入できませんでした device=%s", device_id)
         if result.success and result.commit_hash and not result.first:
@@ -404,6 +411,45 @@ def send_violation_notification(items: list, ref: str | None = None):
         return _run_async(run())
     except Exception:  # noqa: BLE001
         logger.exception("違反の通知に失敗しました")
+        return {"error": True}
+
+
+def queue_failure_notification(device_id: str, error: str, triggered_by: str, ref: str | None) -> None:
+    """収集の失敗を通知する。NOTIFY_FAILURE_BATCH_SEC 秒の間の失敗をまとめて送る（0 ならすぐ機器ごとに送る）"""
+    wait = settings.NOTIFY_FAILURE_BATCH_SEC
+    if wait > 0:
+        try:
+            if failure_batch.add(_redis(), device_id, error, triggered_by, ref, wait):
+                flush_failure_notifications.apply_async(countdown=wait)
+            return
+        except redis.exceptions.RedisError:
+            logger.warning("収集失敗の通知をまとめられないため、すぐに送ります device=%s", device_id)
+    send_failure_notification.delay(device_id, error, triggered_by, ref)
+
+
+@celery_app.task
+def flush_failure_notifications(stale_only: bool = False):
+    """ためた収集の失敗を、通知先ごとに 1 通にまとめて送る。
+
+    stale_only: beat の定期実行。送信のタスクが失われて残っている分だけを送る（予約どおりなら何もしない）
+    """
+    r = _redis()
+    if stale_only and not failure_batch.stale(r):
+        return {"sent": 0, "failed": 0}
+    items = failure_batch.take(r)
+    if not items:
+        return {"sent": 0, "failed": 0}
+
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_failures(db, items)
+
+    try:
+        result = _run_async(run())
+        logger.info("収集失敗の通知（まとめ） 機器=%d 件 %s", len({i["device_id"] for i in items}), result)
+        return result
+    except Exception:  # noqa: BLE001
+        logger.exception("収集失敗の通知（まとめ）に失敗しました 件数=%d", len(items))
         return {"error": True}
 
 

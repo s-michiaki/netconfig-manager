@@ -52,7 +52,7 @@ type EventKey = "on_change" | "on_violation" | "on_failure" | "on_system";
 const EVENT_OPTIONS: [EventKey, string, string][] = [
   ["on_change", "コンフィグの変更", "収集で設定の変更が見つかったとき"],
   ["on_violation", "コンプライアンス違反の発生", "新しく違反になったとき（同時に多数の機器が違反になったときは1通にまとめます）"],
-  ["on_failure", "収集の失敗", "再試行しても収集できなかったとき"],
+  ["on_failure", "収集の失敗", "再試行しても収集できなかったとき（短い時間に多数の機器が失敗したときは1通にまとめます）"],
   ["on_system", "システムの異常", "worker・スケジューラーの停止、長期間収集できていない機器、ディスク・証明書の期限など（対象の機器に関係なく通知）"],
 ];
 

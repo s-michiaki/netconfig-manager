@@ -23,6 +23,7 @@ os.environ.update(
     ADMIN_PASSWORD="initial-pass-123",
     ALLOWED_ORIGINS="",
     SYSTEM_WATCHDOG_ENABLED="false",  # テストでは定期確認を動かさない（必要なテストが直接呼ぶ）
+    NOTIFY_FAILURE_BATCH_SEC="0",  # 収集失敗の通知はすぐ送る（まとめる動きは test_failure_batch.py で確かめる）
     SYSTEM_CERT_ENDPOINT="",
 )
 HERE = Path(__file__).parent

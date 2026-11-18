@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # システムの状態の確認と異常の通知（services/system.py）
     SYSTEM_WATCHDOG_ENABLED: bool = True  # API のプロセスで定期的に確認し、異常を通知する
     SYSTEM_CHECK_INTERVAL_SEC: int = Field(default=60, ge=10)
+    # 収集失敗の通知をまとめる時間（秒）。最初の失敗からこの時間に起きた失敗を、通知先ごとに 1 通にまとめる。
+    # 0 なら機器ごとにすぐ通知する（これまでの動き）
+    NOTIFY_FAILURE_BATCH_SEC: int = Field(default=60, ge=0, le=3600)
     SYSTEM_ALERT_AFTER_MIN: int = Field(default=10, ge=0)  # worker・スケジューラー・Redis の停止がこの分数続いたら通知
     SYSTEM_STALE_DAYS: int = Field(default=7, ge=0)  # この日数以上収集できていない有効な機器を警告（0 で確認しない）
     SYSTEM_CERT_ENDPOINT: str = "frontend:443"  # 期限を確認する HTTPS の接続先（空で確認しない）

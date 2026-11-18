@@ -358,6 +358,66 @@ async def notify_failure(db: AsyncSession, device_id: str, error: str, triggered
     ], ref)
 
 
+def _error_kind(error: str) -> str:
+    """失敗の理由をまとめるための短い見出し（1 行目の先頭 60 文字）"""
+    first = (error or "不明").strip().splitlines()[0] if (error or "").strip() else "不明"
+    return first[:60] + ("…" if len(first) > 60 else "")
+
+
+async def notify_failures(db: AsyncSession, items: list[dict]) -> dict:
+    """まとめた収集の失敗を通知する。items: [{device_id, error, triggered_by, ref, at}]（services/failure_batch.py）
+
+    通知先ごとに、その通知先が受け取る機器の失敗が 1 台ならこれまでどおりの詳しい通知、
+    2 台以上なら 1 通にまとめる（台数・失敗の理由の内訳・機器の一覧）
+    """
+    latest: dict[str, dict] = {}
+    for it in sorted(items, key=lambda x: x.get("at") or 0):
+        latest[it["device_id"]] = it  # 同じ機器が何度も失敗したら最後のものだけ
+    devices = {d.id: d for d in (await db.execute(select(Device).where(Device.id.in_(list(latest))))).scalars()}
+    groups = {g.id: g.name for g in (await db.execute(select(DeviceGroup))).scalars()}
+    per_dest: dict[tuple[str, str], tuple[Destination, list[tuple[Device, dict]]]] = {}
+    dests_by_group: dict[str | None, list[Destination]] = {}
+    for device_id, it in latest.items():
+        device = devices.get(device_id)
+        if device is None:  # まとめている間に削除された機器
+            continue
+        if device.group_id not in dests_by_group:
+            dests_by_group[device.group_id] = await resolve_destinations(db, device.group_id, "failure")
+        for d in dests_by_group[device.group_id]:
+            per_dest.setdefault((d.kind, d.url), (d, []))[1].append((device, it))
+    refs = {it.get("ref") for it in latest.values() if it.get("ref")}
+    ref = refs.pop() if len(refs) == 1 else None  # 1 回の一括収集の失敗だけなら、その実行の記録に結び付ける
+    sends = []
+    for d, entries in per_dest.values():
+        entries.sort(key=lambda e: e[0].name)
+        if len(entries) == 1:
+            device, it = entries[0]
+            facts = [("機器", f"{device.name}（{device.hostname}）"),
+                     ("グループ", groups.get(device.group_id, "未分類") if device.group_id else "未分類"),
+                     ("収集", f"{TRIGGER_LABELS.get(it['triggered_by'], it['triggered_by'])}・{_local(utcnow())}"),
+                     ("エラー", (it.get("error") or "不明")[:500])]
+            payload = _message(d.kind, f"収集失敗: {device.name}", facts, _page_url(f"/activity?device={device.id}"),
+                               "アクティビティを画面で確認", 0xFB923C)
+            sends.append((d, payload, device))
+            continue
+        kinds: dict[str, int] = {}
+        for _, it in entries:
+            k = _error_kind(it.get("error", ""))
+            kinds[k] = kinds.get(k, 0) + 1
+        top = sorted(kinds.items(), key=lambda kv: -kv[1])
+        breakdown = "\n".join(f"・{k}（{n} 台）" for k, n in top[:5]) + (f"\n…ほか {len(top) - 5} 種類" if len(top) > 5 else "")
+        triggers = sorted({TRIGGER_LABELS.get(it["triggered_by"], it["triggered_by"]) for _, it in entries})
+        body = "\n".join(f"・{dev.name}（{dev.hostname}）: {_error_kind(it.get('error', ''))}"
+                         for dev, it in entries[:MAX_LIST])
+        if len(entries) > MAX_LIST:
+            body += f"\n…ほか {len(entries) - MAX_LIST} 台"
+        facts = [("収集", f"{'・'.join(triggers)}・{_local(utcnow())}"), ("失敗の理由", breakdown)]
+        payload = _message(d.kind, f"収集失敗: {len(entries)} 台", facts, _page_url("/activity?level=error"),
+                           "アクティビティを画面で確認", 0xFB923C, body)
+        sends.append((d, payload, None))
+    return await _deliver(db, "failure", sends, ref)
+
+
 async def notify_system(db: AsyncSession, title: str, body: str, facts: list[tuple[str, str]] | None = None,
                         ok: bool = False) -> dict:
     """システムの異常・復旧を通知する（services/system.py のウォッチドッグから呼ぶ）"""

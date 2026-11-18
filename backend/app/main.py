@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.41.1",
+    version="1.42.0",
     lifespan=lifespan,
 )
 
