@@ -2,8 +2,8 @@
 # ロックファイル requirements-dev.txt は、本番のロック（requirements.txt）と同じ版になるよう
 # bash scripts/lock_deps.sh で生成する（手で編集しない）。本番の依存も含むので、開発環境ではこれだけを入れればよい
 -r requirements.in
-pytest==8.3.3
-pytest-asyncio==0.24.0
+pytest==9.2.0
+pytest-asyncio==1.5.0
 httpx==0.27.2
 aiosqlite==0.20.0
 fakeredis[lua]==2.25.1

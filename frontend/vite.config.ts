@@ -8,11 +8,14 @@ export default defineConfig({
   build: {
     // フォントは data: URL に埋め込まず、常にファイルとして出力する（CSP の font-src を 'self' だけにするため）
     assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined),
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         // 全画面で使うライブラリはまとめて1つにし、画面のファイルを小さく保つ（ブラウザのキャッシュも効きやすい）
-        manualChunks: {
-          vendor: ["react", "react-dom", "react-router-dom", "axios"],
+        // （Vite 8 の rolldown は manualChunks のオブジェクト形式を使えないため、codeSplitting で同じ分け方にしている）
+        codeSplitting: {
+          groups: [
+            { name: "vendor", test: /[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler|axios)[\\/]/ },
+          ],
         },
       },
     },

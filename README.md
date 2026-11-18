@@ -770,7 +770,7 @@ PYTHON=python3 npm run e2e         # backend の依存パッケージが入っ�
 GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
 
 - backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff と pytest（Python 3.12）
-- frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 20）
+- frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 22）
 - nginx: 本番と同じ nginx のイメージで設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
