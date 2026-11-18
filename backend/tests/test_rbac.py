@@ -256,6 +256,69 @@ def test_force_logout_closes_open_terminal(client, users):
     assert client.delete(f"/api/users/{uid}", headers=admin).status_code == 204
 
 
+def _open_terminal(client, did, tok):
+    ws = client.websocket_connect(f"/api/terminal/ws/{did}").__enter__()
+    ws.send_text(json.dumps({"type": "auth", "token": tok}))
+    assert "R1#" in ws.receive_text()
+    return ws
+
+
+def _closed_with(ws, text):
+    out = ""
+    with pytest.raises(WebSocketDisconnect) as e:
+        while True:
+            out += ws.receive_text()
+    return e.value.code == 4401 and text in out
+
+
+def _end_reason(client, admin, username):
+    for _ in range(50):
+        items = client.get("/api/audit/terminal-sessions", params={"username": username}, headers=admin).json()["items"]
+        if items and items[0]["end_reason"]:
+            return items[0]["end_reason"]
+        time.sleep(0.1)
+    return None
+
+
+def test_role_change_and_own_password_change_close_terminal(client, users):
+    """ターミナルの権限が無くなるロールへの変更、本人のパスワード変更でも、開いているターミナルを切る"""
+    import fake_sshd
+
+    admin = users["admin"]
+    port, _, _ = fake_sshd.start()
+    did = client.post("/api/devices/", json=dict(name=f"kick3-sw-{port}", hostname="127.0.0.1", port=port,
+                                                 platform="cisco_ios", username="admin", password="pw"),
+                      headers=admin).json()["id"]
+    uid = client.post("/api/users/", json={"username": "kick3", "password": "password-1234", "role": "operator"},
+                      headers=admin).json()["id"]
+    tok = login(client, "kick3", "password-1234")["Authorization"].split()[1]
+
+    # オペレーター → 管理者はターミナルの権限が残るので切らない
+    ws = _open_terminal(client, did, tok)
+    assert client.patch(f"/api/users/{uid}", json={"role": "admin"}, headers=admin).status_code == 200
+    ws.send_text(json.dumps({"type": "input", "data": "\r"}))
+    assert "R1#" in ws.receive_text()
+    # 管理者 → 閲覧者で切る（ログインそのものは残る）
+    assert client.patch(f"/api/users/{uid}", json={"role": "viewer"}, headers=admin).status_code == 200
+    assert _closed_with(ws, "ロールの変更")
+    ws.__exit__(None, None, None)
+    assert _end_reason(client, admin, "kick3") == "管理者が切断（ロールの変更）"
+    assert client.get("/api/devices/", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+
+    # 本人のパスワード変更
+    assert client.patch(f"/api/users/{uid}", json={"role": "operator"}, headers=admin).status_code == 200
+    ws = _open_terminal(client, did, tok)
+    r = client.post("/api/auth/change-password",
+                    json={"current_password": "password-1234", "new_password": "changed-pass-777"},
+                    headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 200
+    assert _closed_with(ws, "パスワードの変更")
+    ws.__exit__(None, None, None)
+    assert _end_reason(client, admin, "kick3") == "本人のパスワード変更で切断"  # 新しい順なので先頭が今回の記録
+    client.delete(f"/api/devices/{did}", headers=admin)
+    assert client.delete(f"/api/users/{uid}", headers=admin).status_code == 204
+
+
 def test_change_password_returns_new_token(client, users):
     old = login(client, "view1", "password-1234")
     r = client.post(

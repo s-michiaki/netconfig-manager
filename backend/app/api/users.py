@@ -16,7 +16,7 @@ from app.api.auth import NewPassword
 from app.api.deps import get_current_user
 from app.api.terminal import close_user_sessions
 from app.core.database import get_db
-from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Role
+from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Perm, Role
 from app.core.security import hash_password
 from app.models.device import CredentialProfile
 from app.models.notification import NotificationSetting, UserGroupMember
@@ -150,10 +150,15 @@ async def update_user(
         raise HTTPException(status_code=400, detail="有効な管理者が1人もいなくなるため変更できません")
 
     changes = []
+    revoke = ""  # 既存のログイン（トークン・接続中のターミナル）を切る理由
     if payload.role is not None and payload.role.value != user.role:
         changes.append(f"role {user.role}->{payload.role.value}")
+        lost_terminal = (Perm.TERMINAL in ROLE_PERMISSIONS[Role(user.role)]
+                         and Perm.TERMINAL not in ROLE_PERMISSIONS[payload.role])
         user.role = payload.role.value
-    revoke = ""  # 既存のログイン（トークン・接続中のターミナル）を切る理由
+        if lost_terminal:
+            # ログインはそのまま（以降の操作は新しいロールで判定される）。開いているターミナルだけ切る
+            revoke = "ロールの変更"
     if payload.is_active is not None and payload.is_active != user.is_active:
         changes.append(f"is_active->{payload.is_active}")
         user.is_active = payload.is_active

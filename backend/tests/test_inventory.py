@@ -180,3 +180,56 @@ def test_worker_saves_inventory_and_records_change():
         # 対応している機種は画面で分かる
         plats = {p["id"]: p for p in c.get("/api/devices/platforms", headers=h).json()}
         assert plats["cisco_ios"]["inventory"] and not plats["mikrotik_routeros"]["inventory"]
+
+
+def test_inventory_change_is_notified(monkeypatch):
+    """機器情報が変わったら、「機器情報の変化」を選んだ通知先へ送る（初めての取得・変化なしでは送らない）"""
+    from app.services import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "send_webhook", lambda kind, url, payload: sent.append((kind, url, payload)))
+    monkeypatch.setattr(worker.send_inventory_notification, "delay",
+                        lambda *a, **kw: worker.send_inventory_notification.apply(args=a, kwargs=kw).get())
+    port, state, _ = fake_sshd.start()
+    t = uuid.uuid4().hex[:6]
+    hook = f"https://discord.com/api/webhooks/960/{t}"
+    with TestClient(app) as c, mock.patch.object(worker, "_redis", return_value=fakeredis.FakeRedis()):
+        tok = c.post("/api/auth/token", data={"username": "admin", "password": "initial-pass-123"}).json()["access_token"]
+        h = {"Authorization": f"Bearer {tok}"}
+        c.post("/api/users/", json={"username": f"invn-{t}", "password": "password-1234", "role": "viewer"}, headers=h)
+        vt = c.post("/api/auth/token", data={"username": f"invn-{t}", "password": "password-1234"}).json()["access_token"]
+        vh = {"Authorization": f"Bearer {vt}"}
+        r = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False,
+                                                 "on_system": False, "on_inventory": True}, headers=vh)
+        assert r.status_code == 200 and r.json()["on_inventory"] is True
+        d = c.post("/api/devices/", json=dict(name=f"invn-{t}", hostname="127.0.0.1", port=port, platform="cisco_ios",
+                                              username="admin", password="pw"), headers=h).json()
+
+        def mine():
+            return [p for _, u, p in sent if u == hook]
+
+        worker.collect_device_config.apply(args=(d["id"], "manual", "admin", None)).get()
+        worker.collect_device_config.apply(args=(d["id"], "manual", "admin", None)).get()
+        assert mine() == []  # 初めての取得・変化なし
+        state["inventory"] = fake_sshd.CISCO_VERSION.replace("15.2(7)E7", "15.2(7)E9")
+        worker.collect_device_config.apply(args=(d["id"], "manual", "admin", None)).get()
+        (p,) = mine()
+        emb = p["embeds"][0]
+        assert emb["title"] == f"機器情報の変化: invn-{t}"
+        assert {"name": "OS バージョン", "value": "15.2(7)E7 → 15.2(7)E9", "inline": True} in emb["fields"]
+        # 機器の交換（シリアル番号）は件名と説明で目立たせる
+        state["inventory"] = state["inventory"].replace("FOC1234X5YZ", "FOC9999X9ZZ")
+        worker.collect_device_config.apply(args=(d["id"], "manual", "admin", None)).get()
+        emb = mine()[-1]["embeds"][0]
+        assert emb["title"].startswith("機器の交換？") and "登録内容" in emb["description"]
+        # 「機器情報の変化」を外すと送らない
+        assert c.put("/api/notifications/me", json={"mode": "custom", "on_change": True, "on_system": False,
+                                                    "on_inventory": False}, headers=vh).status_code == 200
+        state["inventory"] = state["inventory"].replace("15.2(7)E9", "15.2(7)E10")
+        worker.collect_device_config.apply(args=(d["id"], "manual", "admin", None)).get()
+        assert len(mine()) == 2
+        sent_log = c.get("/api/activity/logs", params={"device_id": d["id"], "event": "notify.sent"}, headers=h).json()
+        assert any("機器情報の変化を通知しました" in i["message"] for i in sent_log["items"])
+        c.delete(f"/api/devices/{d['id']}", headers=h)
+        uid_ = next(u["id"] for u in c.get("/api/users/", headers=h).json() if u["username"] == f"invn-{t}")
+        assert c.delete(f"/api/users/{uid_}", headers=h).status_code == 204

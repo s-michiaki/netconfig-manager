@@ -56,10 +56,11 @@ _cleanup_tasks: set[asyncio.Task] = set()
 @dataclass(eq=False)
 class _LiveTerminal:
     websocket: WebSocket
-    revoked: str | None = None  # 管理者の操作で切ったときの理由（記録の終了理由に使う）
+    revoked: str | None = None  # 管理者の操作・パスワードの変更などで切ったときの理由（記録の終了理由に使う）
 
 
-# 接続中のターミナル（ユーザー ID ごと）。管理者が強制ログアウト・無効化・パスワードのリセット・削除をしたときに切るため。
+# 接続中のターミナル（ユーザー ID ごと）。管理者が強制ログアウト・無効化・パスワードのリセット・削除・
+# ターミナルの権限が無いロールへの変更をしたとき、本人がパスワードを変更したときに切るため。
 # プロセス内の記録なので、API を 1 プロセスで動かしている場合（既定の構成）だけ有効。
 # 複数のプロセス（uvicorn --workers など）にすると、ほかのプロセスが受け持つ接続は切れない
 _live: dict[str, set[_LiveTerminal]] = {}
@@ -232,8 +233,9 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
             await websocket.close()
         return
-    # 接続を待つ間に強制ログアウトなどがあった場合（認証の照合と登録の間に起きた場合も含め、ここで確かめ直す）
-    if live.revoked is not None or await authenticate_token(token) is None:
+    # 接続を待つ間に強制ログアウト・ロールの変更などがあった場合（認証の照合と登録の間に起きた場合も含め、ここで確かめ直す）
+    now_user = None if live.revoked is not None else await authenticate_token(token)
+    if now_user is None or not has_permission(now_user.role, Perm.TERMINAL):
         await loop.run_in_executor(None, session.close)
         if live.revoked is None:
             await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
@@ -320,7 +322,8 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             ended = utcnow()
             record.ended_at = ended
             record.end_reason = (
-                f"管理者が切断（{live.revoked}）" if live.revoked
+                ("本人のパスワード変更で切断" if live.revoked == "パスワードの変更" else f"管理者が切断（{live.revoked}）")
+                if live.revoked
                 else "機器側で終了" if remote_closed.is_set() else "利用者が切断"
             )
             record.bytes_out = recorder.bytes

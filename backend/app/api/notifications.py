@@ -46,6 +46,7 @@ class NotificationIn(BaseModel):
     on_violation: bool = False
     on_failure: bool = False
     on_system: bool = True
+    on_inventory: bool = True
 
 
 class NotificationOut(BaseModel):
@@ -61,6 +62,7 @@ class NotificationOut(BaseModel):
     on_violation: bool = False
     on_failure: bool = False
     on_system: bool = True
+    on_inventory: bool = True
     last_sent_at: datetime | None = None
     last_error: str | None = None
 
@@ -118,6 +120,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         device_group_ids=s.group_ids,
         include_ungrouped=s.include_ungrouped,
         on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure, on_system=s.on_system,
+        on_inventory=s.on_inventory,
         last_sent_at=s.last_sent_at,
         last_error=s.last_error,
     )
@@ -162,10 +165,12 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     s.device_group_ids = json.dumps(ids)
     s.include_ungrouped = p.include_ungrouped
     s.on_change, s.on_violation, s.on_failure = p.on_change, p.on_violation, p.on_failure
-    s.on_system = p.on_system
+    s.on_system, s.on_inventory = p.on_system, p.on_inventory
     changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped,
-                   on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure, on_system=p.on_system)
-    if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system):
+                   on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure, on_system=p.on_system,
+                   on_inventory=p.on_inventory)
+    if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system
+                                    or p.on_inventory):
         raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
     if p.mode == "custom" and not (s.discord_webhook or s.slack_webhook):
         raise HTTPException(status_code=422, detail="通知先（Discord または Slack の Webhook URL）を1つ以上登録してください")
@@ -335,7 +340,7 @@ async def test_group_notification(group_id: str, db: AsyncSession = Depends(get_
 
 
 @router.get("/preview", response_model=list[PreviewItem], dependencies=[Depends(require(Perm.USER_ADMIN))])
-async def preview(device_group_id: str | None = None, event: Literal["change", "violation", "failure"] = "change",
+async def preview(device_group_id: str | None = None, event: Literal["change", "violation", "failure", "inventory"] = "change",
                   db: AsyncSession = Depends(get_db)):
     """指定した機器グループ（未指定なら未分類）の機器で event が起きたとき、どこへ通知されるか"""
     dests = await resolve_destinations(db, device_group_id or None, event)

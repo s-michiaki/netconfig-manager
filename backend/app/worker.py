@@ -6,6 +6,7 @@ Celeryワーカー定義
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
+- send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
 - poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
@@ -39,7 +40,14 @@ from app.services.config_service import (
     collect_config_sync,
 )
 from app.services.connection import load_connection_info
-from app.services.notify import notify_change, notify_failure, notify_failures, notify_violations, wants_any
+from app.services.notify import (
+    notify_change,
+    notify_failure,
+    notify_failures,
+    notify_inventory,
+    notify_violations,
+    wants_any,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +156,7 @@ def _actor(triggered_by: str, actor: str | None) -> str:
 async def _save_result(
     device: DeviceConnectionInfo, result: CollectResult, started_at: datetime, triggered_by: str,
     actor: str, ref: str | None, will_retry: bool = False, attempt: int = 0,
-):
+) -> list[list[str]]:
     device_id = device.id
     async with _sessionmaker()() as db:
         db.add(
@@ -188,16 +196,21 @@ async def _save_result(
                            "seconds": seconds}, **kw)
         elif settings.ACTIVITY_LOG_UNCHANGED:
             record(db, "collect.unchanged", "変更はありませんでした", detail={"seconds": seconds}, **kw)
+        inventory_changes: list[list[str]] = []
         if result.success and result.inventory:
-            await _save_inventory(db, device_id, result.inventory, kw)
+            inventory_changes = await _save_inventory(db, device_id, result.inventory, kw)
         await db.commit()
+        return inventory_changes
 
 
-async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dict) -> None:
-    """機器台帳を保存する。OS バージョンやシリアル番号が変わったら（バージョンアップ・機器の交換）記録に残す"""
+async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dict) -> list[list[str]]:
+    """機器台帳を保存する。OS バージョンやシリアル番号が変わったら（バージョンアップ・機器の交換）記録に残す。
+
+    変わった項目を [項目, 以前, 今回] の並びで返す（通知に使う）
+    """
     d = await db.get(Device, device_id)
     if d is None:
-        return
+        return []
     old = {f: getattr(d, f) for f in inventory.FIELDS}
     for f in inventory.FIELDS:
         if facts.get(f):  # 今回読み取れなかった項目は、前回の値を残す
@@ -210,6 +223,7 @@ async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dic
         level = "warning" if any(f in ("serial_number", "model") for f, _, _ in diff) else "info"
         record(db, "inventory.changed", f"機器情報が変わりました（{text}）", level=level,
                detail={f: {"before": a, "after": b} for f, a, b in diff}, **kw)
+    return [[f, a, b] for f, a, b in diff]
 
 
 async def _record(event: str, message: str, **kw) -> None:
@@ -263,8 +277,8 @@ def collect_device_config(
                                                 "収集できませんでした", retryable=True)
         # 認証失敗などはリトライしても結果が変わらないので、一時的な失敗のみリトライする
         will_retry = not result.success and result.retryable and self.request.retries < self.max_retries
-        _run_async(_save_result(device, result, started_at, triggered_by, actor, ref,
-                                will_retry=will_retry, attempt=self.request.retries or 0))
+        inventory_changes = _run_async(_save_result(device, result, started_at, triggered_by, actor, ref,
+                                                    will_retry=will_retry, attempt=self.request.retries or 0))
         if result.success:
             try:
                 _run_async(_check_compliance(device_id, actor, ref))
@@ -276,6 +290,12 @@ def collect_device_config(
                     queue_failure_notification(device_id, result.error or "", triggered_by, ref)
             except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
                 logger.exception("収集失敗の通知を投入できませんでした device=%s", device_id)
+        if inventory_changes:
+            try:
+                if _run_async(_wants("inventory")):
+                    send_inventory_notification.delay(device_id, inventory_changes, ref)
+            except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
+                logger.exception("機器情報の変化の通知を投入できませんでした device=%s", device_id)
         if result.success and result.commit_hash and not result.first:
             # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
             send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
@@ -314,6 +334,19 @@ def send_change_notification(device_id: str, commit_hash: str, added: int, remov
         return _run_async(run())
     except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
         logger.exception("変更通知に失敗しました device=%s", device_id)
+        return {"error": True}
+
+
+@celery_app.task
+def send_inventory_notification(device_id: str, changes: list[list[str]], ref: str | None = None):
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_inventory(db, device_id, changes, ref=ref)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
+        logger.exception("機器情報の変化の通知に失敗しました device=%s", device_id)
         return {"error": True}
 
 

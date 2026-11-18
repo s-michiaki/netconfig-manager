@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.api.terminal import close_user_sessions
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, Role, permissions_for
@@ -142,7 +143,9 @@ async def change_password(
     db.add(make_log("auth.password_change", user=user, ip=client_ip(request), target_type="user",
                     target_id=user.id, target_name=user.username))
     await db.commit()
-    logger.info("パスワード変更 user=%s", user.username)
+    # 変更前のパスワードで開いたターミナル（ほかの PC で開いたままのものを含む）も切る
+    closed = await close_user_sessions(user.id, "パスワードの変更")
+    logger.info("パスワード変更 user=%s terminals=%d", user.username, closed)
     # 変更前のトークンは無効になるため、新しいトークンを返す
     return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
 

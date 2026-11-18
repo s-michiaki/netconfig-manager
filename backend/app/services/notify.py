@@ -1,6 +1,6 @@
-"""通知（Discord / Slack の Webhook）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗
+"""通知（Discord / Slack の Webhook）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
 
-通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system）。
+通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
@@ -33,6 +33,7 @@ from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
+from app.services import inventory
 from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
@@ -51,9 +52,10 @@ MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
-                "profile": "認証情報プロファイルの通知"}
+                "inventory": "機器情報の変化の通知", "profile": "認証情報プロファイルの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
+                 "inventory": "機器情報の変化を通知しました",
                  "profile": "認証情報プロファイルへの操作を所有者に通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
@@ -416,6 +418,30 @@ async def notify_failures(db: AsyncSession, items: list[dict]) -> dict:
                            "アクティビティを画面で確認", 0xFB923C, body)
         sends.append((d, payload, None))
     return await _deliver(db, "failure", sends, ref)
+
+
+async def notify_inventory(db: AsyncSession, device_id: str, changes: list[list[str]],
+                           ref: str | None = None) -> dict:
+    """機器情報の変化（OS バージョンアップ・機器の交換など）を通知する。changes は [項目, 以前, 今回] の並び"""
+    device = await db.get(Device, device_id)
+    if device is None or not changes:
+        return {"sent": 0, "failed": 0}
+    group = await db.get(DeviceGroup, device.group_id) if device.group_id else None
+    dests = await resolve_destinations(db, device.group_id, "inventory")
+    # シリアル番号・モデルが変わるのは機器の交換（または登録先の取り違え）なので、目立つ色にする
+    replaced = any(f in ("serial_number", "model") for f, _, _ in changes)
+    title = f"{'機器の交換？' if replaced else '機器情報の変化'}: {device.name}"
+    facts = [("機器", f"{device.name}（{device.hostname}）"), ("グループ", group.name if group else "未分類")]
+    facts += [(inventory.LABELS.get(f, f), f"{a} → {b}") for f, a, b in changes]
+    facts.append(("検出", _local(utcnow())))
+    body = ("シリアル番号・モデルが変わりました。機器を交換していなければ、登録内容（接続先）を確認してください"
+            if replaced else None)
+    url = _page_url(f"/activity?device={device.id}")
+    return await _deliver(db, "inventory", [
+        (d, _message(d.kind, title, facts, url, "アクティビティを画面で確認", 0xFBBF24 if replaced else 0x60A5FA, body),
+         device)
+        for d in dests
+    ], ref)
 
 
 async def notify_system(db: AsyncSession, title: str, body: str, facts: list[tuple[str, str]] | None = None,
