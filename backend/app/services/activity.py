@@ -38,11 +38,13 @@ EVENTS: dict[str, tuple[str, str]] = {
     "backup.completed": ("バックアップ完了", "info"),
     "backup.failed": ("バックアップ失敗", "error"),
     "backup.offsite_failed": ("外部へのコピーの失敗", "warning"),
+    "export.pushed": ("外部 Git への push", "info"),
+    "export.failed": ("外部 Git への push の失敗", "error"),
 }
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
     "monitor": "モニタリング", "ping": "Ping監視",
-    "system": "システム", "backup": "バックアップ",
+    "system": "システム", "backup": "バックアップ", "export": "外部 Git",
 }
 LEVELS = ("info", "warning", "error")
 SYSTEM_ACTOR = "システム"

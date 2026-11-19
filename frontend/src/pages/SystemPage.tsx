@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 
 /**
- * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ
+ * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push
  * 「止まっていることに気づけない」をなくすための画面。異常は通知設定（システムの異常）の通知先にも送られる
  */
 
@@ -23,7 +23,12 @@ interface Component {
     last_success?: string | BackupResult | null; // 収集は日時、バックアップは最後に成功した回
     stale_days?: number; devices?: StaleDevice[]; volumes?: Volume[]; expires_at?: string; days_left?: number;
     last?: BackupResult | null; schedule?: { enabled: boolean; calendar: string | null; since: string } | null;
+    url?: string; branch?: string; // 外部 Git（last は GitExportState）
   };
+}
+/** 外部 Git への push の最後の結果（services/git_export.py） */
+interface GitExportState {
+  at: string; ok: boolean; message?: string; error?: string; pushed?: string | null; last_success?: string | null; devices?: string[];
 }
 export interface SystemStatus {
   overall: Status; checked_at: string; components: Component[];
@@ -44,6 +49,7 @@ const HELP: Record<string, string> = {
   disk: "コンフィグ履歴・ターミナルの記録の保存先",
   cert: "画面を表示するための証明書",
   backup: "DB・コンフィグ履歴・.env などの定期バックアップ（scripts/backup.sh）",
+  git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
 };
 
 function fmt(iso: string | null | undefined): string {
@@ -116,7 +122,32 @@ function Detail({ c }: { c: Component }) {
   }
   if (c.key === "cert" && d.expires_at) return <p className="sys-sub">期限: {fmt(d.expires_at)}</p>;
   if (c.key === "backup" && (d.last || d.schedule)) return <BackupDetail d={d} />;
+  if (c.key === "git_export" && d.url) return <GitExportDetail d={d} />;
   return null;
+}
+
+function GitExportDetail({ d }: { d: Component["detail"] }) {
+  const st = d.last as unknown as GitExportState | null | undefined;
+  const [note, setNote] = useState("");
+  const run = async () => {
+    setNote("");
+    try {
+      await api.post("/system/git-export");
+      setNote("push を開始しました。数十秒後に「再確認」で結果を確かめてください");
+    } catch (e) {
+      setNote(errorMessage(e));
+    }
+  };
+  return (
+    <>
+      <ul className="sys-list">
+        <li className="sys-wrap">送り先: <span className="mono">{d.url}</span>（ブランチ {d.branch}）</li>
+        <li>最後の確認: {fmt(st?.at)}　最後に成功: {fmt(st?.last_success)}</li>
+        {st?.pushed && <li>push したコミット: <span className="mono">{st.pushed.slice(0, 8)}</span></li>}
+      </ul>
+      <p className="sys-sub"><button className="btn btn-sm" onClick={run}>今すぐ push</button> {note && <span className="topo-muted">{note}</span>}</p>
+    </>
+  );
 }
 
 export default function SystemPage() {

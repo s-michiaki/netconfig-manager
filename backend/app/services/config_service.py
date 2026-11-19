@@ -355,6 +355,8 @@ def migrate_legacy_repo(device_id: str, device_name: str) -> bool:
     if not device_name or Path(device_name).name != device_name or device_name in (".", ".."):
         return False
     legacy = base / device_name
+    if device_name == "_export":  # 外部 Git への書き出し用のリポジトリ（services/git_export.py）
+        return False
     new = repo_path(device_id)
     if (legacy / ".git").exists() and not new.exists():
         legacy.rename(new)

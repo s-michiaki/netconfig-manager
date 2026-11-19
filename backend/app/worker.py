@@ -8,6 +8,7 @@ Celeryワーカー定義
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
 - ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
+- git_export_sync: コンフィグ履歴を外部 Git へ push（GIT_EXPORT_URL を設定したとき。収集で変わったときと 1 時間ごと）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
 - poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
@@ -30,7 +31,7 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
-from app.services import collect_state, failure_batch, fw_hits, inventory, monitoring, system
+from app.services import collect_state, failure_batch, fw_hits, git_export, inventory, monitoring, system
 from app.services import ping_monitor as ping_monitor_svc
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
@@ -100,6 +101,11 @@ celery_app.conf.update(
         "ping-monitor": {
             "task": "app.worker.ping_monitor",
             "schedule": float(settings.PING_MONITOR_INTERVAL_SEC),
+        },
+        # 外部 Git への push（設定していなければ何もしない）。送り損ねの再送も兼ねる
+        "git-export-sync": {
+            "task": "app.worker.git_export_sync",
+            "schedule": 3600.0,
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -304,6 +310,11 @@ def collect_device_config(
                     send_inventory_notification.delay(device_id, inventory_changes, ref)
             except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
                 logger.exception("機器情報の変化の通知を投入できませんでした device=%s", device_id)
+        if result.success and result.commit_hash:
+            try:
+                schedule_git_export()
+            except Exception:  # noqa: BLE001 - push の予約の失敗で収集の結果を変えない（1 時間ごとの同期で送る）
+                logger.exception("外部 Git への push を予約できませんでした")
         if result.success and result.commit_hash and not result.first:
             # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
             send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
@@ -387,6 +398,50 @@ def ping_monitor():
     except PingUnavailable as e:
         logger.warning("Ping監視の常時監視: %s", e)
         return {"error": str(e)}
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
+
+
+def schedule_git_export() -> None:
+    """収集でコンフィグが変わったときに呼ぶ。GIT_EXPORT_DELAY_SEC 秒後に 1 回だけ同期する（その間の変更はまとめる）"""
+    if not git_export.enabled():
+        return
+    r = _redis()
+    if r.set(git_export.PENDING_KEY, "1", nx=True, ex=settings.GIT_EXPORT_DELAY_SEC + 600):
+        git_export_sync.apply_async(countdown=settings.GIT_EXPORT_DELAY_SEC)
+
+
+async def _export_devices() -> list[git_export.DeviceFile]:
+    async with _sessionmaker()() as db:
+        groups = {g.id: g.name for g in (await db.execute(select(DeviceGroup))).scalars()}
+        return [git_export.DeviceFile(d.id, d.name, d.hostname, d.platform, groups.get(d.group_id))
+                for d in (await db.execute(select(Device))).scalars()]
+
+
+@celery_app.task
+def git_export_sync():
+    """コンフィグ履歴を外部 Git へ push する（services/git_export.py）。同時に 1 つだけ動かす"""
+    if not git_export.enabled():
+        return {"enabled": False}
+    r = _redis()
+    lock = r.lock(git_export.LOCK_KEY, timeout=settings.GIT_EXPORT_TIMEOUT + 300, blocking_timeout=settings.GIT_EXPORT_TIMEOUT)
+    if not lock.acquire():
+        return {"skipped": True}
+    try:
+        r.delete(git_export.PENDING_KEY)  # これより後の変更は、次の同期で送る
+        prev = git_export.load_state(r)
+        result = git_export.sync(r, _run_async(_export_devices()))
+        if not result.get("ok") and (prev.get("ok", True) or prev.get("error") != result.get("error")):
+            _run_async(_record("export.failed", f"外部 Git への push に失敗しました: {result.get('error')}",
+                               detail={"url": result.get("url"), "branch": result.get("branch")}))
+        elif result.get("ok") and not result.get("skipped") and result.get("pushed"):
+            names = result.get("devices") or []
+            _run_async(_record("export.pushed", f"外部 Git へ push しました（{len(names)} 台の変更）" if names
+                               else "外部 Git へ push しました", detail={"commit": result["pushed"], "devices": names[:50]}))
+        return {k: result.get(k) for k in ("ok", "committed", "pushed", "error")}
     finally:
         try:
             lock.release()

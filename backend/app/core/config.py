@@ -12,6 +12,18 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://netconfig:changeme@localhost:5432/netconfig"
     REDIS_URL: str = "redis://localhost:6379/0"
     GIT_REPO_PATH: str = "/app/configs"
+    # コンフィグ履歴を外部の Git サーバー（GitLab / Gitea など）へ push する（GIT_EXPORT_URL が空なら無効）
+    GIT_EXPORT_URL: str = ""  # 例: https://gitlab.example.local/net/configs.git / git@gitea.local:net/configs.git
+    GIT_EXPORT_BRANCH: str = Field(default="main", pattern=r"^[A-Za-z0-9._/-]{1,100}$")
+    GIT_EXPORT_USERNAME: str = ""  # HTTPS のユーザー名（GitLab のトークンなら oauth2 など。空なら oauth2）
+    GIT_EXPORT_TOKEN: str = ""  # HTTPS のパスワード・アクセストークン（URL には書かない）
+    GIT_EXPORT_SSH_KEY: str = ""  # SSH のときの秘密鍵のパス（コンテナの中のパス）
+    GIT_EXPORT_KNOWN_HOSTS: str = "/data/ssh/git_known_hosts"  # SSH の相手のホスト鍵（初回に記録）
+    GIT_EXPORT_CA_FILE: str = ""  # 社内の CA で発行した証明書の Git サーバーなら、その CA 証明書のパス
+    GIT_EXPORT_AUTHOR: str = "NetConfig Manager <netconfig@system.local>"
+    GIT_EXPORT_PATH: str = ""  # 書き出し用のリポジトリの場所（空なら GIT_REPO_PATH/_export）
+    GIT_EXPORT_DELAY_SEC: int = Field(default=60, ge=0, le=3600)  # 収集で変わってから push するまで（まとめるため）
+    GIT_EXPORT_TIMEOUT: int = Field(default=120, ge=10, le=1800)  # push の上限（秒）
     TIMEZONE: str = "Asia/Tokyo"
 
     # --- 認証 ---

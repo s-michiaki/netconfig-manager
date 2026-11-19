@@ -16,6 +16,7 @@
   backup   : 定期バックアップ（scripts/backup.sh）の結果。backup.sh が backend コンテナの
              app.tools.backup_report を呼んで Redis に書いた記録を読む。記録が無い環境（バックアップを
              使っていない・開発環境）では unknown にして、警告も通知もしない
+  git_export : コンフィグ履歴の外部 Git への push（services/git_export.py）の最後の結果。設定していなければ unknown
 
 ウォッチドッグは **API のプロセス**で動かす（worker / beat が止まっていても検出・通知できるように）。
 - worker / beat / redis の異常は SYSTEM_ALERT_AFTER_MIN 分続いたら通知する（再起動中の一時的な停止では通知しない）
@@ -39,7 +40,7 @@ from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models.activity import ActivityLog
 from app.models.device import CollectLog, Device, Schedule
-from app.services import login_limit, notify
+from app.services import git_export, login_limit, notify
 from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ DISK_WARN_PCT, DISK_ERROR_PCT = 15, 5
 CERT_WARN_DAYS, CERT_ERROR_DAYS = 30, 7
 RANK = {"unknown": 0, "ok": 0, "warn": 1, "error": 2}
 # 通知する項目（db は、止まっていると通知先も読めないため対象外）
-ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup")
+ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup", "git_export")
 GRACE_KEYS = ("redis", "worker", "beat")  # 一時的な停止では通知しない項目
 
 
@@ -312,6 +313,28 @@ async def check_backup(now: datetime, redis_ok: bool = True) -> Component:
                      detail)
 
 
+async def check_git_export(redis_ok: bool = True) -> Component:
+    key, label = "git_export", "外部 Git への push"
+    if not git_export.enabled():
+        return Component(key, label, "unknown", "設定していません（GIT_EXPORT_URL）")
+    detail = {"url": git_export.mask_url(settings.GIT_EXPORT_URL.strip()), "branch": settings.GIT_EXPORT_BRANCH}
+    if not redis_ok:
+        return Component(key, label, "unknown", "Redis に接続できないため確認できません", detail)
+    try:
+        raw = await login_limit.client().get(git_export.STATE_KEY)
+        state = json.loads(raw) if raw else {}
+    except (RedisError, OSError, ValueError):
+        return Component(key, label, "unknown", "Redis に接続できないため確認できません", detail)
+    detail.update(last=state or None)
+    if not state:
+        return Component(key, label, "unknown",
+                         "まだ push していません（収集でコンフィグが変わったとき、または 1 時間ごとに push します）", detail)
+    if not state.get("ok"):
+        return Component(key, label, "error", f"push に失敗しています: {state.get('error') or '原因不明'}", detail,
+                         items=[(state.get("error") or "")[:80]])
+    return Component(key, label, "ok", state.get("message") or "push できています", detail)
+
+
 async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[Component]:
     now = now or utcnow()
     database = await check_db(db)
@@ -320,7 +343,8 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     out = [database, redis_c, worker, check_beat(heartbeat, worker, now)]
     if database.status == "ok":
         out += [await check_schedules(db), await check_collect(db, now)]
-    return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok")]
+    return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok"),
+            await check_git_export(redis_c.status == "ok")]
 
 
 def overall(components: list[Component]) -> str:
