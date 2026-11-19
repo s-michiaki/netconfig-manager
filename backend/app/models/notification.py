@@ -6,7 +6,8 @@
                      custom  = 自分の通知先・対象を使う / off = 通知しない
 - 対象は機器のグループ（device_group_ids、未分類は include_ungrouped）。all_devices なら全機器
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
-  on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）
+  on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
+  on_ping（Ping監視の応答なし・復旧）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
 import json
@@ -65,6 +66,8 @@ class NotificationSetting(Base):
     on_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_true())
     # 機器情報の変化（OS バージョン・シリアル番号・モデル・機器側のホスト名）。既存の設定は 0026 で on_change と同じ値にした
     on_inventory: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_false())
+    # Ping監視（常時監視）の応答なし・復旧。既存の設定は 0027 で on_system と同じ値にした
+    on_ping: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_false())
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -78,7 +81,7 @@ class NotificationSetting(Base):
         return [x for x in v if isinstance(x, str)]
 
     def wants(self, event: str) -> bool:
-        """この設定で通知する内容か（change / violation / failure / system / inventory）"""
+        """この設定で通知する内容か（change / violation / failure / system / inventory / ping）"""
         return bool(getattr(self, f"on_{event}", False))
 
     def matches(self, device_group_id: str | None) -> bool:

@@ -7,6 +7,7 @@ Celeryワーカー定義
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
+- ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
 - poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
@@ -30,6 +31,7 @@ from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.services import collect_state, failure_batch, fw_hits, inventory, monitoring, system
+from app.services import ping_monitor as ping_monitor_svc
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -45,9 +47,11 @@ from app.services.notify import (
     notify_failure,
     notify_failures,
     notify_inventory,
+    notify_ping,
     notify_violations,
     wants_any,
 )
+from app.services.ping import PingUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,10 @@ celery_app.conf.update(
         "monitor-fw-hits": {
             "task": "app.worker.collect_fw_hits_all",
             "schedule": float(settings.MONITOR_FW_INTERVAL_MIN * 60),
+        },
+        "ping-monitor": {
+            "task": "app.worker.ping_monitor",
+            "schedule": float(settings.PING_MONITOR_INTERVAL_SEC),
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -350,6 +358,42 @@ def send_inventory_notification(device_id: str, changes: list[list[str]], ref: s
         return {"error": True}
 
 
+PING_MONITOR_LOCK = "netconfig:ping:monitor-lock"
+
+
+async def _ping_monitor(r) -> dict:
+    async with _sessionmaker()() as db:
+        res = await ping_monitor_svc.run_once(db, r)
+        if res["down"] or res["up"]:
+            try:
+                res["notify"] = await notify_ping(db, res["down"], res["up"])
+            except Exception:  # noqa: BLE001 - 通知の失敗で監視を止めない
+                logger.exception("Ping監視の通知に失敗しました")
+        return res
+
+
+@celery_app.task
+def ping_monitor():
+    """Ping監視の常時監視（1 回分）。前の実行が終わっていなければ飛ばす"""
+    r = _redis()
+    lock = r.lock(PING_MONITOR_LOCK, timeout=max(30, settings.PING_MONITOR_INTERVAL_SEC * 2), blocking=False)
+    if not lock.acquire(blocking=False):
+        return {"skipped": True}
+    try:
+        res = _run_async(_ping_monitor(r))
+        if res["down"] or res["up"]:
+            logger.info("Ping監視: 応答なし %d 件・復旧 %d 件", len(res["down"]), len(res["up"]))
+        return {"checked": res["checked"], "down": len(res["down"]), "up": len(res["up"])}
+    except PingUnavailable as e:
+        logger.warning("Ping監視の常時監視: %s", e)
+        return {"error": str(e)}
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
+
+
 # ---------------------------------------------------------------- モニタリング（試験導入）
 
 
@@ -522,15 +566,18 @@ def recheck_expired_exceptions() -> int:
 
 async def _purge() -> dict:
     async with _sessionmaker()() as db:
-        return await purge_old(db)
+        result = await purge_old(db)
+        result["ping_results"] = await ping_monitor_svc.purge(db)
+        await db.commit()
+        return result
 
 
 @celery_app.task
 def purge_audit_logs():
     """保持期間（AUDIT_LOG_RETENTION_DAYS / TERMINAL_LOG_RETENTION_DAYS）を過ぎた記録を削除する"""
     result = _run_async(_purge())
-    if result["audit_logs"] or result["terminal_sessions"]:
-        logger.info("古い監査ログを削除しました: %s", result)
+    if any(result.values()):
+        logger.info("古いログを削除しました: %s", result)
     return result
 
 

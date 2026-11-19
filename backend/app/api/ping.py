@@ -13,33 +13,41 @@ WebSocket のやりとり（すべて JSON）
     {"type": "targets", "items": [{"key", "name", "address", "ip", "error"}]}
     {"type": "tick", "seq": 1, "results": {"<key>": 1.23 または null}}   … null は応答なし
     {"type": "error", "message": "..."}
+
+常時監視（/monitors）: 画面を開いていなくても worker が一定間隔で PING し、結果を残して応答なし・復旧を通知する
+（services/ping_monitor.py）。ここでは対象の登録・解除と、状態・履歴の表示を扱う
 """
 import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
+import redis
 from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Query,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
 from pydantic import BaseModel, StringConstraints, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import authenticate_token, require
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.permissions import Perm, has_permission
+from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
-from app.models.ping import PingTarget
+from app.models.ping import PingMonitor, PingResult, PingTarget
 from app.models.user import User
+from app.services import ping_monitor as monitor_svc
 from app.services.audit import Audit, get_audit
 from app.services.ping import PingUnavailable, Ticker, ping_many, resolve, valid_address
 
@@ -173,9 +181,136 @@ async def update_target(
 async def delete_target(target_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     t = await _get_or_404(db, target_id)
     await db.delete(t)
+    # 常時監視の登録と結果も消す（状態は次の実行で worker が消す）
+    await db.execute(sa_delete(PingMonitor).where(PingMonitor.key == f"t:{t.id}"))
+    await db.execute(sa_delete(PingResult).where(PingResult.key == f"t:{t.id}"))
     audit("ping.target_delete", target_type="ping_target", target_id=t.id, target_name=t.name,
           detail={"address": t.address})
     await db.commit()
+
+
+# ---------------------------------------------------------------- 常時監視
+
+
+class MonitorOut(BaseModel):
+    key: str
+    name: str
+    address: str
+    group_id: str | None
+    is_active: bool = True  # 機器が無効なら PING しない
+    status: Literal["up", "down", "unknown"]
+    since: datetime | None = None  # 応答なしになった時刻（最初に応答が無かった時刻）
+    fails: int = 0  # 続けて応答が無かった回数
+    last_at: datetime | None = None
+    last_rtt: float | None = None
+    last_ok: datetime | None = None
+    sent_24h: int = 0
+    received_24h: int = 0
+    created_by: str | None = None
+
+
+class MonitorList(BaseModel):
+    items: list[MonitorOut]
+    interval_sec: int
+    alert_after: int
+    history_days: int
+    max_targets: int
+
+
+class MonitorIn(BaseModel):
+    monitored: bool
+
+
+def _redis_state() -> dict[str, dict]:
+    try:
+        return monitor_svc.load_state(_redis_client())
+    except Exception:  # noqa: BLE001 - Redis が使えなくても一覧は出す（状態は「未確認」）
+        logger.warning("Ping監視の状態を Redis から読めません", exc_info=True)
+        return {}
+
+
+def _redis_client() -> redis.Redis:
+    return redis.Redis.from_url(settings.REDIS_URL)
+
+
+def _dt(v: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(v) if v else None
+    except ValueError:
+        return None
+
+
+@router.get("/monitors", response_model=MonitorList, dependencies=[Depends(require(Perm.PING_USE))])
+async def list_monitors(db: AsyncSession = Depends(get_db)):
+    """常時監視の対象と、いまの状態・直近 24 時間の応答率"""
+    items, _ = await monitor_svc.monitored_items(db, include_inactive=True)
+    rows = {m.key: m for m in (await db.execute(select(PingMonitor))).scalars()}
+    active = {d.id: d.is_active for d in (await db.execute(
+        select(Device).where(Device.id.in_([it.device_id for it in items if it.device_id]))
+    )).scalars()}
+    state = _redis_state()
+    avail = await monitor_svc.availability(db, [it.key for it in items], utcnow() - timedelta(hours=24))
+    out = []
+    for it in sorted(items, key=lambda x: x.name):
+        st = state.get(it.key, {})
+        # 応答なしと判定するまで（続けて応答が無いのが PING_ALERT_AFTER 回未満）は「応答あり」のまま。回数は fails で出す
+        status = "down" if st.get("down") else "up" if st.get("last_ok") else "unknown"
+        a = avail.get(it.key, {})
+        m = rows.get(it.key)
+        out.append(MonitorOut(
+            key=it.key, name=it.name, address=it.address, group_id=it.group_id,
+            is_active=active.get(it.device_id, True) if it.device_id else True,
+            status=status, since=_dt(st.get("since")), fails=st.get("fails", 0), last_at=_dt(st.get("last_at")),
+            last_rtt=st.get("last_rtt"), last_ok=_dt(st.get("last_ok")),
+            sent_24h=a.get("sent", 0), received_24h=a.get("received", 0), created_by=m.created_by if m else None,
+        ))
+    return MonitorList(items=out, interval_sec=settings.PING_MONITOR_INTERVAL_SEC, alert_after=settings.PING_ALERT_AFTER,
+                       history_days=settings.PING_HISTORY_DAYS, max_targets=settings.PING_MAX_TARGETS)
+
+
+@router.put("/monitors/{key}", status_code=status.HTTP_204_NO_CONTENT)
+async def set_monitor(
+    key: str, payload: MonitorIn, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require(Perm.PING_WRITE)), audit: Audit = Depends(get_audit),
+):
+    """常時監視に加える・外す（外すと結果の履歴も消す）"""
+    found = await _lookup([key])
+    if not found:
+        raise HTTPException(status_code=404, detail="対象が見つかりません")
+    current = await db.get(PingMonitor, key)
+    if payload.monitored and current is None:
+        count = (await db.execute(select(func.count()).select_from(PingMonitor))).scalar_one()
+        if count >= settings.PING_MAX_TARGETS:
+            raise HTTPException(status_code=422, detail=f"常時監視できるのは {settings.PING_MAX_TARGETS} 件までです")
+        db.add(PingMonitor(key=key, created_by=user.username))
+        audit("ping.monitor_on", target_type="ping_target", target_id=key, target_name=found[0]["name"],
+              detail={"address": found[0]["address"]})
+    elif not payload.monitored and current is not None:
+        await db.delete(current)
+        await db.execute(sa_delete(PingResult).where(PingResult.key == key))
+        try:
+            _redis_client().hdel(monitor_svc.STATE_KEY, key)
+        except Exception:  # noqa: BLE001 - 状態は次の実行で消える
+            pass
+        audit("ping.monitor_off", target_type="ping_target", target_id=key, target_name=found[0]["name"],
+              detail={"address": found[0]["address"]})
+    await db.commit()
+
+
+@router.get("/monitors/{key}/history", dependencies=[Depends(require(Perm.PING_USE))])
+async def monitor_history(key: str, hours: int = Query(24, ge=1, le=24 * 365), db: AsyncSession = Depends(get_db)):
+    """常時監視の結果を時間で区切って返す（区切りごとの回数・応答なし・平均と最大の応答時間）"""
+    if await db.get(PingMonitor, key) is None:
+        raise HTTPException(status_code=404, detail="常時監視の対象ではありません")
+    hours = min(hours, settings.PING_HISTORY_DAYS * 24)
+    until = utcnow()
+    since = until - timedelta(hours=hours)
+    n = min(144, max(12, hours * 3600 // settings.PING_MONITOR_INTERVAL_SEC))
+    buckets = await monitor_svc.history(db, key, since, until, buckets=n)
+    sent = sum(b["sent"] for b in buckets)
+    lost = sum(b["lost"] for b in buckets)
+    return {"key": key, "hours": hours, "since": since.isoformat(), "until": until.isoformat(),
+            "sent": sent, "lost": lost, "buckets": buckets}
 
 
 # ---------------------------------------------------------------- WebSocket

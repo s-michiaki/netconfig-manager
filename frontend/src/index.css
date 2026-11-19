@@ -725,6 +725,24 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .ping-sel-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--color-surface2); font-weight: 600; font-size: 13px; cursor: pointer; position: sticky; top: 0; }
 .ping-sel-item { display: flex; align-items: center; gap: 10px; padding: 5px 10px 5px 28px; font-size: 13px; cursor: pointer; }
 .ping-sel-item:hover { background: var(--color-surface2); }
+/* Ping監視の常時監視 */
+.pmon-add { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+.pmon-table td { white-space: nowrap; }
+.pmon-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.pmon-state { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pmon-modal { width: min(980px, 96vw); max-width: none; }
+.pmon-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.pmon-chart svg { width: 100%; height: auto; display: block; }
+.pmon-grid { stroke: var(--color-border); stroke-width: 1; opacity: 0.6; }
+.pmon-axis { fill: var(--color-muted); font-size: 11px; }
+.pmon-line { fill: none; stroke: var(--color-accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.pmon-point { fill: var(--color-accent); }
+.pmon-hover { fill: var(--color-surface2); opacity: 0.6; }
+.pmon-loss { fill: var(--color-danger); }
+.pmon-loss-ok { fill: var(--color-success); opacity: 0.25; }
+.pmon-loss-none { fill: var(--color-surface2); }
+.pmon-tip { font-size: 12px; min-height: 18px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.pmon-lost { color: var(--color-danger); }
 
 /* ===== 機器登録: プラットフォームの注意事項 ===== */
 .platform-note { font-size: 12px; color: var(--color-muted); background: var(--color-surface2); border-radius: var(--radius-sm); padding: 8px 10px; margin: -4px 0 12px; line-height: 1.6; }

@@ -44,7 +44,7 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0026_notify_inventory"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0027_ping_monitor"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols and "credential_profile_id" in cols
     # 既存の機器はプロファイルなし・ユーザー名はそのまま（今までどおり機器側の認証情報で接続する）

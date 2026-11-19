@@ -86,6 +86,15 @@ def main() -> None:
                                    device_host="10.0.1.1", ip="127.0.0.1", started_at=started,
                                    ended_at=started + timedelta(minutes=2), end_reason="利用者が切断",
                                    log_file=rec.rel_path, bytes_out=rec.bytes, truncated=False, cols=100, rows=30))
+            # Ping監視の常時監視（実際は worker が PING して残す）。Core-SW01 の 24 時間分、途中に応答なし
+            from app.models.ping import PingMonitor, PingResult
+
+            key = f"d:{devs['Core-SW01']['id']}"
+            db.add(PingMonitor(key=key, created_by="admin"))
+            now = utcnow()
+            for i in range(24 * 60, 0, -5):
+                rtt = None if 300 <= i < 330 else round(1.2 + (i % 37) / 20, 2)
+                db.add(PingResult(key=key, at=now - timedelta(minutes=i), rtt=rtt))
             await db.commit()
     asyncio.run(inventory())
     print("seeded")

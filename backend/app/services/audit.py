@@ -75,6 +75,8 @@ ACTIONS = {
     "ping.target_create": "Ping対象の追加",
     "ping.target_update": "Ping対象の変更",
     "ping.target_delete": "Ping対象の削除",
+    "ping.monitor_on": "Ping監視の常時監視の開始",
+    "ping.monitor_off": "Ping監視の常時監視の終了",
     "notify.update": "通知設定の変更",
     "notify.test": "テスト通知",
     "user_group.create": "ユーザーグループ作成",

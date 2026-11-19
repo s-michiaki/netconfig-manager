@@ -16,7 +16,7 @@ from app.models.device import (
 )
 from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface, SnmpSetting
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
-from app.models.ping import PingTarget
+from app.models.ping import PingMonitor, PingResult, PingTarget
 from app.models.topology import TopologyMap
 from app.models.user import User
 
@@ -39,6 +39,8 @@ __all__ = [
     "JumpHost",
     "MonInterface",
     "NotificationSetting",
+    "PingMonitor",
+    "PingResult",
     "PingTarget",
     "Schedule",
     "SnmpSetting",

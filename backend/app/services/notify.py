@@ -1,6 +1,6 @@
 """通知（Discord / Slack の Webhook）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
 
-通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory）。
+通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
@@ -52,10 +52,11 @@ MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
-                "inventory": "機器情報の変化の通知", "profile": "認証情報プロファイルの通知"}
+                "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
                  "inventory": "機器情報の変化を通知しました",
+                 "ping": "Ping監視の応答なし・復旧を通知しました",
                  "profile": "認証情報プロファイルへの操作を所有者に通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
@@ -442,6 +443,50 @@ async def notify_inventory(db: AsyncSession, device_id: str, changes: list[list[
          device)
         for d in dests
     ], ref)
+
+
+async def notify_ping(db: AsyncSession, down: list[dict], up: list[dict]) -> dict:
+    """Ping監視（常時監視）の応答なし・復旧を通知する。通知先ごとに 1 通にまとめる（ネットワーク障害で多数が同時に落ちたとき）
+
+    down / up の要素は services/ping_monitor.py の run_once の戻り値（name・address・group_id・since）
+    """
+    if not down and not up:
+        return {"sent": 0, "failed": 0}
+    by_group: dict[str | None, list[Destination]] = {}
+    per_dest: dict[tuple[str, str], tuple[Destination, list[dict], list[dict]]] = {}
+    for kind_list, item in [(0, x) for x in down] + [(1, x) for x in up]:
+        gid = item.get("group_id")
+        if gid not in by_group:
+            by_group[gid] = await resolve_destinations(db, gid, "ping")
+        for d in by_group[gid]:
+            entry = per_dest.setdefault((d.kind, d.url), (d, [], []))
+            entry[1 + kind_list].append(item)
+    sends = []
+    for d, ds, us in per_dest.values():
+        if ds and not us:
+            title = f"Ping監視: 応答なし {ds[0]['name']}" if len(ds) == 1 else f"Ping監視: {len(ds)} 件が応答なし"
+            color = 0xEF4444
+        elif us and not ds:
+            title = f"Ping監視: 復旧 {us[0]['name']}" if len(us) == 1 else f"Ping監視: {len(us)} 件が復旧"
+            color = 0x34D399
+        else:
+            title = f"Ping監視: 応答なし {len(ds)} 件・復旧 {len(us)} 件"
+            color = 0xEF4444
+        lines = []
+        for x in ds[:MAX_LIST]:
+            lines.append(f"🔴 {x['name']}（{x['address']}）応答なし（{_local(datetime.fromisoformat(x['since']))} から）"
+                         if x.get("since") else f"🔴 {x['name']}（{x['address']}）応答なし")
+        if len(ds) > MAX_LIST:
+            lines.append(f"…ほか {len(ds) - MAX_LIST} 件が応答なし")
+        for x in us[:MAX_LIST]:
+            lines.append(f"🟢 {x['name']}（{x['address']}）復旧")
+        if len(us) > MAX_LIST:
+            lines.append(f"…ほか {len(us) - MAX_LIST} 件が復旧")
+        rule = f"{settings.PING_ALERT_AFTER} 回続けて応答が無ければ応答なし（{settings.PING_MONITOR_INTERVAL_SEC} 秒ごと）"
+        facts = [("判定", rule)]
+        payload = _message(d.kind, title, facts, _page_url("/ping"), "Ping監視を画面で確認", color, "\n".join(lines))
+        sends.append((d, payload, None))
+    return await _deliver(db, "ping", sends, None)
 
 
 async def notify_system(db: AsyncSession, title: str, body: str, facts: list[tuple[str, str]] | None = None,

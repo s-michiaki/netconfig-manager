@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage, getToken, redirectToLogin, wsUrl } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import PingMonitorPanel from "./PingMonitorPanel";
 
 /**
  * Ping監視（deadman 風）
  * - 登録済みの機器と、ここで追加した IP / ホスト名に一定間隔で PING して、応答時間と損失をリアルタイムに表示する
  * - PING はサーバーから送る。統計（損失率・平均など）はこの画面で集計し、画面を閉じると消える
+ * - 「常時監視」タブ: 画面を開いていなくてもサーバーが PING し、結果を残して応答なし・復旧を通知する（PingMonitorPanel）
  */
 
 interface Group { id: string; name: string; color: string | null; }
@@ -315,6 +317,7 @@ export default function PingPage() {
   const [showSelect, setShowSelect] = useState(false);
   const [showManage, setShowManage] = useState(false);
   const [onlyProblems, setOnlyProblems] = useState(false);
+  const [tab, setTab] = useState<"live" | "monitor">(() => (new URLSearchParams(window.location.search).get("tab") === "monitor" ? "monitor" : "live"));
   const [, setTick] = useState(0);
   const [now, setNow] = useState(Date.now());
 
@@ -495,10 +498,14 @@ export default function PingPage() {
       {showManage && <CustomManager groups={data.groups} targets={customs} onClose={() => setShowManage(false)} onChanged={load} />}
       <div className="page-header">
         <span className="page-title">Ping監視</span>
-        <span className={`badge ${connState === "running" ? "badge-success" : connState === "idle" ? "badge-neutral" : "badge-warning"}`}>
+        <div className="seg-tabs" role="tablist">
+          <button role="tab" aria-selected={tab === "live"} className={`seg-tab${tab === "live" ? " active" : ""}`} onClick={() => setTab("live")}>リアルタイム</button>
+          <button role="tab" aria-selected={tab === "monitor"} className={`seg-tab${tab === "monitor" ? " active" : ""}`} onClick={() => setTab("monitor")}>常時監視</button>
+        </div>
+        {tab === "live" && <span className={`badge ${connState === "running" ? "badge-success" : connState === "idle" ? "badge-neutral" : "badge-warning"}`}>
           {{ idle: "停止中", connecting: "接続中...", running: "監視中", reconnecting: "再接続中..." }[connState]}
-        </span>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        </span>}
+        {tab === "live" && <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <label style={{ fontSize: 12, color: "var(--color-muted)" }}>間隔</label>
           <select value={interval} onChange={(e) => changeInterval(Number(e.target.value))} style={{ width: 80 }}>
             {INTERVALS.map((s) => <option key={s} value={s}>{s} 秒</option>)}
@@ -511,9 +518,14 @@ export default function PingPage() {
           ) : (
             <button className="btn btn-primary" onClick={() => start()} disabled={selected.size === 0}>▶ 開始</button>
           )}
-        </div>
+        </div>}
       </div>
-      <div className="page-body">
+      {tab === "monitor" && (
+        <div className="page-body">
+          <PingMonitorPanel groups={data.groups} targets={data.targets} canWrite={canWrite} />
+        </div>
+      )}
+      <div className="page-body" style={tab === "live" ? undefined : { display: "none" }}>
         {error && <div className="ping-alert">{error}</div>}
         <div className="ping-summary">
           <span><i className="ping-dot ok" />正常 {counts.ok}</span>

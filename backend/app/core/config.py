@@ -79,7 +79,11 @@ class Settings(BaseSettings):
 
     # --- Ping監視 ---
     PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）
-    PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数
+    PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数（常時監視の対象の上限も同じ）
+    # 常時監視（画面を開いていなくても worker が PING し、結果を残して応答なしを通知する）
+    PING_MONITOR_INTERVAL_SEC: int = Field(default=60, ge=10, le=3600)  # PING する間隔
+    PING_ALERT_AFTER: int = Field(default=3, ge=1, le=60)  # この回数続けて応答が無ければ「応答なし」として通知
+    PING_HISTORY_DAYS: int = Field(default=14, ge=1, le=365)  # 結果を残す日数
 
     # --- モニタリング（試験導入中。既定は無効） ---
     # FW ルールのヒット数（PAN-OS・FortiGate を SSH で取得）とインタフェースの帯域（SNMP）
