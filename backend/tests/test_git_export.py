@@ -5,9 +5,9 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import fakeredis
 import git
 import pytest
-import redis
 from fastapi.testclient import TestClient
 
 from app import worker
@@ -28,8 +28,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "GIT_EXPORT_URL", str(remote))
     monkeypatch.setattr(settings, "GIT_EXPORT_PATH", str(tmp_path / "export"))
     monkeypatch.setattr(settings, "GIT_EXPORT_BRANCH", "main")
-    r = redis.Redis.from_url(settings.REDIS_URL)  # システム状態（API）と同じ Redis を使う
-    r.delete(git_export.STATE_KEY, git_export.PENDING_KEY)
+    r = fakeredis.FakeRedis()  # worker が結果を書く Redis（システム状態の確認では system_component で渡す）
     monkeypatch.setattr(worker, "_redis", lambda: r)
     with TestClient(app) as c:
         admin = login(c, "admin", "initial-pass-123")
@@ -41,7 +40,6 @@ def env(tmp_path, monkeypatch):
         yield {"c": c, "admin": admin, "remote": remote, "devs": devs, "group": g, "t": t, "r": r}
         for d in devs:
             c.delete(f"/api/devices/{d['id']}", headers=admin)
-        r.delete(git_export.STATE_KEY, git_export.PENDING_KEY)
 
 
 def system_component(env):
