@@ -32,18 +32,27 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err: AxiosError) => {
-    if (err.response?.status === 401 && !err.config?.url?.startsWith("/auth/token")) {
+    if (err.response?.status === 401 && !err.config?.url?.startsWith("/auth/token") && !err.config?.url?.startsWith("/auth/mfa/verify")) {
       redirectToLogin();
     }
     return Promise.reject(err);
   }
 );
 
-export async function login(username: string, password: string): Promise<void> {
+/** パスワードでログインする。2 段階認証を設定している人は、確認コードを送るための mfaToken を返す（まだログインしていない） */
+export async function login(username: string, password: string): Promise<{ mfaToken: string | null }> {
   const body = new URLSearchParams({ username, password });
   const r = await api.post("/auth/token", body, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
+  if (r.data.mfa_required) return { mfaToken: r.data.mfa_token as string };
+  setToken(r.data.access_token);
+  return { mfaToken: null };
+}
+
+/** 2 段階認証の 2 段目: 認証アプリのコード（または予備コード）を送ってログインを終える */
+export async function verifyMfa(mfaToken: string, code: string): Promise<void> {
+  const r = await api.post("/auth/mfa/verify", { mfa_token: mfaToken, code });
   setToken(r.data.access_token);
 }
 

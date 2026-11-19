@@ -15,7 +15,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 async def _load_active_user(db: AsyncSession, token: str) -> User | None:
     payload = decode_access_token(token)
-    if not payload or not payload.get("sub"):
+    # purpose 付き（2 段階認証の途中の印など）はログインのトークンとして使わせない
+    if not payload or not payload.get("sub") or payload.get("purpose"):
         return None
     user = await db.get(User, payload["sub"])
     if user is None or not user.is_active:

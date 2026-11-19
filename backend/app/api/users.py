@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import NewPassword
+from app.api.auth import NewPassword, clear_mfa
 from app.api.deps import get_current_user
 from app.api.terminal import close_user_sessions
 from app.core.database import get_db
@@ -52,6 +52,7 @@ class UserResponse(BaseModel):
     role_label: str
     is_active: bool
     created_at: datetime | None
+    mfa_enabled: bool = False
 
 
 class ForceLogoutResponse(BaseModel):
@@ -70,7 +71,8 @@ def _to_response(u: User) -> UserResponse:
     except ValueError:
         label = u.role
     return UserResponse(
-        id=u.id, username=u.username, role=u.role, role_label=label, is_active=u.is_active, created_at=u.created_at
+        id=u.id, username=u.username, role=u.role, role_label=label, is_active=u.is_active, created_at=u.created_at,
+        mfa_enabled=bool(u.mfa_enabled),
     )
 
 
@@ -181,6 +183,25 @@ async def update_user(
         await close_user_sessions(user.id, revoke)
     if changes:
         logger.info("ユーザー更新 by=%s user=%s %s", me.username, user.username, ", ".join(changes))
+    return _to_response(user)
+
+
+@router.post("/{user_id}/mfa-reset", response_model=UserResponse)
+async def reset_mfa(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
+):
+    """2 段階認証を解除する（本人が認証アプリも予備コードも無くしたとき）。本人は次のログインからパスワードだけで入れる"""
+    user = await _get_or_404(db, user_id)
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="このユーザーは 2 段階認証を設定していません")
+    clear_mfa(user)
+    audit("user.mfa_reset", target_type="user", target_id=user.id, target_name=user.username)
+    await db.commit()
+    await db.refresh(user)
+    logger.info("2 段階認証の解除 by=%s user=%s", me.username, user.username)
     return _to_response(user)
 
 

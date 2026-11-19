@@ -1,7 +1,7 @@
 """画面テスト用の初期データ（backend のディレクトリで、start-backend.sh が設定した環境変数で実行する）
 
 起動時の DB マイグレーションも TestClient で済ませてから、API と config_service で投入する
-ユーザー: admin / op1（オペレーター）/ view1（閲覧者）  パスワードは password-1234（admin は ADMIN_PASSWORD）
+ユーザー: admin / op1（オペレーター）/ view1（閲覧者）/ mfa1（閲覧者。2 段階認証の確認用）  パスワードは password-1234（admin は ADMIN_PASSWORD）
 """
 import os
 import sys
@@ -26,7 +26,7 @@ def main() -> None:
 
         tok = call("POST", "/auth/token", data={"username": "admin", "password": os.environ["ADMIN_PASSWORD"]})
         h = {"Authorization": f"Bearer {tok['access_token']}"}
-        for name, role in [("op1", "operator"), ("view1", "viewer")]:
+        for name, role in [("op1", "operator"), ("view1", "viewer"), ("mfa1", "viewer")]:
             call("POST", "/users/", h, json={"username": name, "password": "password-1234", "role": role})
         hq = call("POST", "/device-groups/", h, json={"name": "本社", "color": "#4f8ef7"})
         dc = call("POST", "/device-groups/", h, json={"name": "データセンター", "color": "#c084fc"})

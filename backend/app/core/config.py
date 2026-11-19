@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+asyncpg://netconfig:changeme@localhost:5432/netconfig"
     REDIS_URL: str = "redis://localhost:6379/0"
     GIT_REPO_PATH: str = "/app/configs"
+    MFA_ISSUER: str = "NetConfig Manager"  # 認証アプリに表示する名前（2 段階認証）
     # コンフィグ履歴を外部の Git サーバー（GitLab / Gitea など）へ push する（GIT_EXPORT_URL が空なら無効）
     GIT_EXPORT_URL: str = ""  # 例: https://gitlab.example.local/net/configs.git / git@gitea.local:net/configs.git
     GIT_EXPORT_BRANCH: str = Field(default="main", pattern=r"^[A-Za-z0-9._/-]{1,100}$")

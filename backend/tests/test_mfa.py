@@ -1,0 +1,119 @@
+"""2 段階認証（ワンタイムパスワード）"""
+import uuid
+
+from fastapi.testclient import TestClient
+
+from app.core import totp
+from app.main import app
+
+
+def test_totp_rfc6238_vector():
+    # RFC 6238 の SHA-1 のテストベクター（秘密鍵 "12345678901234567890"、8 桁の下 6 桁）
+    import base64
+
+    secret = base64.b32encode(b"12345678901234567890").decode()
+    assert totp.code_at(secret, 59 // 30) == "287082"
+    assert totp.code_at(secret, 1111111109 // 30) == "081804"
+    step = totp.verify(secret, "287082", now=59)
+    assert step == 1 and totp.verify(secret, "287082", last_step=step, now=59) is None  # 同じコードは 2 度使えない
+    assert totp.verify(secret, "287 082", now=59 + 30) == 1  # 30 秒のずれまでは受け付ける
+    assert totp.verify(secret, "287082", now=59 + 90) is None
+    assert totp.verify(secret, "12345", now=59) is None
+    codes = totp.new_recovery_codes()
+    assert len(set(codes)) == 10 and all(totp.looks_like_recovery(c) for c in codes)
+    assert totp.hash_recovery(codes[0].upper()) == totp.hash_recovery(codes[0].replace("-", ""))
+    assert "otpauth://totp/NetConfig%20Manager%3Aalice?secret=" in totp.provisioning_uri("ABC", "alice", "NetConfig Manager")
+    assert totp.qr_svg("otpauth://totp/x?secret=ABC").startswith("<svg")
+
+
+def _token(c, u, p):
+    return c.post("/api/auth/token", data={"username": u, "password": p})
+
+
+def _now_code(secret: str, offset: int = 0) -> str:
+    return totp.code_at(secret, totp.current_step() + offset)
+
+
+def test_mfa_flow():
+    with TestClient(app) as c:
+        admin = {"Authorization": "Bearer " + _token(c, "admin", "initial-pass-123").json()["access_token"]}
+        name = f"mfa-{uuid.uuid4().hex[:6]}"
+        uid = c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "operator"},
+                     headers=admin).json()["id"]
+        r = _token(c, name, "password-1234")
+        h = {"Authorization": "Bearer " + r.json()["access_token"]}
+        assert r.json()["mfa_required"] is False and c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is False
+
+        # 設定: QR コードを出して、認証アプリのコードで確認する
+        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        assert s["qr_svg"].startswith("<svg") and s["secret"] in s["uri"]
+        assert c.post("/api/auth/mfa/enable", json={"code": "000000"}, headers=h).status_code == 422
+        r = c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
+        assert r.status_code == 200
+        recovery = r.json()["recovery_codes"]
+        assert len(recovery) == 10
+        assert c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is True
+        assert c.post("/api/auth/mfa/setup", headers=h).status_code == 409
+        users = {u["id"]: u for u in c.get("/api/users/", headers=admin).json()}
+        assert users[uid]["mfa_enabled"] is True
+
+        # ログイン: パスワードだけではトークンが出ない。途中の印は API に使えない
+        r = _token(c, name, "password-1234").json()
+        assert r["mfa_required"] and r["access_token"] is None and r["mfa_token"]
+        assert c.get("/api/devices/", headers={"Authorization": f"Bearer {r['mfa_token']}"}).status_code == 401
+        bad = c.post("/api/auth/mfa/verify", json={"mfa_token": r["mfa_token"], "code": "000000"})
+        assert bad.status_code == 401
+        # 有効にしたときのコードは再利用できない（同じ時間枠）→ 次の時間枠のコードで入る
+        ok = c.post("/api/auth/mfa/verify", json={"mfa_token": r["mfa_token"], "code": _now_code(s["secret"], 1)})
+        assert ok.status_code == 200 and ok.json()["access_token"]
+        h = {"Authorization": "Bearer " + ok.json()["access_token"]}
+        assert c.get("/api/devices/", headers=h).status_code == 200
+        # 予備コードでも入れる（1 回だけ）
+        r = _token(c, name, "password-1234").json()
+        assert c.post("/api/auth/mfa/verify", json={"mfa_token": r["mfa_token"], "code": recovery[0]}).status_code == 200
+        r = _token(c, name, "password-1234").json()
+        assert c.post("/api/auth/mfa/verify", json={"mfa_token": r["mfa_token"], "code": recovery[0]}).status_code == 401
+        logs = c.get("/api/audit/logs", params={"action": "auth.login", "username": name}, headers=admin).json()["items"]
+        assert any("予備コード" in str(x["detail"]) for x in logs)
+        # 偽の印・パスワード変更後の印は使えない
+        assert c.post("/api/auth/mfa/verify", json={"mfa_token": "x.y.z", "code": "123456"}).status_code == 401
+
+        # 解除（本人）: パスワードとコードで確認
+        assert c.post("/api/auth/mfa/disable", json={"password": "wrong-pass-xx", "code": recovery[1]},
+                      headers=h).status_code == 422
+        assert c.post("/api/auth/mfa/disable", json={"password": "password-1234", "code": recovery[1]},
+                      headers=h).status_code == 204
+        assert _token(c, name, "password-1234").json()["access_token"]
+
+        # 管理者による解除
+        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
+        assert _token(c, name, "password-1234").json()["mfa_required"]
+        r = c.post(f"/api/users/{uid}/mfa-reset", headers=admin)
+        assert r.status_code == 200 and r.json()["mfa_enabled"] is False
+        assert c.post(f"/api/users/{uid}/mfa-reset", headers=admin).status_code == 409
+        assert c.post(f"/api/users/{uid}/mfa-reset", headers=h).status_code == 403
+        assert _token(c, name, "password-1234").json()["access_token"]
+        acts = c.get("/api/audit/logs", params={"action": "user.mfa_reset"}, headers=admin).json()["items"]
+        assert acts and acts[0]["target_name"] == name
+        assert c.delete(f"/api/users/{uid}", headers=admin).status_code == 204
+
+
+def test_mfa_code_failures_are_limited():
+    """パスワードが漏れていても、確認コードを総当たりさせない（ログインの失敗として数える）"""
+    with TestClient(app) as c:
+        admin = {"Authorization": "Bearer " + _token(c, "admin", "initial-pass-123").json()["access_token"]}
+        name = f"mfab-{uuid.uuid4().hex[:6]}"
+        uid = c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"},
+                     headers=admin).json()["id"]
+        h = {"Authorization": "Bearer " + _token(c, name, "password-1234").json()["access_token"]}
+        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
+        mfa_token = _token(c, name, "password-1234").json()["mfa_token"]
+        codes = [c.post("/api/auth/mfa/verify", json={"mfa_token": mfa_token, "code": f"{i:06d}"}).status_code
+                 for i in range(1, 9)]
+        assert 429 in codes
+        # 止まっている間は正しいコードでも入れない
+        assert c.post("/api/auth/mfa/verify",
+                      json={"mfa_token": mfa_token, "code": _now_code(s["secret"], 1)}).status_code == 429
+        assert c.delete(f"/api/users/{uid}", headers=admin).status_code == 204

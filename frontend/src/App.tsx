@@ -2,6 +2,7 @@ import { ComponentType, lazy, Suspense, useEffect, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
+import MfaModal from "./components/MfaModal";
 import DevicesPage from "./pages/DevicesPage";
 import LoginPage from "./pages/LoginPage";
 
@@ -118,8 +119,9 @@ function PasswordModal({ onClose }: { onClose: () => void }) {
 
 function Layout() {
   const location = useLocation();
-  const { me, can } = useAuth();
+  const { me, can, reload } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
+  const [showMfa, setShowMfa] = useState(false);
   const [version, setVersion] = useState("");
   const [features, setFeatures] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -149,6 +151,7 @@ function Layout() {
   return (
     <div className="app-layout">
       {showPassword && <PasswordModal onClose={() => setShowPassword(false)} />}
+      {showMfa && me && <MfaModal enabled={!!me.mfa_enabled} onClose={() => setShowMfa(false)} onChanged={() => { reload(); }} />}
       <aside className="sidebar">
         <div className="sidebar-header">
           <span className="sidebar-logo">⬡ NetConfig</span>
@@ -175,8 +178,11 @@ function Layout() {
               <span>
                 👤 {me.username} <span className="role-tag">{me.role_label}</span>
               </span>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: "2px 10px", flexWrap: "wrap", whiteSpace: "nowrap" }}>
                 <button className="link-btn" onClick={() => setShowPassword(true)}>パスワード変更</button>
+                <button className="link-btn" onClick={() => setShowMfa(true)} title={me.mfa_enabled ? "2 段階認証: 設定済み" : "2 段階認証: 未設定"}>
+                  2 段階認証{me.mfa_enabled ? " ✓" : ""}
+                </button>
                 <button className="link-btn" onClick={logout}>ログアウト</button>
               </div>
             </div>

@@ -50,6 +50,14 @@ def create_access_token(user_id: str, hashed_password: str, token_version: int =
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_mfa_token(user_id: str, hashed_password: str, token_version: int = 0) -> str:
+    """パスワードの確認が済み、ワンタイムパスワードを待っている間の一時的な印（5 分）。API の認証には使えない"""
+    now = datetime.now(UTC)
+    payload = {"sub": user_id, "pwv": password_fingerprint(hashed_password), "tv": token_version,
+               "purpose": "mfa", "iat": now, "exp": now + timedelta(minutes=5)}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def decode_access_token(token: str) -> dict | None:
     try:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])

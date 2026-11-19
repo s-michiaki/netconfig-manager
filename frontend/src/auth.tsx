@@ -32,6 +32,7 @@ export interface Me {
   role: string;
   role_label: string;
   permissions: string[];
+  mfa_enabled?: boolean;
 }
 
 interface AuthState {

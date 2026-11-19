@@ -9,6 +9,7 @@ interface User {
   role_label: string;
   is_active: boolean;
   created_at: string | null;
+  mfa_enabled: boolean;
 }
 interface RoleInfo { role: string; label: string; permissions: string[]; }
 
@@ -146,6 +147,23 @@ export default function UsersPage() {
     }
   };
 
+  // 認証アプリも予備コードも無くした人の 2 段階認証を解除する（本人は次のログインからパスワードだけで入れる）
+  const resetMfa = async (u: User) => {
+    if (!confirm(
+      `ユーザー「${u.username}」の 2 段階認証を解除しますか？\n` +
+      "本人が認証アプリを無くしたときに使います。本人であることを確かめてから解除し、再設定を案内してください。",
+    )) return;
+    setError("");
+    setNotice("");
+    try {
+      await api.post(`/users/${u.id}/mfa-reset`);
+      setNotice(`「${u.username}」の 2 段階認証を解除しました`);
+      load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
   const del = async (u: User) => {
     if (!confirm(`ユーザー「${u.username}」を削除しますか？`)) return;
     setError("");
@@ -176,6 +194,7 @@ export default function UsersPage() {
               <th>ユーザー名</th>
               <th>ロール</th>
               <th>状態</th>
+              <th>2 段階認証</th>
               <th>作成日</th>
               <th>操作</th>
             </tr>
@@ -195,12 +214,17 @@ export default function UsersPage() {
                       {u.is_active ? "有効" : "無効"}
                     </span>
                   </td>
+                  <td>
+                    {u.mfa_enabled
+                      ? <span className="badge badge-success">設定済み</span>
+                      : <span style={{ fontSize: 12, color: "var(--color-muted)" }}>未設定</span>}
+                  </td>
                   <td style={{ fontSize: 12, color: "var(--color-muted)" }}>
                     {u.created_at ? new Date(u.created_at + "Z").toLocaleDateString("ja-JP") : "—"}
                   </td>
                   <td>
                     {isMe ? (
-                      <span style={{ fontSize: 11, color: "var(--color-muted)" }}>サイドバーからパスワード変更</span>
+                      <span style={{ fontSize: 11, color: "var(--color-muted)" }}>サイドバーからパスワード変更・2 段階認証</span>
                     ) : (
                       <div style={{ display: "flex", gap: 6 }}>
                         <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setModal({ user: u })}>
@@ -212,6 +236,12 @@ export default function UsersPage() {
                         >
                           ログアウトさせる
                         </button>
+                        {u.mfa_enabled && (
+                          <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => resetMfa(u)}
+                                  title="認証アプリを無くしたときなどに、2 段階認証を解除します">
+                            2 段階認証を解除
+                          </button>
+                        )}
                         <button className="btn btn-danger" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => del(u)}>
                           削除
                         </button>
