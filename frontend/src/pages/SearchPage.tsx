@@ -6,19 +6,45 @@ import { usePlatforms } from "../platforms";
 
 /**
  * コンフィグ検索: 全機器の最新コンフィグを文字列・正規表現で横断検索する。
- * 「この IP・VLAN・ACL はどの機器にあるか」「この設定が入っていない機器はどれか」を調べる
+ * 「この IP・VLAN・ACL はどの機器にあるか」「この設定が入っていない機器はどれか」を調べる。
+ * 「過去の世代も含める」と、消えた行も探し、いつからいつまであったか（最初・最後に見つかった世代）を表示する
  */
 
 interface Target { id: string; name: string; hostname: string; platform: string; group: string | null; }
-interface Line { line: number; text: string; ranges: [number, number][]; before: string[]; after: string[]; }
+interface Seen { hash: string; full_hash: string; date: string; }
+interface Line {
+  line: number; text: string; ranges: [number, number][]; before: string[]; after: string[];
+  // 過去の世代も含める検索のとき
+  current?: boolean; first_seen?: Seen; last_seen?: Seen;
+}
 interface Hit extends Target { count: number; commit: string | null; lines: Line[]; }
 interface Result {
   searched: number; matched: number; total_lines: number; max_lines_per_device: number;
   devices: Hit[]; unmatched: Target[]; not_collected: Target[]; timed_out: Target[];
+  scope: Scope; commits_searched: number; partial: Target[];
 }
+type Scope = "latest" | "history";
 interface Group { id: string; name: string; }
 interface SearchRequest {
   query: string; mode: string; case_sensitive: boolean; context: number; group_id: string | null; platform: string | null;
+  scope: Scope; since: string | null; until: string | null;
+}
+
+const fmt = (iso: string) => new Date(iso).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+/** 過去の世代も含める検索の1行: いまもあるか、最初・最後に見つかった世代（世代管理へのリンク） */
+function SeenInfo({ deviceId, l }: { deviceId: string; l: Line }) {
+  if (!l.first_seen || !l.last_seen) return null;
+  const link = (s: Seen) => <Link to={`/history?device=${deviceId}&commit=${s.full_hash}`} className="mono">{fmt(s.date)}</Link>;
+  return (
+    <div className="srch-seen topo-small">
+      {l.current ? <span className="badge badge-success">いまもある</span> : <span className="badge badge-neutral">消えた</span>}
+      <span className="topo-muted">最初に見つかった世代</span> {link(l.first_seen)}
+      {l.current
+        ? null
+        : <><span className="topo-muted">　最後にあった世代</span> {link(l.last_seen)}</>}
+    </div>
+  );
 }
 
 /** 一致した部分を強調して1行を表示する */
@@ -49,6 +75,9 @@ export default function SearchPage() {
   const [context, setContext] = useState(0);
   const [groupId, setGroupId] = useState("");
   const [platform, setPlatform] = useState("");
+  const [scope, setScope] = useState<Scope>("latest");
+  const [since, setSince] = useState("");
+  const [until, setUntil] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
   const { groups: platformGroups, label: platformLabel } = usePlatforms();
   const [result, setResult] = useState<Result | null>(null);
@@ -70,6 +99,7 @@ export default function SearchPage() {
     setCsvNote("");
     const req: SearchRequest = {
       query, mode, case_sensitive: caseSensitive, context, group_id: groupId || null, platform: platform || null,
+      scope, since: scope === "history" ? since || null : null, until: scope === "history" ? until || null : null,
     };
     try {
       const r = await api.post<Result>("/configs/search", req);
@@ -107,7 +137,7 @@ export default function SearchPage() {
     <div className="page">
       <div className="page-header">
         <span className="page-title">コンフィグ検索</span>
-        <span className="topo-muted topo-small">各機器の最後に収集したコンフィグから探します（過去の世代は対象外）</span>
+        <span className="topo-muted topo-small">各機器の最後に収集したコンフィグから探します（「過去の世代も含める」で、消えた設定も探せます）</span>
       </div>
       <div className="page-body">
         <form className="audit-filters" onSubmit={run}>
@@ -142,9 +172,29 @@ export default function SearchPage() {
               ))}
             </select>
           </label>
+          <label className="audit-field">
+            <span className="form-label">対象の世代</span>
+            <select value={scope} onChange={(e) => setScope(e.target.value as Scope)} aria-label="対象の世代">
+              <option value="latest">最新のみ</option>
+              <option value="history">過去の世代も含める</option>
+            </select>
+          </label>
+          {scope === "history" && (
+            <>
+              <label className="audit-field srch-field-narrow">
+                <span className="form-label">期間（から）</span>
+                <input type="date" value={since} onChange={(e) => setSince(e.target.value)} aria-label="期間の開始" />
+              </label>
+              <label className="audit-field srch-field-narrow">
+                <span className="form-label">期間（まで）</span>
+                <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} aria-label="期間の終了" />
+              </label>
+            </>
+          )}
           <label className="audit-field srch-field-narrow">
             <span className="form-label">前後の行</span>
-            <select value={context} onChange={(e) => setContext(Number(e.target.value))}>
+            <select value={context} onChange={(e) => setContext(Number(e.target.value))} disabled={scope === "history"}
+                    title={scope === "history" ? "過去の世代も含める検索では前後の行は表示しません" : undefined}>
               <option value={0}>表示しない</option>
               <option value={1}>1 行</option>
               <option value={2}>2 行</option>
@@ -163,13 +213,21 @@ export default function SearchPage() {
           <>
             <div className="srch-summary-row">
               <p className="srch-summary">
-                <b>{result.matched}</b> 台で <b>{result.total_lines}</b> 行が一致（{result.searched} 台を検索）
+                {result.scope === "history"
+                  ? <><b>{result.matched}</b> 台で <b>{result.total_lines}</b> 種類の行が一致（{result.searched} 台・{result.commits_searched} 世代を検索）</>
+                  : <><b>{result.matched}</b> 台で <b>{result.total_lines}</b> 行が一致（{result.searched} 台を検索）</>}
                 <span className="topo-muted">　「<span className="mono">{lastRequest?.query}</span>」</span>
               </p>
               <CsvButton onClick={exportCsv} disabled={!result.total_lines}
                 title="この検索で一致した行をすべて CSV で出力します（表示の 50 行の制限とは別。最大10万行）" />
             </div>
             {csvNote && <div className="srch-note srch-note-warn">{csvNote}</div>}
+            {result.partial.length > 0 && (
+              <div className="srch-note srch-note-warn">
+                世代が多い・時間が足りないため、古い世代まで調べきれなかった機器が {result.partial.length} 台あります（「最初に見つかった世代」はそれより前のことがあります）。期間を絞ってください。
+                <Names items={result.partial} />
+              </div>
+            )}
             {result.timed_out.length > 0 && (
               <div className="srch-note srch-note-warn">
                 時間内に調べきれなかった機器が {result.timed_out.length} 台あります。正規表現を単純にするか、機器グループで絞ってください。
@@ -188,11 +246,12 @@ export default function SearchPage() {
                 </header>
                 <div className="srch-lines mono">
                   {d.lines.map((l, i) => (
-                    <div key={l.line} className={`srch-block${i && (l.before.length || l.after.length) ? " srch-sep" : ""}`}>
+                    <div key={`${l.line}-${l.text}`} className={`srch-block${i && (l.before.length || l.after.length) ? " srch-sep" : ""}`}>
                       {l.before.map((t, j) => (
                         <div key={`b${j}`} className="srch-line srch-ctx"><span className="srch-no">{l.line - l.before.length + j}</span><span>{t}</span></div>
                       ))}
-                      <div className="srch-line"><span className="srch-no">{l.line}</span><span><Highlighted text={l.text} ranges={l.ranges} /></span></div>
+                      <div className={`srch-line${l.current === false ? " srch-gone" : ""}`}><span className="srch-no">{l.line}</span><span><Highlighted text={l.text} ranges={l.ranges} /></span></div>
+                      <SeenInfo deviceId={d.id} l={l} />
                       {l.after.map((t, j) => (
                         <div key={`a${j}`} className="srch-line srch-ctx"><span className="srch-no">{l.line + 1 + j}</span><span>{t}</span></div>
                       ))}

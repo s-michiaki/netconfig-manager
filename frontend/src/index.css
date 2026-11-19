@@ -873,6 +873,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .srch-sep { border-top: 1px dashed var(--color-border); margin-top: 4px; padding-top: 4px; }
 .srch-lines mark { background: var(--color-warning-dim); color: var(--color-warning); border-radius: 2px; padding: 0 1px; }
 .srch-more { padding: 0 14px 10px; }
+.srch-seen { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 2px 14px 4px 70px; font-family: var(--font-sans, inherit); }
+.srch-seen a { color: var(--color-accent); text-decoration: none; }
+.srch-gone { text-decoration: line-through; text-decoration-color: var(--color-muted); }
 .srch-note { font-size: 12px; border: 1px solid var(--color-border); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 10px; }
 .srch-note summary { cursor: pointer; }
 .srch-note-warn { border-color: var(--color-warning); color: var(--color-warning); }

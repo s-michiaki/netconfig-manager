@@ -62,3 +62,19 @@ test("機種で絞り込み、検索結果の一致した行を CSV で出力で
   await page.getByRole("button", { name: "検索" }).click();
   await expect(page.locator(".srch-summary")).toContainText("4 台で 6 行が一致（4 台を検索）");
 });
+
+test("過去の世代も含めて検索し、いつから入っているかを確認できる", async ({ page }) => {
+  await login(page, USERS.viewer);
+  await page.goto("/search");
+  await page.getByLabel("対象の世代").selectOption("history");
+  await expect(page.getByLabel("期間の開始")).toBeVisible();
+  await expect(page.getByLabel("前後の行")).toBeDisabled();
+  await page.getByPlaceholder(/192\.168\.10\.1/).fill("logging host 10.0.9.9");
+  await page.getByRole("button", { name: "検索" }).click();
+  await expect(page.locator(".srch-summary")).toContainText(/1 台で 1 種類の行が一致（\d+ 台・\d+ 世代を検索）/);
+  const hit = page.locator(".srch-device", { hasText: "Core-SW01" });
+  await expect(hit.locator(".srch-seen")).toContainText("いまもある");
+  // 最初に見つかった世代（2 世代目で追加した行）を世代管理で開ける
+  await hit.locator(".srch-seen a").first().click();
+  await expect(page).toHaveURL(/\/history\?device=.+&commit=[0-9a-f]{40}/);
+});

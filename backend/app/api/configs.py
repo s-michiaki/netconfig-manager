@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -165,6 +165,31 @@ class SearchRequest(BaseModel):
     context: int = Field(0, ge=0, le=3)  # 一致した行の前後に付ける行数
     group_id: str | None = None  # 機器グループで絞る（"none" はグループなし）
     platform: str | None = None
+    # latest: 最後に収集したコンフィグだけ。history: 過去の世代も含める（since / until で期間を絞れる。日付はサーバーの TIMEZONE）
+    scope: str = Field("latest", pattern="^(latest|history)$")
+    since: date | None = None
+    until: date | None = None
+
+
+def _period(body: SearchRequest) -> tuple[datetime | None, datetime | None]:
+    tz = ZoneInfo(settings.TIMEZONE)
+    since = datetime.combine(body.since, time.min, tzinfo=tz) if body.since else None
+    until = datetime.combine(body.until + timedelta(days=1), time.min, tzinfo=tz) if body.until else None  # その日の終わりまで
+    if since and until and since >= until:
+        raise HTTPException(status_code=422, detail="期間の開始日が終了日より後になっています")
+    return since, until
+
+
+def _run_search(body: SearchRequest, targets: list, context: int, max_lines: int, max_total: int | None):
+    if body.scope == "history":
+        since, until = _period(body)
+        return config_search.search_history(targets, body.query, body.mode, body.case_sensitive, since, until,
+                                            max_lines, max_total)
+    return config_search.search(targets, body.query, body.mode, body.case_sensitive, context, max_lines, max_total)
+
+
+def _local_str(iso: str) -> str:
+    return datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.TIMEZONE)).strftime("%Y/%m/%d %H:%M")
 
 
 def platform_label(platform: str) -> str:
@@ -199,10 +224,15 @@ async def _search_targets(db: AsyncSession, body: SearchRequest) -> list[config_
 # 検索語を URL（アクセスログ）に残さないよう POST にしている
 @router.post("/search", dependencies=[Depends(require(Perm.CONFIG_READ))])
 async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)):
-    """全機器（または絞り込んだ機器）の最新コンフィグを横断検索する"""
+    """全機器（または絞り込んだ機器）の最新コンフィグ（scope=history なら過去の世代も）を横断検索する"""
     targets = await _search_targets(db, body)
-    res = await run_in_threadpool(config_search.search, targets, body.query, body.mode, body.case_sensitive, body.context)
+    if body.scope == "history":
+        _period(body)  # 期間の確認（スレッドへ渡す前にエラーを返す）
+    res = await run_in_threadpool(_run_search, body, targets, body.context, config_search.MAX_LINES_PER_DEVICE, None)
     return {
+        "scope": body.scope,
+        "commits_searched": res.commits_searched,
+        "partial": [_target_dict(t) for t in res.partial],
         "searched": len(targets) - len(res.not_collected) - len(res.timed_out),
         "matched": len(res.hits),
         "total_lines": res.total_lines,
@@ -223,23 +253,33 @@ async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db),
     - 検索語は URL にも監査ログにも残さない（出力した件数と絞り込み条件だけを残す）
     """
     targets = await _search_targets(db, body)
-    res = await run_in_threadpool(
-        config_search.search, targets, body.query, body.mode, body.case_sensitive, 0,
-        MAX_EXPORT_ROWS, MAX_EXPORT_ROWS,
-    )
-    rows = [
-        [h.target.name, h.target.hostname, platform_label(h.target.platform), h.target.group or "",
-         (h.commit or "")[:7], ln["line"], ln["text"]]
-        for h in res.hits for ln in h.lines
-    ]
+    if body.scope == "history":
+        _period(body)
+    res = await run_in_threadpool(_run_search, body, targets, 0, MAX_EXPORT_ROWS, MAX_EXPORT_ROWS)
+    if body.scope == "history":
+        header = ["機器名", "ホスト / IP", "機種", "グループ", "いまもある", "最初に見つかった世代", "その日時",
+                  "最後に見つかった世代", "その日時", "一致した行"]
+        rows = [
+            [h.target.name, h.target.hostname, platform_label(h.target.platform), h.target.group or "",
+             "はい" if ln["current"] else "いいえ", ln["first_seen"]["hash"][:7], _local_str(ln["first_seen"]["date"]),
+             ln["last_seen"]["hash"][:7], _local_str(ln["last_seen"]["date"]), ln["text"]]
+            for h in res.hits for ln in h.lines
+        ]
+    else:
+        header = ["機器名", "ホスト / IP", "機種", "グループ", "世代", "行番号", "一致した行"]
+        rows = [
+            [h.target.name, h.target.hostname, platform_label(h.target.platform), h.target.group or "",
+             (h.commit or "")[:7], ln["line"], ln["text"]]
+            for h in res.hits for ln in h.lines
+        ]
     truncated = res.total_lines > len(rows)
     audit("config.search_export", detail={
         "rows": len(rows), "devices": len(res.hits), "truncated": truncated, "timed_out": len(res.timed_out),
-        "mode": body.mode, "group_id": body.group_id, "platform": body.platform,
+        "mode": body.mode, "group_id": body.group_id, "platform": body.platform, "scope": body.scope,
+        "since": body.since.isoformat() if body.since else None, "until": body.until.isoformat() if body.until else None,
     })
     await db.commit()
-    resp = csv_response(["機器名", "ホスト / IP", "機種", "グループ", "世代", "行番号", "一致した行"], rows,
-                        export_name("config_search"))
+    resp = csv_response(header, rows, export_name("config_search"))
     resp.headers["X-Search-Rows"] = str(len(rows))
     resp.headers["X-Search-Total-Lines"] = str(res.total_lines)
     resp.headers["X-Search-Timed-Out"] = str(len(res.timed_out))

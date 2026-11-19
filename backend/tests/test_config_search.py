@@ -169,3 +169,60 @@ def test_search_total_line_limit():
     # 既定（画面）は機器ごとに 50 行まで
     res = config_search.search(targets, "line")
     assert [len(h.lines) for h in res.hits] == [30, 30]
+
+
+def test_search_history():
+    """過去の世代も含める検索: 消えた行・いまもある行と、最初・最後に見つかった世代"""
+    import datetime as dt
+
+    with TestClient(app) as c:
+        admin = login(c, "admin", "initial-pass-123")
+        uid = uuid.uuid4().hex[:6]
+        did = c.post("/api/devices/", json=dict(name=f"srchh-{uid}", hostname="10.9.1.1", platform="cisco_ios",
+                                                username="u", password="p"), headers=admin).json()["id"]
+        ip_old, ip_new = f"10.{int(uid[:2], 16)}.1.1", f"10.{int(uid[:2], 16)}.2.2"
+        cs.save_config(did, f"hostname h\nntp server {ip_old}\n", "test")
+        cs.save_config(did, f"hostname h\nntp server {ip_old}\nntp server {ip_new}\n", "test")
+        cs.save_config(did, f"hostname h\nntp server {ip_new}\n", "test")  # 古いほうを消した
+        cs.save_config(did, f"hostname h2\nntp server {ip_new}\n", "test")
+        history = cs.get_config_history(did)
+        oldest, second = history[-1]["full_hash"], history[-2]["full_hash"]
+
+        def search(**kw):
+            return c.post("/api/configs/search", json={"query": "ntp server", "scope": "history", **kw}, headers=admin)
+
+        d = search().json()
+        dev = next(x for x in d["devices"] if x["id"] == did)
+        assert d["scope"] == "history" and d["commits_searched"] >= 4 and dev["count"] == 2
+        new, old = dev["lines"]  # いまもある行が先
+        assert new["text"] == f"ntp server {ip_new}" and new["current"] is True and new["first_seen"]["full_hash"] == second
+        assert old["text"] == f"ntp server {ip_old}" and old["current"] is False
+        assert old["first_seen"]["full_hash"] == oldest and old["last_seen"]["full_hash"] == second
+        assert [old["text"][s:e] for s, e in old["ranges"]] == ["ntp server"]
+        # 最新だけの検索では消えた行は出ない
+        d = c.post("/api/configs/search", json={"query": ip_old}, headers=admin).json()
+        assert did not in [x["id"] for x in d["devices"]] and did in [x["id"] for x in d["unmatched"]]
+        assert did in [x["id"] for x in search(query=ip_old).json()["devices"]]
+        # 期間で絞る（未来の期間なら世代が無く「一致しなかった」）
+        future = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+        d = search(since=future).json()
+        assert did in [x["id"] for x in d["unmatched"]]
+        assert did in [x["id"] for x in search(until=dt.date.today().isoformat()).json()["devices"]]
+        assert search(since=future, until=dt.date.today().isoformat()).status_code == 422
+        assert search(scope="all").status_code == 422
+        # 世代の上限で打ち切ったら partial に入る
+        import pytest
+
+        mp = pytest.MonkeyPatch()
+        mp.setattr(config_search, "MAX_HISTORY_COMMITS", 2)
+        d = search().json()
+        mp.undo()
+        assert did in [x["id"] for x in d["partial"]]
+        # CSV（過去の世代を含める場合は最初・最後の世代の列）
+        r = c.post("/api/configs/search/export", json={"query": ip_old, "scope": "history"}, headers=admin)
+        assert r.status_code == 200
+        text = r.content.decode("utf-8-sig")
+        assert "最初に見つかった世代" in text.splitlines()[0]
+        row = next(x for x in text.splitlines() if x.startswith(f"srchh-{uid},"))
+        assert ",いいえ," in row and oldest[:7] in row and second[:7] in row
+        c.delete(f"/api/devices/{did}", headers=admin)
