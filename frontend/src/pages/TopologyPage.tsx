@@ -255,7 +255,9 @@ function Editor(props: EditorProps) {
   const [saving, setSaving] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
 
-  // ---------------------------------------------------------------- 取り消し・やり直し（編集中のみ。保存・読み込みでリセット）
+  // ---------------------------------------------------------------- 取り消し・やり直し（編集中のみ）
+  // 保存しても履歴は残し、保存より前の状態にも戻せる（保存した位置を savedAt に記録し、そこから動くと「未保存」）。
+  // 読み込み・破棄・別の構成図への切り替えではリセットする
   // 変更の直前の状態（nodes / edges）を積む。連続した入力（同じ項目へのタイピング）は1回分にまとめる
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
@@ -301,14 +303,21 @@ function Editor(props: EditorProps) {
     onDirtyRef.current(d);
   }, []);
 
-  const applyDetail = useCallback((d: MapDetail) => {
-    const flow = toFlow(docOf(d));
+  /** keepHistory: 保存の結果を反映するとき。キャンバスは今の表示のまま、取り消しの履歴も残す */
+  const applyDetail = useCallback((d: MapDetail, keepHistory = false) => {
     setDetail(d);
-    setNodes(flow.nodes);
-    setEdges(flow.edges);
     setStatuses(d.devices);
     setDirty(false);
     setConflict(false);
+    if (keepHistory) {
+      const h = history.current;
+      h.savedAt = h.past.length;
+      h.lastKey = ""; // 保存の前後の入力は別々に取り消す
+      return;
+    }
+    const flow = toFlow(docOf(d));
+    setNodes(flow.nodes);
+    setEdges(flow.edges);
     resetHistory();
   }, [setDirty, docOf, resetHistory]);
 
@@ -659,7 +668,7 @@ function Editor(props: EditorProps) {
         version: detail.version,
         [view === "logical" ? "logical" : "data"]: fromFlow(nodes, edges, rf.getViewport()),
       });
-      applyDetail(r.data);
+      applyDetail(r.data, true);
       setNotice("保存しました");
       onChanged();
     } catch (e) {
@@ -811,8 +820,7 @@ img{display:block;max-width:100%;max-height:${landscape ? "250mm" : "370mm"};mar
 
   const toggleEditing = () => {
     if (editing && dirty && !window.confirm("保存していない変更があります。破棄して閲覧モードに戻りますか？")) return;
-    if (editing && dirty) load();
-    if (editing) resetHistory();
+    if (editing && dirty) load(); // 破棄するので履歴もリセットされる（変更が無ければ履歴を残し、編集に戻ったとき続けて取り消せる）
     setEditing(!editing);
   };
 

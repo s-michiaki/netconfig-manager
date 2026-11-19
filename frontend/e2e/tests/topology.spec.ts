@@ -25,6 +25,37 @@ test("構成図を編集し、取り消し・やり直しのあと保存でき�
   await expect(page.locator(".react-flow__node-text")).toHaveCount(1);
 });
 
+test("保存したあとも、保存より前の状態へ取り消せる", async ({ page }) => {
+  await login(page);
+  await page.goto("/topology");
+  await page.locator(".topo-map-select").selectOption({ label: "本社ネットワーク" });
+  await expect(page.locator(".react-flow__node-device")).toHaveCount(4);
+  await page.getByRole("button", { name: "編集", exact: true }).click();
+  const texts = page.locator(".react-flow__node-text");
+  const before = await texts.count();
+
+  await page.getByRole("button", { name: "テキスト" }).click();
+  await expect(texts).toHaveCount(before + 1);
+  await page.locator("button.btn-primary", { hasText: "保存" }).click();
+  await expect(page.locator(".topo-notice")).toHaveText("保存しました");
+  await expect(page.locator(".topo-dirty")).toHaveCount(0);
+  // 保存しても取り消せる。保存した状態から離れるので「未保存」になる
+  await expect(page.getByRole("button", { name: "取り消す" })).toBeEnabled();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect(texts).toHaveCount(before);
+  await expect(page.locator(".topo-dirty")).toBeVisible();
+  // やり直すと保存した状態に戻り「未保存」が消える
+  await page.getByRole("button", { name: "やり直す" }).click();
+  await expect(texts).toHaveCount(before + 1);
+  await expect(page.locator(".topo-dirty")).toHaveCount(0);
+  // 取り消した状態を保存して元に戻す（ほかのテストに影響させない）
+  await page.getByRole("button", { name: "取り消す" }).click();
+  await page.locator("button.btn-primary", { hasText: "保存" }).click();
+  await expect(page.locator(".topo-notice")).toHaveText("保存しました");
+  await page.reload();
+  await expect(page.locator(".react-flow__node-text")).toHaveCount(before);
+});
+
 test("構成図を PDF で書き出せる", async ({ page }) => {
   await login(page);
   await page.goto("/topology");
