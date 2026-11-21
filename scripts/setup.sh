@@ -351,8 +351,25 @@ echo "[INFO] Building and starting containers (初回は数分かかります)..
 # podman-compose は compose ファイルが変わらない限り既存コンテナを作り直さない
 # （イメージだけ更新しても古いコンテナが動き続ける）ため、ビルド後に必ず再作成する。
 # ボリューム（DB・コンフィグ履歴）は保持される
+#
+# イメージを取り直す（#18）: 一度ダウンロードしたイメージは、タグ（postgres:16-alpine など）の中身が新しくなっても
+# 自動では取り直されない。DB・Redis のイメージと、ビルドの土台（python・node・nginx）を毎回取り直し、
+# セキュリティ修正を取り込む。取り直せなくても（インターネットに出られない等）手元のイメージで続ける
+IMAGES=$( { sed -n 's#^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\).*#\1#p' "$INSTALL_DIR/$COMPOSE_FILE"
+            sed -n 's#^FROM[[:space:]]\{1,\}\([^[:space:]]*\).*#\1#p' "$INSTALL_DIR/backend/Dockerfile" "$INSTALL_DIR/frontend/Dockerfile"
+          } | grep '/' | sort -u )
+PULL_FAILED=()
+for img in $IMAGES; do
+  echo "[INFO] Pulling $img ..."
+  if ! sudo podman pull -q "$img" >/dev/null; then
+    echo "[WARN] $img を取り直せませんでした（手元のイメージで続けます）"
+    PULL_FAILED+=("$img")
+  fi
+done
 sudo podman-compose -f "$COMPOSE_FILE" build
 sudo podman-compose -f "$COMPOSE_FILE" up -d --force-recreate
+# 取り直し・作り直しで使われなくなった古いイメージ（名前の無いもの）を消す（ディスクの圧迫を防ぐ）
+sudo podman image prune -f >/dev/null 2>&1 || true
 
 # =========================
 # 再起動後の自動起動（Podman にはデーモンが無いため）
@@ -459,6 +476,18 @@ fi
 if [ -n "$BACKEND_CT" ] && [ -n "$BACKUP_TIMER" ]; then
   sudo podman exec "$BACKEND_CT" python -m app.tools.backup_report schedule "$BACKUP_TIMER" --calendar "$BACKUP_ON_CALENDAR" \
     >/dev/null 2>&1 || echo "[WARN] 定期バックアップの登録状況を画面に伝えられませんでした（バックアップ自体は動きます）"
+fi
+
+# 使っているイメージの作成日時をアプリへ伝える（画面「システム状態」で、古いイメージのまま動いていることに気づけるように）
+if [ -n "$BACKEND_CT" ]; then
+  IMG_ARGS=()
+  for img in $IMAGES; do
+    created=$(sudo podman image inspect --format '{{.Created}}' "$img" 2>/dev/null | head -1 || true)
+    [ -n "$created" ] && IMG_ARGS+=(--image "$img=$created")
+  done
+  for img in "${PULL_FAILED[@]}"; do IMG_ARGS+=(--pull-failed "$img"); done
+  sudo podman exec "$BACKEND_CT" python -m app.tools.image_report "${IMG_ARGS[@]}" >/dev/null 2>&1 \
+    || echo "[WARN] イメージの情報を画面に伝えられませんでした"
 fi
 
 # =========================

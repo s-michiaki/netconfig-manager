@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     # コンフィグ検索の同時実行数（スレッドプールをログインなどのために残す）
     SEARCH_MAX_PER_USER: int = Field(default=2, ge=1, le=20)  # ユーザーごと
     SEARCH_MAX_CONCURRENT: int = Field(default=4, ge=1, le=30)  # 全体
+    # コンテナのイメージがこの日数より前に作られたものなら「システム状態」で注意（setup.sh で取り直していない。0 で確認しない）
+    IMAGE_STALE_DAYS: int = Field(default=60, ge=0, le=3650)
 
     # --- モニタリング（試験導入中。既定は無効） ---
     # FW ルールのヒット数（PAN-OS・FortiGate を SSH で取得）とインタフェースの帯域（SNMP）

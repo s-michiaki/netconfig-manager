@@ -77,9 +77,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      IMAGE: docker.io/library/nginx:1.27-alpine  # frontend/Dockerfile の prod ステージと合わせる
+      IMAGE: docker.io/library/nginx:1.30-alpine  # frontend/Dockerfile の prod ステージと合わせる
+      NGINX_MIN: 1.30.7  # 2026-11-18 公開の脆弱性（HTTP/2・TLS 1.3 など）の修正版（#17）
     steps:
       - uses: actions/checkout@v4
+      - name: Dockerfile と同じイメージか・修正済みの版か
+        run: |
+          grep -qx "FROM $IMAGE AS prod" frontend/Dockerfile || { echo "frontend/Dockerfile の prod ステージと IMAGE が違います"; exit 1; }
+          docker pull -q "$IMAGE"
+          v=$(docker run --rm "$IMAGE" nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9.]*\).*#\1#p')
+          echo "nginx $v"
+          [ "$(printf '%s\n%s\n' "$NGINX_MIN" "$v" | sort -V | head -1)" = "$NGINX_MIN" ] \
+            || { echo "nginx $v は $NGINX_MIN より古い（脆弱性が未修正）"; exit 1; }
       - name: 確認用の証明書と HTML を用意
         run: |
           mkdir -p /tmp/ncm/certs /tmp/ncm/html

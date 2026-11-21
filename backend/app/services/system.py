@@ -17,6 +17,8 @@
              app.tools.backup_report を呼んで Redis に書いた記録を読む。記録が無い環境（バックアップを
              使っていない・開発環境）では unknown にして、警告も通知もしない
   git_export : コンフィグ履歴の外部 Git への push（services/git_export.py）の最後の結果。設定していなければ unknown
+  images   : コンテナのイメージ（DB・Redis・ビルドの土台）の作成日時。setup.sh が app.tools.image_report で伝える。
+             古い（IMAGE_STALE_DAYS 日より前）・取り直せなかったら warn
 
 ウォッチドッグは **API のプロセス**で動かす（worker / beat が止まっていても検出・通知できるように）。
 - worker / beat / redis の異常は SYSTEM_ALERT_AFTER_MIN 分続いたら通知する（再起動中の一時的な停止では通知しない）
@@ -26,10 +28,11 @@
 import asyncio
 import json
 import logging
+import re
 import shutil
 import ssl
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from redis.exceptions import RedisError
@@ -47,13 +50,14 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_KEY = "netconfig:system:heartbeat"  # beat → worker の heartbeat タスクが書く時刻（UTC の ISO 形式）
 STATE_KEY = "netconfig:system:alerts"  # 通知済みの状態（項目ごと）
+IMAGES_KEY = "netconfig:system:images"  # setup.sh が伝えたコンテナのイメージ（名前・作成日時・取り直せなかったもの。JSON）
 BACKUP_KEY = "netconfig:system:backup"  # バックアップの記録（最後の結果・最後の成功・タイマーの登録状況。JSON）
 BEAT_STALE_SEC = 180  # heartbeat（毎分）がこの秒数より古ければ、スケジューラーが止まっているとみなす
 DISK_WARN_PCT, DISK_ERROR_PCT = 15, 5
 CERT_WARN_DAYS, CERT_ERROR_DAYS = 30, 7
 RANK = {"unknown": 0, "ok": 0, "warn": 1, "error": 2}
 # 通知する項目（db は、止まっていると通知先も読めないため対象外）
-ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup", "git_export")
+ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup", "git_export", "images")
 GRACE_KEYS = ("redis", "worker", "beat")  # 一時的な停止では通知しない項目
 
 
@@ -318,6 +322,66 @@ async def check_backup(now: datetime, redis_ok: bool = True) -> Component:
                      detail)
 
 
+def parse_image_created(value: str) -> datetime | None:
+    """podman image inspect の Created（例 "2026-11-19 03:12:45.123456789 +0000 UTC"）や ISO 形式を読む"""
+    value = (value or "").strip()
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?", value)
+    if not m:
+        return None
+    tz = (m.group(3) or "+0000").replace("Z", "+0000").replace(":", "")
+    try:
+        return datetime.strptime(f"{m.group(1)} {m.group(2)} {tz}", "%Y-%m-%d %H:%M:%S %z").astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _short_image(name: str) -> str:
+    """表示用に Docker Hub の公式イメージの接頭辞を省く（docker.io/library/nginx:1.30-alpine → nginx:1.30-alpine）"""
+    return name.removeprefix("docker.io/library/")
+
+
+async def record_images(report: dict) -> None:
+    await login_limit.client().set(IMAGES_KEY, json.dumps(report, ensure_ascii=False))
+
+
+async def check_images(now: datetime, redis_ok: bool = True) -> Component:
+    """コンテナのイメージ（DB・Redis と、ビルドの土台）が古いまま動いていないか（#18）
+
+    公式のイメージはセキュリティ修正のたびに作り直されるので、作成日時が IMAGE_STALE_DAYS 日より古ければ、
+    取り直していない（setup.sh を長く実行していない）とみなして注意を出す
+    """
+    key, label, days = "images", "コンテナのイメージ", settings.IMAGE_STALE_DAYS
+    if not redis_ok:
+        return Component(key, label, "unknown", "Redis に接続できないため確認できません")
+    try:
+        raw = await login_limit.client().get(IMAGES_KEY)
+        report = json.loads(raw) if raw else {}
+    except (RedisError, OSError, ValueError):
+        return Component(key, label, "unknown", "Redis に接続できないため確認できません")
+    if not report:
+        return Component(key, label, "unknown", "記録がありません（setup.sh で更新すると表示します）")
+    images = []
+    for img in report.get("images") or []:
+        at = _parse_at(img.get("created"))
+        if at and at.tzinfo:  # 記録は UTC（タイムゾーン付き）。比べる now は UTC（タイムゾーンなし）
+            at = at.astimezone(UTC).replace(tzinfo=None)
+        images.append({**img, "age_days": (now - at).days if at else None})
+    detail = {"reported_at": report.get("reported_at"), "images": images, "pull_failed": report.get("pull_failed") or [],
+              "stale_days": days}
+    if detail["pull_failed"]:
+        return Component(key, label, "warn",
+                         "イメージを取り直せませんでした（手元の古いイメージで動いています）: "
+                         + "、".join(_short_image(n) for n in detail["pull_failed"]),
+                         detail, items=[f"pull:{n}" for n in detail["pull_failed"]])
+    old = [i for i in images if days > 0 and i["age_days"] is not None and i["age_days"] > days]
+    if old:
+        names = "、".join(f"{_short_image(i['name'])}（{i['age_days']} 日前）" for i in old)
+        return Component(key, label, "warn",
+                         f"{days} 日より前に作られたイメージのまま動いています: {names}。"
+                         "setup.sh で更新すると取り直します", detail, items=[f"old:{i['name']}" for i in old])
+    return Component(key, label, "ok", f"{len(images)} 個のイメージ。どれも {days} 日以内に作られたものです", detail)
+
+
 async def check_git_export(redis_ok: bool = True) -> Component:
     key, label = "git_export", "外部 Git への push"
     if not git_export.enabled():
@@ -354,7 +418,7 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     if database.status == "ok":
         out += [await check_schedules(db), await check_collect(db, now)]
     return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok"),
-            await check_git_export(redis_c.status == "ok")]
+            await check_git_export(redis_c.status == "ok"), await check_images(now, redis_c.status == "ok")]
 
 
 def overall(components: list[Component]) -> str:

@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 
 /**
- * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push
+ * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push、コンテナのイメージの新しさ
  * 「止まっていることに気づけない」をなくすための画面。異常は通知設定（システムの異常）の通知先にも送られる
  */
 
@@ -25,8 +25,11 @@ interface Component {
     stale_days?: number; devices?: StaleDevice[]; volumes?: Volume[]; expires_at?: string; days_left?: number;
     last?: BackupResult | null; schedule?: { enabled: boolean; calendar: string | null; since: string } | null;
     url?: string; branch?: string; // 外部 Git（last は GitExportState）
+    images?: ImageInfo[]; pull_failed?: string[]; reported_at?: string; // コンテナのイメージ（setup.sh が伝える）
   };
 }
+/** コンテナのイメージ（名前・作成日時。stale_days より前なら古い） */
+interface ImageInfo { name: string; created: string | null; age_days: number | null; }
 /** 外部 Git への push の最後の結果（services/git_export.py） */
 interface GitExportState {
   at: string; ok: boolean; message?: string; error?: string; pushed?: string | null; last_success?: string | null; devices?: string[];
@@ -51,6 +54,7 @@ const HELP: Record<string, string> = {
   cert: "画面を表示するための証明書",
   backup: "DB・コンフィグ履歴・.env などの定期バックアップ（scripts/backup.sh）",
   git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
+  images: "PostgreSQL・Redis と、ビルドの土台（Python・Node.js・nginx）のイメージ。setup.sh で取り直す",
 };
 
 function fmt(iso: string | null | undefined): string {
@@ -127,6 +131,20 @@ function Detail({ c }: { c: Component }) {
   if (c.key === "cert" && d.expires_at) return <p className="sys-sub">期限: {fmt(d.expires_at)}</p>;
   if (c.key === "backup" && (d.last || d.schedule)) return <BackupDetail d={d} />;
   if (c.key === "git_export" && d.url) return <GitExportDetail d={d} />;
+  if (c.key === "images" && d.images) {
+    return (
+      <ul className="sys-list">
+        {d.images.map((i) => (
+          <li key={i.name} className="sys-wrap">
+            <span className="mono">{i.name.replace(/^docker\.io\/library\//, "")}</span>
+            ：{i.created ? `${fmt(i.created)}（${i.age_days} 日前）` : "作成日時が不明"}
+            {i.age_days != null && d.stale_days ? (i.age_days > d.stale_days ? " ⚠ 古い" : "") : ""}
+          </li>
+        ))}
+        {d.reported_at && <li>取り直した日時: {fmt(d.reported_at)}（setup.sh の実行時）</li>}
+      </ul>
+    );
+  }
   return null;
 }
 

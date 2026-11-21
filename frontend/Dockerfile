@@ -16,7 +16,9 @@ COPY . .
 RUN npm run build
 
 # ---- 本番用（docker-compose.prod.yml）: nginx で静的配信 + /api を backend へ中継 ----
-FROM docker.io/library/nginx:1.27-alpine AS prod
+# stable 系（1.30.x）のタグを使い、パッチは setup.sh がイメージを取り直して取り込む（#17・#18）。
+# 1.27 のようにマイナー版まで固定すると、その系列の更新が終わったときに修正が入らなくなる
+FROM docker.io/library/nginx:1.30-alpine AS prod
 # HTTP / HTTPS の設定。起動時に 40-netconfig-tls.sh が証明書の有無でどちらを使うか選ぶ
 COPY nginx/ /etc/nginx/netconfig/
 RUN cp /etc/nginx/netconfig/http.conf /etc/nginx/conf.d/default.conf \

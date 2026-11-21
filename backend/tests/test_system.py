@@ -1,7 +1,7 @@
 """システムの状態の確認と、異常の通知（ウォッチドッグ）"""
 import asyncio
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -306,3 +306,38 @@ def test_watchdog_backup_alerts(ctx, monkeypatch):
     report(*ok_args())
     assert tick(wd, now) == [("backup", "recovered")] and "復旧" in sent[-1][2]["text"]
     c.put("/api/notifications/me", json={"mode": "off", "slack_webhook": ""}, headers=admin)  # ほかのテストに残さない
+
+
+def test_image_status(ctx, monkeypatch):
+    """#18: setup.sh が伝えたイメージの作成日時が古い・取り直せなかったら注意"""
+    from app.tools import image_report
+
+    c, admin = ctx["c"], ctx["admin"]
+    monkeypatch.setattr(settings, "IMAGE_STALE_DAYS", 60)
+    asyncio.run(login_limit.client().delete(system.IMAGES_KEY))
+    assert by_key(c, admin)[1]["images"]["status"] == "unknown"
+
+    assert system.parse_image_created("2026-11-19 03:12:45.123456789 +0000 UTC") == datetime(2026, 11, 19, 3, 12, 45,
+                                                                                               tzinfo=UTC)
+    assert system.parse_image_created("2026-11-19T12:12:45+09:00") == datetime(2026, 11, 19, 3, 12, 45, tzinfo=UTC)
+    assert system.parse_image_created("不明") is None
+
+    fresh = (utcnow() - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S.000000000 +0000 UTC")
+    old = (utcnow() - timedelta(days=200)).strftime("%Y-%m-%d %H:%M:%S +0000 UTC")
+    assert asyncio.run(image_report.main(["--image", f"docker.io/library/postgres:16-alpine={fresh}",
+                                          "--image", f"docker.io/library/redis:7-alpine={fresh}"])) == 0
+    b = by_key(c, admin)[1]["images"]
+    assert b["status"] == "ok" and "2 個" in b["summary"] and b["detail"]["images"][0]["age_days"] == 3
+
+    asyncio.run(image_report.main(["--image", f"docker.io/library/nginx:1.27-alpine={old}",
+                                   "--image", f"docker.io/library/redis:7-alpine={fresh}"]))
+    b = by_key(c, admin)[1]["images"]
+    assert b["status"] == "warn" and "nginx:1.27-alpine（200 日前）" in b["summary"] and "redis" not in b["summary"]
+    monkeypatch.setattr(settings, "IMAGE_STALE_DAYS", 0)  # 0 で確認しない
+    assert by_key(c, admin)[1]["images"]["status"] == "ok"
+
+    asyncio.run(image_report.main(["--image", f"docker.io/library/redis:7-alpine={fresh}",
+                                   "--pull-failed", "docker.io/library/postgres:16-alpine"]))
+    b = by_key(c, admin)[1]["images"]
+    assert b["status"] == "warn" and "取り直せませんでした" in b["summary"] and "postgres:16-alpine" in b["summary"]
+    asyncio.run(login_limit.client().delete(system.IMAGES_KEY))

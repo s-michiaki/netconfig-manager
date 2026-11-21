@@ -108,7 +108,9 @@ bash setup.sh
 
 - `[ ]` 内の値は Enter でそのまま採用されます（初期管理者のパスワードはランダム生成）
 - `.env` の秘密値（DBパスワード・JWT鍵・機器パスワード暗号化キー）は自動生成し、`/root/netconfig-manager-backup/` にも控えを保存します
-- 2回目以降の実行は「更新」として動作します（`git pull` → 再ビルド → 再起動。既存の `.env` は変更しません）
+- 2回目以降の実行は「更新」として動作します（`git pull` → イメージの取り直し → 再ビルド → 再起動。既存の `.env` は変更しません）
+  - PostgreSQL・Redis のイメージと、ビルドの土台（Python・Node.js・nginx）のイメージを毎回取り直し、セキュリティ修正を取り込みます（同じタグでも中身は更新されるため）。取り直せない（インターネットに出られない等）ときは、警告を出して手元のイメージで続けます。使われなくなった古いイメージは消します（`podman image prune`）
+  - 取り直したイメージの作成日時は「システム状態」の「コンテナのイメージ」に表示します。OS や PostgreSQL などのセキュリティ修正を取り込むため、**月に 1 回程度は `setup.sh` を実行してください**
   - 更新では何も聞きません。ポートは `.env` の `HTTP_PORT`・`HTTPS_PORT` をそのまま使います
   - ポートや IP アドレスを聞き直したいときは `bash scripts/setup.sh --reconfigure`
   - `git pull` で `setup.sh` 自身が更新されたときは、新しい内容で自動的に最初からやり直します（2 回実行する必要はありません）
@@ -598,6 +600,7 @@ API が応答していても、worker やスケジューラーが止まってい
 | HTTPS の証明書 | 期限（30 日以内で注意、7 日以内で異常） | 画面を開けなくなる |
 | バックアップ | `scripts/backup.sh` の最後の結果（最後の成功の日時・保存先・サイズ・外部コピーの結果）。失敗で異常、外部への保管の失敗・`BACKUP_STALE_HOURS`（既定 36 時間）以上成功していないときは注意 | サーバーが壊れたときに戻せない |
 | 外部 Git への push | 設定したとき（`GIT_EXPORT_URL`）だけ。最後の push の結果。失敗で異常（「今すぐ push」で再実行） | GitLab / Gitea のコンフィグが古いまま |
+| コンテナのイメージ | `setup.sh` が伝えた PostgreSQL・Redis・ビルドの土台のイメージの作成日時。`IMAGE_STALE_DAYS`（既定 60 日、0 で確認しない）より古い・取り直せなかったときは注意 | セキュリティ修正が入っていない |
 
 注意・異常があるときは、管理者のメニューの「システム状態」に印（黄・赤）が付きます。
 
@@ -835,10 +838,10 @@ GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自
 
 - backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff と pytest（Python 3.12）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 22）
-- nginx: 本番と同じ nginx のイメージで設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
+- nginx: `frontend/Dockerfile` と同じ nginx のイメージか、脆弱性の修正版（`NGINX_MIN`、今は 1.30.7）以上かを確かめ、設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
-あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit` でロックファイルに書かれた版をそのまま検査、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `deps-smoke` は、本番と同じく `requirements.txt`（ロックファイル）だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため。ロックファイルは「宣言されていない依存」の不具合もそのまま固定してしまうので、ロックを更新したときの確認として残しています）。
+あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit` でロックファイルに書かれた版をそのまま検査、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `image-scan` は、本番のイメージ（backend・frontend をビルドしたものと PostgreSQL・Redis）を Trivy（版とハッシュを固定）で検査し、修正版が出ている HIGH 以上の脆弱性があれば失敗します（OS のパッケージ・nginx など、ロックファイルの外にあるもの）。見つかったらサーバーで `setup.sh` を実行して取り直し、土台の系列が古ければ Dockerfile・compose のタグを上げます。`deps-smoke` は、本番と同じく `requirements.txt`（ロックファイル）だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため。ロックファイルは「宣言されていない依存」の不具合もそのまま固定してしまうので、ロックを更新したときの確認として残しています）。
 
 ### 依存パッケージの更新（ロックファイル）
 
@@ -930,6 +933,7 @@ netconfig-manager/
 │       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック・モニタリングの定期取得）
 │       ├── tools/
 │       │   ├── backup_report.py # バックアップの結果をアプリに記録（backup.sh・setup.sh が podman exec で実行）
+│       │   ├── image_report.py  # コンテナのイメージの作成日時をアプリに記録（setup.sh が podman exec で実行）
 │       │   ├── encrypt_recordings.py  # 既存の平文のターミナル記録を暗号化（podman exec で実行）
 │       │   └── selfcheck.py     # 更新後の自己診断（worker・スケジューラーが動くか。setup.sh が実行）
 │       ├── core/
@@ -1045,6 +1049,7 @@ netconfig-manager/
 
 ## 今後の拡張ポイント
 
+- **イメージの更新の通知**: Dependabot / Renovate で Dockerfile・compose のイメージのタグの更新（nginx の stable 系の切り替わりなど）を知らせる
 - **認証強化**: LDAP/AD 連携、2 段階認証の必須化（ロールごと）、機器グループ単位の権限、ログイン中の端末（セッション）の一覧と個別の切断、複数プロセス構成でのターミナルの強制切断（Redis 経由の通知など）
 - **通知機能の拡張**: メール・Microsoft Teams への通知
 - **バックアップの拡張**: S3 などへの転送の組み込み（今は `BACKUP_POST_COMMAND` で対応）、公開鍵での暗号化（age など。サーバーに復号の鍵を置かない形）
