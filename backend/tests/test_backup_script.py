@@ -174,3 +174,51 @@ def test_failures_are_reported(env):
     # 設定の誤り
     r = run(e, BACKUP_COPY_KEEP_DAYS="x")
     assert r.returncode == 1 and "BACKUP_COPY_KEEP_DAYS" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("gpg") is None, reason="gpg が必要")
+def test_encrypted_backup_and_restore_decrypt(env):
+    """#15: パスフレーズのファイルを設定すると .tar.gz.gpg（平文のアーカイブを残さない）。restore.sh の手順で復号できる"""
+    tmp, e = env
+    pw = tmp / "backup.pass"
+    pw.write_text("test-passphrase-123\n")
+    dest = tmp / "nas"
+    dest.mkdir()
+    r = run(e, BACKUP_ENCRYPT_PASSPHRASE_FILE=str(pw), BACKUP_COPY_DIR=str(dest), BACKUP_COPY_REQUIRE_MOUNT="false")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not list((tmp / "backups").glob("*.tar.gz"))
+    [f] = list((tmp / "backups").glob("netconfig-backup-*.tar.gz.gpg"))
+    assert (dest / f.name).exists() and b"DEVICE_ENCRYPTION_KEY" not in f.read_bytes()
+    line = reports(tmp)[-1]
+    assert arg(line, "--encrypted") == "yes" and arg(line, "--file") == f.name
+    assert json.loads((tmp / "backups" / "last-result.json").read_text())["encrypted"] is True
+    assert f.name in run(e, "--list").stdout
+    # 復号（restore.sh と同じコマンド）。違うパスフレーズでは復号できない
+    out = tmp / "restored"
+    out.mkdir()
+    import tempfile
+
+    home = tempfile.mkdtemp()  # gpg-agent のソケットのパスが長すぎないよう短い場所にする
+    gpg = ["gpg", "--batch", "--quiet", "--pinentry-mode", "loopback", "--homedir", home]
+    plain = subprocess.run([*gpg, "--passphrase-file", str(pw), "-d", str(f)], capture_output=True, timeout=60)
+    assert plain.returncode == 0
+    subprocess.run(["tar", "-C", str(out), "-xzf", "-"], input=plain.stdout, check=True)
+    assert (out / "env").read_text() == "DEVICE_ENCRYPTION_KEY=abc\n" and "暗号化: gpg" in (out / "manifest.txt").read_text()
+    assert not (out / ".gnupg").exists()
+    bad = tmp / "bad.pass"
+    bad.write_text("wrong")
+    assert subprocess.run([*gpg, "--passphrase-file", str(bad), "-d", str(f)], capture_output=True).returncode != 0
+    subprocess.run(["gpgconf", "--homedir", home, "--kill", "gpg-agent"], capture_output=True)
+    shutil.rmtree(home, ignore_errors=True)
+    # 暗号化しないで外部へコピー → 結果に encrypted=no（システム状態で注意）
+    r = run(e, BACKUP_COPY_DIR=str(dest), BACKUP_COPY_REQUIRE_MOUNT="false")
+    assert r.returncode == 0 and "暗号化していません" in r.stdout and arg(reports(tmp)[-1], "--encrypted") == "no"
+
+
+def test_encryption_key_missing_fails(env):
+    tmp, e = env
+    r = run(e, BACKUP_ENCRYPT_PASSPHRASE_FILE=str(tmp / "nothing.pass"))
+    assert r.returncode == 1
+    assert not list((tmp / "backups").glob("netconfig-backup-*"))  # 暗号化しないで作る、ということはしない
+    line = reports(tmp)[-1]
+    assert arg(line, "--status") == "failed" and "パスフレーズのファイル" in line

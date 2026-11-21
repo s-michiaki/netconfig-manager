@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     PING_MONITOR_INTERVAL_SEC: int = Field(default=60, ge=10, le=3600)  # PING する間隔
     PING_ALERT_AFTER: int = Field(default=3, ge=1, le=60)  # この回数続けて応答が無ければ「応答なし」として通知
     PING_HISTORY_DAYS: int = Field(default=14, ge=1, le=365)  # 結果を残す日数
+    # コンフィグ検索の同時実行数（スレッドプールをログインなどのために残す）
+    SEARCH_MAX_PER_USER: int = Field(default=2, ge=1, le=20)  # ユーザーごと
+    SEARCH_MAX_CONCURRENT: int = Field(default=4, ge=1, le=30)  # 全体
 
     # --- モニタリング（試験導入中。既定は無効） ---
     # FW ルールのヒット数（PAN-OS・FortiGate を SSH で取得）とインタフェースの帯域（SNMP）

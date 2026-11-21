@@ -191,7 +191,8 @@ async def mfa_verify(request: Request, payload: MfaVerify, db: AsyncSession = De
         await record_now(db, make_log("auth.login_failed", username=user.username, ip=ip, success=False,
                                       detail={"reason": "ワンタイムパスワード誤り"}))
         raise HTTPException(status_code=401, detail="確認コードが正しくありません")
-    await login_limit.record_success(user.username, ip)
+    # パスワードの確認（/token）と、この確認コードの 2 回分を戻す（#13。1 回分だけだと接続元の回数が増えて残る）
+    await login_limit.record_success(user.username, ip, attempts=2)
     detail = {"mfa": "予備コード", "recovery_left": len(json.loads(user.mfa_recovery or "[]"))} if kind == "recovery" \
         else {"mfa": "ワンタイムパスワード"}
     db.add(make_log("auth.login", user=user, ip=ip, detail=detail))

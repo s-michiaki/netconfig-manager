@@ -3,6 +3,7 @@
 #
 #   DB（pg_dump）・コンフィグ履歴（Git リポジトリ）・SSH の known_hosts・ターミナルの記録・.env・証明書を
 #   1つのファイル（netconfig-backup-YYYYmmdd-HHMMSS.tar.gz）にまとめ、古いものを削除する。
+#   BACKUP_ENCRYPT_PASSPHRASE_FILE を設定すると、gpg（AES256）で暗号化した .tar.gz.gpg にする。
 #   setup.sh が systemd タイマー（netconfig-backup.timer）として毎日実行するよう登録する。
 #
 # 使い方（root で実行）:
@@ -17,12 +18,15 @@
 #   BACKUP_COPY_REQUIRE_MOUNT=true              コピー先が BACKUP_DIR・/ と別のディスク（マウントしたもの）であることを確かめる
 #   BACKUP_COPY_KEEP_DAYS=                      コピー先の保存日数（空なら BACKUP_KEEP_DAYS と同じ）
 #   BACKUP_POST_COMMAND=                        作成後に実行するコマンド（rsync・scp など。ファイルは $BACKUP_FILE）
+#   BACKUP_ENCRYPT_PASSPHRASE_FILE=             暗号化のパスフレーズを書いたファイル（例 /root/netconfig-backup.pass）。
+#                                               空なら暗号化しない。**バックアップと別の場所にも保管すること**（無いと復元できない）
 #
 # 結果は backend コンテナの app.tools.backup_report でアプリに伝える（画面「システム状態」・異常の通知）。
 # 終了コード: 0 = 成功、1 = 失敗（バックアップを作れなかった）、2 = サーバー内には作れたが、外部への保管に失敗
 #
 # ※ .env（DEVICE_ENCRYPTION_KEY）と証明書の秘密鍵を含むため、バックアップは root だけが読めるようにしている。
-#   バックアップを持ち出す・外部にコピーするときは取り扱いに注意すること（機器のパスワードを復号できる）。
+#   暗号化しない場合、バックアップを持ち出す・外部にコピーするときは取り扱いに注意すること（機器のパスワードを復号できる）。
+#   外部へコピーする（BACKUP_COPY_DIR・BACKUP_POST_COMMAND）なら暗号化を推奨（しないと「システム状態」で注意を出す）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,16 +47,19 @@ BACKUP_COPY_DIR="${BACKUP_COPY_DIR:-$(env_value BACKUP_COPY_DIR "")}"
 BACKUP_COPY_REQUIRE_MOUNT="${BACKUP_COPY_REQUIRE_MOUNT:-$(env_value BACKUP_COPY_REQUIRE_MOUNT true)}"
 BACKUP_COPY_KEEP_DAYS="${BACKUP_COPY_KEEP_DAYS:-$(env_value BACKUP_COPY_KEEP_DAYS "$BACKUP_KEEP_DAYS")}"
 BACKUP_POST_COMMAND="${BACKUP_POST_COMMAND:-$(env_value BACKUP_POST_COMMAND "")}"
+BACKUP_ENCRYPT_PASSPHRASE_FILE="${BACKUP_ENCRYPT_PASSPHRASE_FILE:-$(env_value BACKUP_ENCRYPT_PASSPHRASE_FILE "")}"
+ENCRYPTED="no"
+[ -n "$BACKUP_ENCRYPT_PASSPHRASE_FILE" ] && ENCRYPTED="yes"
 POST_TIMEOUT=3600  # BACKUP_POST_COMMAND の制限時間（秒）
 RESULT_FILE="$BACKUP_DIR/last-result.json"  # 最後の結果（アプリに伝えられなかったときの確認用）
 
 log() { echo "$(date '+%F %T') $*"; }
 
 if [ "${1:-}" = "--list" ]; then
-  ls -lh "$BACKUP_DIR"/netconfig-backup-*.tar.gz 2>/dev/null || echo "バックアップはありません（$BACKUP_DIR）"
+  ls -lh "$BACKUP_DIR"/netconfig-backup-*.tar.gz{,.gpg} 2>/dev/null || echo "バックアップはありません（$BACKUP_DIR）"
   if [ -n "$BACKUP_COPY_DIR" ]; then
     echo "■ コピー先（$BACKUP_COPY_DIR）"
-    ls -lh "$BACKUP_COPY_DIR"/netconfig-backup-*.tar.gz 2>/dev/null || echo "コピーはありません（マウントされているか確認してください）"
+    ls -lh "$BACKUP_COPY_DIR"/netconfig-backup-*.tar.gz{,.gpg} 2>/dev/null || echo "コピーはありません（マウントされているか確認してください）"
   fi
   [ -f "$RESULT_FILE" ] && { echo "■ 最後の結果"; cat "$RESULT_FILE"; echo; }
   exit 0
@@ -66,6 +73,7 @@ done
 DB=""
 BACKEND=""
 WORK=""
+GNUPG_TMP=""
 OUT=""
 STAGE="開始"          # 失敗したときに、どこで止まったかを伝える
 START=$(date +%s)
@@ -92,8 +100,9 @@ report() { # $1 = ok / failed, $2 = 文
     {
       printf '{"at": %s, "status": %s, "file": %s, "size": %s, "seconds": %s, ' \
         "$(json_str "$(date '+%F %T %z')")" "$(json_str "$status")" "$(json_str "$file")" "$size" "$secs"
-      printf '"copy": %s, "copy_dir": %s, "post": %s, "message": %s}\n' \
-        "$(json_str "$COPY_STATUS")" "$(json_str "$BACKUP_COPY_DIR")" "$(json_str "$POST_STATUS")" "$(json_str "$msg")"
+      printf '"copy": %s, "copy_dir": %s, "post": %s, "encrypted": %s, "message": %s}\n' \
+        "$(json_str "$COPY_STATUS")" "$(json_str "$BACKUP_COPY_DIR")" "$(json_str "$POST_STATUS")" \
+        "$([ "$ENCRYPTED" = yes ] && echo true || echo false)" "$(json_str "$msg")"
     } > "$RESULT_FILE" 2>/dev/null || true
   fi
   if [ -z "$BACKEND" ]; then
@@ -103,7 +112,7 @@ report() { # $1 = ok / failed, $2 = 文
   # 標準入力は渡さない（-i なし）。止まったままにならないよう時間を区切る
   if ! timeout 60 "$CONTAINER_CMD" exec "$BACKEND" python -m app.tools.backup_report result --status "$status" \
       --file "$file" --size "$size" --seconds "$secs" --dir "$BACKUP_DIR" --copy "$COPY_STATUS" \
-      --copy-dir "$BACKUP_COPY_DIR" --post "$POST_STATUS" --message "$msg" >/dev/null 2>&1; then
+      --copy-dir "$BACKUP_COPY_DIR" --post "$POST_STATUS" --encrypted "$ENCRYPTED" --message "$msg" >/dev/null 2>&1; then
     log "[WARN] 結果を画面に伝えられませんでした（$RESULT_FILE に記録しました）"
   fi
 }
@@ -111,6 +120,10 @@ report() { # $1 = ok / failed, $2 = 文
 on_exit() {
   local rc=$?
   [ -n "$WORK" ] && rm -rf "$WORK"
+  if [ -n "$GNUPG_TMP" ]; then
+    GNUPGHOME="$GNUPG_TMP" gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+    rm -rf "$GNUPG_TMP"
+  fi
   [ -n "$OUT" ] && rm -f "$OUT.part"
   if [ "$rc" -ne 0 ] && [ "$REPORTED" -eq 0 ]; then
     log "[ERROR] バックアップに失敗しました（「$STAGE」で失敗。終了コード $rc）"
@@ -132,6 +145,17 @@ STAGE="コンテナの確認"
 BACKEND=$(container_of backend)
 DB=$(container_of db)
 
+STAGE="暗号化の準備"
+if [ "$ENCRYPTED" = "yes" ]; then
+  # 鍵が読めないまま暗号化しないで作る、ということはしない（失敗として伝え、設定を直してもらう）
+  command -v gpg >/dev/null || { log "[ERROR] 暗号化に gpg が必要です（dnf install gnupg2）"; exit 1; }
+  if [ ! -s "$BACKUP_ENCRYPT_PASSPHRASE_FILE" ]; then
+    log "[ERROR] BACKUP_ENCRYPT_PASSPHRASE_FILE（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が無いか空です"
+    report failed "暗号化のパスフレーズのファイル（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が無いか空です"
+    exit 1
+  fi
+fi
+
 STAGE="保存先の準備"
 umask 077
 mkdir -p "$BACKUP_DIR"
@@ -139,7 +163,9 @@ chmod 700 "$BACKUP_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
 WORK=$(mktemp -d "$BACKUP_DIR/.work-$TS-XXXX")
 
-log "[INFO] バックアップ開始 → $BACKUP_DIR/netconfig-backup-$TS.tar.gz"
+OUT_NAME="netconfig-backup-$TS.tar.gz"
+[ "$ENCRYPTED" = "yes" ] && OUT_NAME="$OUT_NAME.gpg"
+log "[INFO] バックアップ開始 → $BACKUP_DIR/$OUT_NAME"
 
 # DB（カスタム形式。復元は pg_restore）
 STAGE="DB のダンプ"
@@ -168,12 +194,23 @@ NetConfig Manager バックアップ
 ホスト: $(hostname)
 コミット: $VERSION
 内容: $(cd "$WORK" && ls | tr '\n' ' ')
+暗号化: $([ "$ENCRYPTED" = yes ] && echo "gpg（AES256）" || echo "なし")
 復元: bash scripts/restore.sh <このファイル>
 EOF
 
 STAGE="アーカイブの作成"
-OUT="$BACKUP_DIR/netconfig-backup-$TS.tar.gz"
-tar -C "$WORK" -czf "$OUT.part" .
+OUT="$BACKUP_DIR/$OUT_NAME"
+if [ "$ENCRYPTED" = "yes" ]; then
+  # 平文のアーカイブをディスクに置かずに暗号化する。gpg の設定は一時ディレクトリに作る（root の ~/.gnupg を使わない。
+  # gpg-agent のソケットのパスが長すぎないよう /tmp の短い名前にする）
+  STAGE="アーカイブの作成と暗号化"
+  GNUPG_TMP=$(mktemp -d)
+  tar -C "$WORK" -czf - . \
+    | GNUPGHOME="$GNUPG_TMP" gpg --batch --yes --quiet --pinentry-mode loopback \
+        --passphrase-file "$BACKUP_ENCRYPT_PASSPHRASE_FILE" --symmetric --cipher-algo AES256 -o "$OUT.part"
+else
+  tar -C "$WORK" -czf "$OUT.part" .
+fi
 mv "$OUT.part" "$OUT"
 log "[INFO] 作成しました: $OUT（$(du -h "$OUT" | cut -f1)）"
 # ここから先の失敗では、作ったバックアップを消さない（成功として扱い、外部への保管の失敗は別に伝える）
@@ -182,9 +219,10 @@ STAGE="後片付け"
 # 古いバックアップの削除（最新の1つは必ず残す）。$1 = ディレクトリ, $2 = 保存日数
 prune() {
   local latest
-  latest=$(find "$1" -maxdepth 1 -name 'netconfig-backup-*.tar.gz' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+  local names=( \( -name 'netconfig-backup-*.tar.gz' -o -name 'netconfig-backup-*.tar.gz.gpg' \) )
+  latest=$(find "$1" -maxdepth 1 "${names[@]}" -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
   [ -n "$latest" ] || return 0
-  find "$1" -maxdepth 1 -name 'netconfig-backup-*.tar.gz' -mtime +"$2" ! -path "$latest" -print -delete \
+  find "$1" -maxdepth 1 "${names[@]}" -mtime +"$2" ! -path "$latest" -print -delete \
     | sed "s/^/$(date '+%F %T') [INFO] 削除: /"
 }
 prune "$BACKUP_DIR" "$BACKUP_KEEP_DAYS" || log "[WARN] 古いバックアップの削除に失敗しました（$BACKUP_DIR）"
@@ -225,7 +263,11 @@ copy_offsite() {
 }
 
 if [ -n "$BACKUP_COPY_DIR" ]; then
-  log "[INFO] サーバー外へコピーします → $BACKUP_COPY_DIR（.env と証明書の秘密鍵を含むため、root 相当の人だけが読める場所にしてください）"
+  if [ "$ENCRYPTED" = "yes" ]; then
+    log "[INFO] サーバー外へコピーします → $BACKUP_COPY_DIR（暗号化済み）"
+  else
+    log "[WARN] サーバー外へコピーします → $BACKUP_COPY_DIR（暗号化していません。.env と証明書の秘密鍵を含むため、root 相当の人だけが読める場所にするか、BACKUP_ENCRYPT_PASSPHRASE_FILE で暗号化してください）"
+  fi
   if copy_offsite; then
     COPY_STATUS="ok"
   else

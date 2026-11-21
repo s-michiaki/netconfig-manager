@@ -32,6 +32,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     r.add_argument("--copy", choices=OFFSITE, default="none")
     r.add_argument("--copy-dir", default="")
     r.add_argument("--post", choices=OFFSITE, default="none")
+    r.add_argument("--encrypted", choices=("yes", "no", ""), default="")  # 空 = 古い backup.sh（不明）
     r.add_argument("--message", default="")
     s = sub.add_parser("schedule", help="定期バックアップ（systemd タイマー）の登録状況")
     s.add_argument("state", choices=("on", "off"))
@@ -58,7 +59,8 @@ async def report_result(args: argparse.Namespace) -> str:
 
     result = {"at": utcnow().isoformat(), "status": args.status, "file": args.file[:200], "size": args.size,
               "seconds": args.seconds, "dir": args.dir[:500], "copy": args.copy, "copy_dir": args.copy_dir[:500],
-              "post": args.post, "message": args.message[:500]}
+              "post": args.post, "message": args.message[:500],
+              "encrypted": {"yes": True, "no": False}.get(args.encrypted)}
     await system.record_backup_result(result)
     event, text = describe(result)
     async with AsyncSessionLocal() as db:

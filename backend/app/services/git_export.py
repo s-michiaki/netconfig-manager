@@ -21,6 +21,7 @@ import re
 import shlex
 import stat
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +68,25 @@ def safe_name(name: str) -> str:
 def mask_url(url: str) -> str:
     """URL に書かれた認証情報（https://user:pass@host）を伏せる（画面・ログ用）"""
     return re.sub(r"(https?://)[^/@\s]+@", r"\1***@", url)
+
+
+def split_url(url: str) -> tuple[str, str, str]:
+    """（認証情報を除いた URL, ユーザー名, パスワード）。HTTPS の URL に書かれた user:pass@ を取り出す（#14）
+
+    取り出した値は push のときだけ環境変数で git に渡し、.git/config（バックアップにも入る）には書かない。
+    SSH の URL（git@host:path）の「git@」は認証情報ではないので、そのまま
+    """
+    p = urllib.parse.urlsplit(url)
+    if p.scheme not in ("http", "https") or "@" not in p.netloc:
+        return url, "", ""
+    host = p.netloc.rsplit("@", 1)[1]
+    clean = urllib.parse.urlunsplit((p.scheme, host, p.path, p.query, p.fragment))
+    return clean, urllib.parse.unquote(p.username or ""), urllib.parse.unquote(p.password or "")
+
+
+def url_has_credentials(url: str) -> bool:
+    _, user, password = split_url(url.strip())
+    return bool(user or password)
 
 
 def _layout(devices: list[DeviceFile]) -> dict[str, DeviceFile]:
@@ -191,7 +211,8 @@ def _askpass_script(tmp: str) -> str:
 
 def push(repo: git.Repo) -> str:
     """origin（GIT_EXPORT_URL）の GIT_EXPORT_BRANCH へ push する。push したコミットを返す"""
-    url = settings.GIT_EXPORT_URL.strip()
+    # URL に認証情報が書かれていても、.git/config には除いた URL を保存する（以前の版で保存した分もここで消える）
+    url, url_user, url_pass = split_url(settings.GIT_EXPORT_URL.strip())
     if "origin" in [r.name for r in repo.remotes]:
         if repo.remotes.origin.url != url:
             repo.remotes.origin.set_url(url)
@@ -204,6 +225,9 @@ def push(repo: git.Repo) -> str:
         if settings.GIT_EXPORT_TOKEN:
             env.update(GIT_ASKPASS=_askpass_script(tmp), NCM_GIT_USERNAME=settings.GIT_EXPORT_USERNAME or "oauth2",
                        NCM_GIT_TOKEN=settings.GIT_EXPORT_TOKEN)
+        elif url_user or url_pass:  # URL に書かれた認証情報（非推奨。システム状態で注意を出す）
+            env.update(GIT_ASKPASS=_askpass_script(tmp), NCM_GIT_USERNAME=url_user or "oauth2",
+                       NCM_GIT_TOKEN=url_pass)
         if settings.GIT_EXPORT_SSH_KEY:
             known = settings.GIT_EXPORT_KNOWN_HOSTS
             Path(known).parent.mkdir(parents=True, exist_ok=True)

@@ -308,6 +308,11 @@ async def check_backup(now: datetime, redis_ok: bool = True) -> Component:
         return Component("backup", label, "warn",
                          f"サーバー内には保存しましたが、{'と'.join(failed)}に失敗しました" + (f": {msg}" if msg else ""),
                          detail, items=[f"offsite:{at}"])
+    if last.get("encrypted") is False and (last.get("copy"), last.get("post")) != ("none", "none"):
+        # 外部へ出すのに暗号化していない: 1 つ漏れれば .env の鍵で全機器のパスワードを復号できる（#15）
+        return Component("backup", label, "warn",
+                         "バックアップをサーバーの外へ保管していますが、暗号化していません"
+                         "（BACKUP_ENCRYPT_PASSPHRASE_FILE を設定してください）", detail, items=["unencrypted"])
     copied = "。外部へのコピーも成功" if last.get("copy") == "ok" else ""
     return Component("backup", label, "ok", f"前回のバックアップは成功しました（{_size_text(last.get('size'))}{copied}）",
                      detail)
@@ -332,6 +337,11 @@ async def check_git_export(redis_ok: bool = True) -> Component:
     if not state.get("ok"):
         return Component(key, label, "error", f"push に失敗しています: {state.get('error') or '原因不明'}", detail,
                          items=[(state.get("error") or "")[:80]])
+    if git_export.url_has_credentials(settings.GIT_EXPORT_URL):
+        # 動くが、.env を見られると漏れる。調査用ログ・.git/config には残らないが、設定の場所を移してもらう（#14）
+        return Component(key, label, "warn",
+                         "GIT_EXPORT_URL に認証情報が書かれています。GIT_EXPORT_USERNAME / GIT_EXPORT_TOKEN に移してください",
+                         detail, items=["URL の認証情報"])
     return Component(key, label, "ok", state.get("message") or "push できています", detail)
 
 

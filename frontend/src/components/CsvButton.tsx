@@ -1,4 +1,5 @@
 import { useState } from "react";
+import axios from "axios";
 import { api } from "../api/client";
 
 /** Content-Disposition からファイル名を取り出す（日本語の名前は filename*=UTF-8''... に入っている） */
@@ -27,9 +28,28 @@ function saveBlob(data: Blob, disposition: string, fallback: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+/**
+ * blob で受け取ると、エラーの応答（{"detail": "..."}）も blob になり、errorMessage で理由を表示できない。
+ * JSON に読み直してから投げ直す（429「前の検索が終わるまでお待ちください」などを画面に出すため）
+ */
+async function withJsonError<T>(request: () => Promise<T>): Promise<T> {
+  try {
+    return await request();
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
+      try {
+        err.response.data = JSON.parse(await err.response.data.text());
+      } catch {
+        // JSON でなければそのまま（errorMessage の既定の文言になる）
+      }
+    }
+    throw err;
+  }
+}
+
 /** ファイルをダウンロードする（認証ヘッダーが要るため blob で受け取る） */
 export async function downloadFile(path: string, params: Record<string, unknown>, fallback: string) {
-  const r = await api.get<Blob>(path, { params, responseType: "blob" });
+  const r = await withJsonError(() => api.get<Blob>(path, { params, responseType: "blob" }));
   saveBlob(r.data, String(r.headers["content-disposition"] ?? ""), fallback);
 }
 
@@ -38,7 +58,7 @@ export async function downloadFile(path: string, params: Record<string, unknown>
  * 応答ヘッダーを返す（件数などを画面で知らせるため）
  */
 export async function downloadFilePost(path: string, body: unknown, fallback: string) {
-  const r = await api.post<Blob>(path, body, { responseType: "blob" });
+  const r = await withJsonError(() => api.post<Blob>(path, body, { responseType: "blob" }));
   saveBlob(r.data, String(r.headers["content-disposition"] ?? ""), fallback);
   return r.headers;
 }

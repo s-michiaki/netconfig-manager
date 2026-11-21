@@ -7,8 +7,10 @@
 - パスワードを照合する**前に**数える（begin_attempt）。上限を超えた試行は照合せずに止め、
   LOGIN_LOCK_MIN 分（既定 15 分）その単位でのログインを止める（正しいパスワードでも 429）
   照合の後に数えると、同時に大量に送られたリクエストがすべて照合まで進んでしまうため
-- 成功したら、その試行は数えない（「ユーザー名 × 接続元」の回数は消し、「接続元」は1回分戻す）。
-  同じ接続元（NAT の内側など）から普通にログインする人が多くても止まらないように
+- 成功したら、その試行は数えない（「ユーザー名 × 接続元」の回数は消し、「接続元」は成功した分だけ戻す）。
+  同じ接続元（NAT の内側など）から普通にログインする人が多くても止まらないように。
+  2 段階認証のログインは、パスワード（/token）と確認コード（/mfa/verify）で 2 回数えるので、成功したら 2 回分戻す
+  （間違えたコードの分は戻さない）
 - ユーザー名だけでは止めない（他人が管理者を締め出せてしまうため）。接続元 IP は nginx が付ける値を使う
 - 存在しないユーザー名でも同じように数え・止めるので、応答からユーザーの有無は分からない
 - Redis に接続できないときは制限せずにログインを通す（警告をログに出す）。Redis が止まっても管理者が入れるように
@@ -70,13 +72,13 @@ async def begin_attempt(username: str, ip: str | None) -> tuple[int, list[str]]:
         return 0, []
 
 
-async def record_success(username: str, ip: str | None) -> None:
-    """成功した試行は数えない"""
+async def record_success(username: str, ip: str | None, attempts: int = 1) -> None:
+    """成功した試行は数えない。attempts: 成功までに数えた試行のうち、成功の分（2 段階認証は 2）"""
     (user_key, _), (ip_key, _) = _keys(username, ip)
     try:
         r = client()
         await r.delete(f"{PREFIX}:fail:{user_key}")
-        if await r.decr(f"{PREFIX}:fail:{ip_key}") <= 0:
+        if await r.decrby(f"{PREFIX}:fail:{ip_key}", attempts) <= 0:
             await r.delete(f"{PREFIX}:fail:{ip_key}")
     except RedisError as e:
         logger.warning("ログインの試行回数の消去に失敗しました: %s", e)

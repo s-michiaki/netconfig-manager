@@ -226,3 +226,30 @@ def test_search_history():
         row = next(x for x in text.splitlines() if x.startswith(f"srchh-{uid},"))
         assert ",いいえ," in row and oldest[:7] in row and second[:7] in row
         c.delete(f"/api/devices/{did}", headers=admin)
+
+
+def test_search_concurrency_limit(monkeypatch):
+    """#16: 検索（CSV 出力も）はユーザーごと・全体で同時に実行できる数に上限があり、超えたら待たせずに 429"""
+    from app.api import configs
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SEARCH_MAX_PER_USER", 2)
+    monkeypatch.setattr(settings, "SEARCH_MAX_CONCURRENT", 3)
+    monkeypatch.setattr(configs, "_running", configs.Counter())
+    body = {"query": "hostname", "scope": "history"}
+    with TestClient(app) as c:
+        h = login(c, "admin", "initial-pass-123")
+        me = c.get("/api/auth/me", headers=h).json()["id"]
+        configs._running[me] = 2  # 自分の検索が 2 件実行中
+        for path in ("/api/configs/search", "/api/configs/search/export"):
+            r = c.post(path, json=body, headers=h)
+            assert r.status_code == 429 and "前の検索" in r.json()["detail"], r.text
+        configs._running[me] = 1
+        configs._running["other-user"] = 2  # 全体で 3 件実行中
+        r = c.post("/api/configs/search", json=body, headers=h)
+        assert r.status_code == 429 and "ほかの検索" in r.json()["detail"]
+        del configs._running["other-user"]
+        assert c.post("/api/configs/search", json=body, headers=h).status_code == 200
+        assert configs._running == {me: 1}  # 終わった検索の分は戻る（エラーでも戻る）
+        assert c.post("/api/configs/search", json={"query": "("  , "mode": "regex"}, headers=h).status_code == 422
+        assert configs._running == {me: 1}

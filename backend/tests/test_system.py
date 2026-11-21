@@ -228,6 +228,17 @@ def test_backup_status(ctx, monkeypatch):
     acts = c.get("/api/activity/logs", params={"category": "backup"}, headers=admin).json()["items"]
     assert acts[0]["event"] == "backup.completed" and "/mnt/nas/netconfig" in acts[0]["message"]
 
+    # 外部へコピーしたのに暗号化していない → 注意（#15）。暗号化していれば成功、ローカルだけなら注意しない
+    report(*ok_args(**{"--copy": "ok", "--copy-dir": "/mnt/nas", "--encrypted": "no"}))
+    b = by_key(c, admin)[1]["backup"]
+    assert b["status"] == "warn" and "暗号化していません" in b["summary"] and b["detail"]["last"]["encrypted"] is False
+    report(*ok_args(**{"--post": "ok", "--encrypted": "no"}))
+    assert by_key(c, admin)[1]["backup"]["status"] == "warn"
+    report(*ok_args(**{"--copy": "ok", "--copy-dir": "/mnt/nas", "--encrypted": "yes"}))
+    assert by_key(c, admin)[1]["backup"]["status"] == "ok"
+    report(*ok_args(**{"--encrypted": "no"}))
+    assert by_key(c, admin)[1]["backup"]["status"] == "ok"
+
     # 外部へのコピーだけ失敗 → 注意
     report(*ok_args(**{"--copy": "failed", "--copy-dir": "/mnt/nas", "--message": "コピー先がありません"}))
     b = by_key(c, admin)[1]["backup"]

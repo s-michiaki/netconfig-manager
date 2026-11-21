@@ -117,3 +117,46 @@ def test_mfa_code_failures_are_limited():
         assert c.post("/api/auth/mfa/verify",
                       json={"mfa_token": mfa_token, "code": _now_code(s["secret"], 1)}).status_code == 429
         assert c.delete(f"/api/users/{uid}", headers=admin).status_code == 204
+
+
+
+def test_mfa_logins_do_not_fill_the_ip_counter(monkeypatch):
+    """#13: 2 段階認証のログインに成功しても、接続元の回数が増えて残らない（NAT の内側の全員が止まらない）"""
+    import asyncio
+
+    from app.core.config import settings
+    from app.core.database import AsyncSessionLocal
+    from app.models.user import User
+    from app.services import login_limit
+
+    monkeypatch.setattr(settings, "LOGIN_MAX_FAILURES_PER_IP", 4)
+
+    async def forget_last_step(uid):  # 同じ時間枠のコードは 2 度使えないため、試験では最後の時間枠を消す
+        async with AsyncSessionLocal() as db:
+            u = await db.get(User, uid)
+            u.mfa_last_step = None
+            await db.commit()
+
+    with TestClient(app) as c:
+        admin = {"Authorization": "Bearer " + _token(c, "admin", "initial-pass-123").json()["access_token"]}
+        name = f"mfac-{uuid.uuid4().hex[:6]}"
+        uid = c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"},
+                     headers=admin).json()["id"]
+        h = {"Authorization": "Bearer " + _token(c, name, "password-1234").json()["access_token"]}
+        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
+        # 接続元の上限（4 回）を超える 6 回、続けてログインに成功しても止まらない
+        for i in range(6):
+            asyncio.run(forget_last_step(uid))
+            t = _token(c, name, "password-1234")
+            assert t.status_code == 200, (i, t.text)
+            r = c.post("/api/auth/mfa/verify", json={"mfa_token": t.json()["mfa_token"], "code": _now_code(s["secret"])})
+            assert r.status_code == 200, (i, r.text)
+        n = asyncio.run(login_limit.client().get(f"{login_limit.PREFIX}:fail:ip:testclient"))
+        assert n is None, n  # 成功だけなら回数は残らない
+        # 確認コードを間違えた分は数える
+        asyncio.run(forget_last_step(uid))
+        t = _token(c, name, "password-1234").json()
+        assert c.post("/api/auth/mfa/verify", json={"mfa_token": t["mfa_token"], "code": "000000"}).status_code == 401
+        assert int(asyncio.run(login_limit.client().get(f"{login_limit.PREFIX}:fail:ip:testclient"))) == 2
+        assert c.delete(f"/api/users/{uid}", headers=admin).status_code == 204

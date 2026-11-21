@@ -1,3 +1,5 @@
+from collections import Counter
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -9,12 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.config_comments import comment_dict, comments_for
-from app.api.deps import require
+from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
 from app.models.device import Device, DeviceGroup
+from app.models.user import User
 from app.services import config_search
 from app.services.audit import Audit, get_audit
 from app.services.config_service import (
@@ -180,6 +183,28 @@ def _period(body: SearchRequest) -> tuple[datetime | None, datetime | None]:
     return since, until
 
 
+# 検索の同時実行数（#16）。検索はスレッドプール（ログインの bcrypt などと共有。既定 40 本）で動き、
+# 過去の世代を含めると 1 回で最大 HISTORY_TIMEOUT_SEC 秒かかる。連打や複数のタブでスレッドが埋まらないよう、
+# ユーザーごとと全体で上限を設け、超えたら待たせずに 429 を返す。API は 1 プロセスなのでプロセス内で数える
+_running: Counter[str] = Counter()
+
+
+@contextmanager
+def _search_slot(user: User):
+    total = sum(_running.values())
+    if _running[user.id] >= settings.SEARCH_MAX_PER_USER:
+        raise HTTPException(status_code=429, detail="前の検索が終わるまでお待ちください")
+    if total >= settings.SEARCH_MAX_CONCURRENT:
+        raise HTTPException(status_code=429, detail="ほかの検索を実行中です。しばらくしてからもう一度お試しください")
+    _running[user.id] += 1  # 確認から加算まで await を挟まないので、同時のリクエストでも数え漏れない
+    try:
+        yield
+    finally:
+        _running[user.id] -= 1
+        if _running[user.id] <= 0:
+            del _running[user.id]
+
+
 def _run_search(body: SearchRequest, targets: list, context: int, max_lines: int, max_total: int | None):
     if body.scope == "history":
         since, until = _period(body)
@@ -223,12 +248,15 @@ async def _search_targets(db: AsyncSession, body: SearchRequest) -> list[config_
 
 # 検索語を URL（アクセスログ）に残さないよう POST にしている
 @router.post("/search", dependencies=[Depends(require(Perm.CONFIG_READ))])
-async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)):
+async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db),
+                         user: User = Depends(get_current_user)):
     """全機器（または絞り込んだ機器）の最新コンフィグ（scope=history なら過去の世代も）を横断検索する"""
     targets = await _search_targets(db, body)
     if body.scope == "history":
         _period(body)  # 期間の確認（スレッドへ渡す前にエラーを返す）
-    res = await run_in_threadpool(_run_search, body, targets, body.context, config_search.MAX_LINES_PER_DEVICE, None)
+    with _search_slot(user):
+        res = await run_in_threadpool(_run_search, body, targets, body.context, config_search.MAX_LINES_PER_DEVICE,
+                                      None)
     return {
         "scope": body.scope,
         "commits_searched": res.commits_searched,
@@ -245,7 +273,8 @@ async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/search/export", dependencies=[Depends(require(Perm.CONFIG_READ))])
-async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit),
+                        user: User = Depends(get_current_user)):
     """検索結果の CSV（機器・行番号・一致した行）。画面の表示（機器ごとに 50 行）とは別に、一致した行をすべて出す
 
     - 合計の上限は MAX_EXPORT_ROWS 行、時間の制限は検索と同じ。前後の行は含めない。1 行は検索と同じ長さで切る
@@ -255,7 +284,8 @@ async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db),
     targets = await _search_targets(db, body)
     if body.scope == "history":
         _period(body)
-    res = await run_in_threadpool(_run_search, body, targets, 0, MAX_EXPORT_ROWS, MAX_EXPORT_ROWS)
+    with _search_slot(user):
+        res = await run_in_threadpool(_run_search, body, targets, 0, MAX_EXPORT_ROWS, MAX_EXPORT_ROWS)
     if body.scope == "history":
         header = ["機器名", "ホスト / IP", "機種", "グループ", "いまもある", "最初に見つかった世代", "その日時",
                   "最後に見つかった世代", "その日時", "一致した行"]

@@ -140,6 +140,7 @@ else
 fi
 
 # .env: 秘密の値は伏せる（キーの名前で判断。値が空かどうかは分かるようにする）
+#   秘密でないキーの値も redact に通し、URL に書かれた認証情報（https://user:token@host）は伏せる（#14）
 if $SUDO test -f "$INSTALL_DIR/.env"; then
   $SUDO cat "$INSTALL_DIR/.env" 2>/dev/null | awk '
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
@@ -150,7 +151,7 @@ if $SUDO test -f "$INSTALL_DIR/.env"; then
         print key "=" (val == "" ? "（空）" : "***（" length(val) " 文字）")
       else
         print key "=" val
-    }' > "$ROOT/app/env.txt"
+    }' | redact | sed -E 's#(https?://)[^/@[:space:]]+@#\1***@#g' > "$ROOT/app/env.txt"
 else
   echo ".env がありません（$INSTALL_DIR/.env）。setup.sh が途中で止まった可能性があります" > "$ROOT/app/env.txt"
   echo "env.txt: .env がありません" >> "$ERRORS"

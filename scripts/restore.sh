@@ -3,6 +3,11 @@
 #
 # 使い方（root で実行）:
 #   bash scripts/restore.sh /var/backups/netconfig-manager/netconfig-backup-YYYYmmdd-HHMMSS.tar.gz
+#   bash scripts/restore.sh .../netconfig-backup-YYYYmmdd-HHMMSS.tar.gz.gpg   # 暗号化したもの
+#
+# 暗号化したバックアップ（.gpg）は、パスフレーズのファイルで復号する。ファイルは次の順に探す:
+#   環境変数 BACKUP_ENCRYPT_PASSPHRASE_FILE → .env の BACKUP_ENCRYPT_PASSPHRASE_FILE。どちらも無ければ入力を求める
+#   （別のサーバーへ復元するときは、別に保管しておいたパスフレーズが要る）
 #
 # 処理の流れ:
 #   1. アプリのコンテナ（backend / worker / beat / frontend）を止める（db と redis は動かしたまま）
@@ -36,8 +41,35 @@ env_value() { (grep -E "^$2=" "$1" 2>/dev/null || true) | tail -1 | cut -d= -f2-
 
 umask 077
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
-tar -C "$WORK" -xzf "$FILE"
+GNUPG_TMP=""
+cleanup() {
+  if [ -n "$GNUPG_TMP" ]; then
+    GNUPGHOME="$GNUPG_TMP" gpgconf --kill gpg-agent >/dev/null 2>&1 || true
+    rm -rf "$GNUPG_TMP"
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+if [[ "$FILE" == *.gpg ]]; then
+  command -v gpg >/dev/null || { echo "暗号化したバックアップの復号に gpg が必要です（dnf install gnupg2）"; exit 1; }
+  PASS_FILE="${BACKUP_ENCRYPT_PASSPHRASE_FILE:-$(env_value "$INSTALL_DIR/.env" BACKUP_ENCRYPT_PASSPHRASE_FILE)}"
+  if [ -z "$PASS_FILE" ] || [ ! -s "$PASS_FILE" ]; then
+    [ -t 0 ] || { echo "パスフレーズのファイルが見つかりません（BACKUP_ENCRYPT_PASSPHRASE_FILE を指定してください）"; exit 1; }
+    read -r -s -p "バックアップのパスフレーズ: " pass; echo
+    PASS_FILE="$WORK/.pass"
+    printf '%s' "$pass" > "$PASS_FILE"
+    unset pass
+  fi
+  GNUPG_TMP=$(mktemp -d)
+  if ! GNUPGHOME="$GNUPG_TMP" gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$PASS_FILE" \
+      -d "$FILE" | tar -C "$WORK" -xzf -; then
+    echo "復号できませんでした（パスフレーズが違うか、ファイルが壊れています）: $FILE"
+    exit 1
+  fi
+  rm -f "$WORK/.pass"
+else
+  tar -C "$WORK" -xzf "$FILE"
+fi
 [ -f "$WORK/manifest.txt" ] && [ -f "$WORK/db.dump" ] || { echo "NetConfig Manager のバックアップではありません: $FILE"; exit 1; }
 echo "----------------------------------------"
 cat "$WORK/manifest.txt"

@@ -157,3 +157,34 @@ def test_helpers(tmp_path):
     assert subprocess.run([script, "Username for 'https://x'"], env=env, capture_output=True, text=True).stdout == "oauth2"
     assert subprocess.run([script, "Password for 'https://x'"], env=env, capture_output=True, text=True).stdout == "tok-123"
     assert json.loads(json.dumps({"ok": True}))["ok"]
+
+
+def test_url_credentials_are_not_stored(tmp_path, monkeypatch):
+    """#14: GIT_EXPORT_URL に書いた認証情報は .git/config・エラー表示に残さず、システム状態で注意を出す"""
+    split = git_export.split_url
+    assert split("https://u%40x:p%2Fw@gitlab.local:8443/a.git") == ("https://gitlab.local:8443/a.git", "u@x", "p/w")
+    assert split("https://tok@gitlab.local/a.git") == ("https://gitlab.local/a.git", "tok", "")
+    assert split("git@gitea.local:net/a.git") == ("git@gitea.local:net/a.git", "", "")  # SSH の git@ は対象外
+    assert split("https://gitlab.local/a.git")[1:] == ("", "")
+    assert git_export.url_has_credentials(" https://u:p@h/a.git ") and not git_export.url_has_credentials("/srv/a.git")
+
+    repo = git.Repo.init(tmp_path / "w")
+    (tmp_path / "w" / "a.txt").write_text("x")
+    repo.index.add(["a.txt"])
+    repo.index.commit("init")
+    repo.create_remote("origin", "https://u:old-secret@127.0.0.1:1/a.git")  # 以前の版で保存された URL
+    monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://u:new-secret@127.0.0.1:1/a.git")
+    monkeypatch.setattr(settings, "GIT_EXPORT_TOKEN", "")
+    monkeypatch.setattr(settings, "GIT_EXPORT_TIMEOUT", 10)
+    with pytest.raises(RuntimeError) as e:
+        git_export.push(repo)  # つながらない相手。push の前に origin を書き直している
+    assert "secret" not in str(e.value)
+    config = (tmp_path / "w" / ".git" / "config").read_text()
+    assert "secret" not in config and "https://127.0.0.1:1/a.git" in config
+
+
+def test_status_warns_url_credentials(env, monkeypatch):
+    env["r"].set(git_export.STATE_KEY, json.dumps({"ok": True, "message": "push しました"}))
+    monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://u:secret@gitlab.local/a.git")
+    comp = system_component(env)
+    assert comp.status == "warn" and "GIT_EXPORT_TOKEN" in comp.summary and "secret" not in json.dumps(comp.detail)

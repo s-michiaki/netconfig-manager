@@ -15,6 +15,7 @@ type Offsite = "none" | "ok" | "failed";
 interface BackupResult {
   at: string; status: "ok" | "failed"; file: string; size: number; seconds: number; dir: string;
   copy: Offsite; copy_dir: string; post: Offsite; message: string;
+  encrypted?: boolean | null; // null・無し = 古い backup.sh（不明）
 }
 interface Component {
   key: string; label: string; status: Status; summary: string;
@@ -79,6 +80,9 @@ function BackupDetail({ d }: { d: Component["detail"] }) {
         <>
           <li className="sys-wrap">外部へのコピー: {OFFSITE[last.copy]}{last.copy_dir ? `（${last.copy_dir}）` : ""}</li>
           {last.post !== "none" && <li>後処理のコマンド: {OFFSITE[last.post]}</li>}
+          {typeof last.encrypted === "boolean" && (
+            <li>暗号化: {last.encrypted ? "する（gpg）" : "しない"}</li>
+          )}
         </>
       )}
       {d.schedule && (
