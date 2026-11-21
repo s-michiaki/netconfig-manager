@@ -20,5 +20,11 @@ COPY . .
 # コンフィグ世代管理用リポジトリ・SSH known_hosts・ターミナルの記録の置き場所（ボリュームをマウントする）
 RUN mkdir -p /app/configs /data/ssh /data/terminal-logs
 
+# OS のパッケージのセキュリティ修正を取り込む（土台のイメージが作り直されるのを待たずに）。
+# setup.sh が OS_UPGRADE に日付を渡すので、ビルドのキャッシュがあっても日に 1 回はやり直す（#18）
+ARG OS_UPGRADE=
+RUN echo "OS_UPGRADE=${OS_UPGRADE}" && apt-get update && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

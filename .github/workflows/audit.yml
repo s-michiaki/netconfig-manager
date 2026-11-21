@@ -95,14 +95,17 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   image-scan:
-    # 修正版が出ている HIGH 以上の脆弱性があれば失敗する（修正版の無いものは出さない）。
-    # 見つかったら、サーバーで setup.sh を実行して取り直す（土台が古い系列なら Dockerfile・compose のタグを上げる）
+    # backend・frontend（ここでビルドするイメージ）: 修正版が出ている HIGH 以上の脆弱性があれば失敗する。
+    #   Dockerfile で OS のパッケージを更新しているので、残っていれば土台の系列が古いなど、こちらで直すもの
+    # PostgreSQL・Redis（公式のイメージをそのまま使う）: 結果を表示するだけ（こちらでは直せず、公式の作り直しを待って
+    #   setup.sh で取り直す。gosu の Go の標準ライブラリなど、公式が対応しないと消えないものもある）
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Trivy は 2026-03 に配布物が改ざんされた（CVE-2026-33634）ため、版とハッシュを固定して入れる
       TRIVY_VERSION: 0.75.0
       TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+      TRIVY_DISABLE_VEX_NOTICE: "1"
     steps:
       - uses: actions/checkout@v4
       - name: Trivy のインストール（ハッシュを確認）
@@ -113,19 +116,25 @@ jobs:
           tar -xzf "$f" trivy && sudo mv trivy /usr/local/bin/ && trivy --version
       - name: 本番のイメージを用意
         run: |
-          docker build --pull -q -t ncm-backend:scan backend
-          docker build --pull -q --target prod -t ncm-frontend:scan frontend
+          d=$(date +%Y%m%d)
+          docker build --pull -q --build-arg OS_UPGRADE="$d" -t ncm-backend:scan backend
+          docker build --pull -q --build-arg OS_UPGRADE="$d" --target prod -t ncm-frontend:scan frontend
           for img in $(sed -n 's#^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\).*#\1#p' docker-compose.prod.yml); do
             docker pull -q "$img"
-            echo "$img" >> /tmp/images
           done
-          printf '%s\n' ncm-backend:scan ncm-frontend:scan >> /tmp/images
-      - name: 脆弱性の検査
+      - name: 公式のイメージ（PostgreSQL・Redis。表示のみ）
+        run: |
+          for img in $(sed -n 's#^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\).*#\1#p' docker-compose.prod.yml); do
+            echo "::group::$img"
+            trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed "$img"
+            echo "::endgroup::"
+          done
+      - name: ビルドしたイメージ（backend・frontend）
         run: |
           rc=0
-          while read -r img; do
+          for img in ncm-backend:scan ncm-frontend:scan; do
             echo "::group::$img"
             trivy image --quiet --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$img" || rc=1
             echo "::endgroup::"
-          done < /tmp/images
+          done
           exit $rc

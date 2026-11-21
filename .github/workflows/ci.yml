@@ -85,7 +85,7 @@ jobs:
         run: |
           grep -qx "FROM $IMAGE AS prod" frontend/Dockerfile || { echo "frontend/Dockerfile の prod ステージと IMAGE が違います"; exit 1; }
           docker pull -q "$IMAGE"
-          v=$(docker run --rm "$IMAGE" nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9.]*\).*#\1#p')
+          v=$(docker run --rm --entrypoint nginx "$IMAGE" -v 2>&1 | grep -o 'nginx/[0-9.]*' | head -1 | cut -d/ -f2)
           echo "nginx $v"
           [ "$(printf '%s\n%s\n' "$NGINX_MIN" "$v" | sort -V | head -1)" = "$NGINX_MIN" ] \
             || { echo "nginx $v は $NGINX_MIN より古い（脆弱性が未修正）"; exit 1; }

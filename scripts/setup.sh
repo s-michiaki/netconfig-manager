@@ -366,8 +366,9 @@ for img in $IMAGES; do
     PULL_FAILED+=("$img")
   fi
 done
-sudo podman-compose -f "$COMPOSE_FILE" build
-sudo podman-compose -f "$COMPOSE_FILE" up -d --force-recreate
+# OS_UPGRADE: Dockerfile の OS のパッケージの更新（apt-get upgrade / apk upgrade）を、キャッシュがあっても日に 1 回はやり直す
+sudo env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" build
+sudo env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" up -d --force-recreate
 # 取り直し・作り直しで使われなくなった古いイメージ（名前の無いもの）を消す（ディスクの圧迫を防ぐ）
 sudo podman image prune -f >/dev/null 2>&1 || true
 

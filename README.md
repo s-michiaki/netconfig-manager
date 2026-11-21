@@ -110,6 +110,7 @@ bash setup.sh
 - `.env` の秘密値（DBパスワード・JWT鍵・機器パスワード暗号化キー）は自動生成し、`/root/netconfig-manager-backup/` にも控えを保存します
 - 2回目以降の実行は「更新」として動作します（`git pull` → イメージの取り直し → 再ビルド → 再起動。既存の `.env` は変更しません）
   - PostgreSQL・Redis のイメージと、ビルドの土台（Python・Node.js・nginx）のイメージを毎回取り直し、セキュリティ修正を取り込みます（同じタグでも中身は更新されるため）。取り直せない（インターネットに出られない等）ときは、警告を出して手元のイメージで続けます。使われなくなった古いイメージは消します（`podman image prune`）
+  - backend・frontend のビルドでは、OS のパッケージも更新します（`apt-get upgrade` / `apk upgrade`。公式のイメージが作り直される前に出た修正を取り込むため。ビルドのキャッシュがあっても日に 1 回はやり直します）
   - 取り直したイメージの作成日時は「システム状態」の「コンテナのイメージ」に表示します。OS や PostgreSQL などのセキュリティ修正を取り込むため、**月に 1 回程度は `setup.sh` を実行してください**
   - 更新では何も聞きません。ポートは `.env` の `HTTP_PORT`・`HTTPS_PORT` をそのまま使います
   - ポートや IP アドレスを聞き直したいときは `bash scripts/setup.sh --reconfigure`
@@ -841,7 +842,7 @@ GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自
 - nginx: `frontend/Dockerfile` と同じ nginx のイメージか、脆弱性の修正版（`NGINX_MIN`、今は 1.30.7）以上かを確かめ、設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
 
-あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit` でロックファイルに書かれた版をそのまま検査、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `image-scan` は、本番のイメージ（backend・frontend をビルドしたものと PostgreSQL・Redis）を Trivy（版とハッシュを固定）で検査し、修正版が出ている HIGH 以上の脆弱性があれば失敗します（OS のパッケージ・nginx など、ロックファイルの外にあるもの）。見つかったらサーバーで `setup.sh` を実行して取り直し、土台の系列が古ければ Dockerfile・compose のタグを上げます。`deps-smoke` は、本番と同じく `requirements.txt`（ロックファイル）だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため。ロックファイルは「宣言されていない依存」の不具合もそのまま固定してしまうので、ロックを更新したときの確認として残しています）。
+あわせて `.github/workflows/audit.yml` が、依存パッケージの既知の脆弱性を確認します（push のたびと毎週月曜。backend は `pip-audit` でロックファイルに書かれた版をそのまま検査、frontend は `npm audit --omit=dev --audit-level=high`）。同じワークフローの `image-scan` は、本番のイメージを Trivy（版とハッシュを固定）で検査します（OS のパッケージ・nginx など、ロックファイルの外にあるもの）。ここでビルドする backend・frontend は、修正版が出ている HIGH 以上の脆弱性があれば失敗します（土台の系列が古ければ Dockerfile のタグを上げます）。公式のイメージをそのまま使う PostgreSQL・Redis は、こちらでは直せないので結果を表示するだけです（公式が作り直したら `setup.sh` で取り直します）。`deps-smoke` は、本番と同じく `requirements.txt`（ロックファイル）だけを入れた環境で API・worker を読み込み、Redis へタスクを登録できるかを確かめます（テストのジョブは開発用パッケージも入れるため、本番にだけ無いパッケージへの依存を見逃すことがあるため。ロックファイルは「宣言されていない依存」の不具合もそのまま固定してしまうので、ロックを更新したときの確認として残しています）。
 
 ### 依存パッケージの更新（ロックファイル）
 

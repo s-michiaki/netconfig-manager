@@ -98,6 +98,7 @@ services:
   backend:
     build:
       context: ./backend
+      args: { OS_UPGRADE: "${OS_UPGRADE:-}" }  # setup.sh が日付を渡す（OS のパッケージの更新を日に 1 回やり直す）
     restart: unless-stopped
     # Ping監視: サーバーから ICMP を送るための権限（特権ソケット / 非特権ソケットのどちらでも送れるようにする）
     cap_add:
@@ -117,6 +118,7 @@ services:
   worker:
     build:
       context: ./backend
+      args: { OS_UPGRADE: "${OS_UPGRADE:-}" }  # setup.sh が日付を渡す（OS のパッケージの更新を日に 1 回やり直す）
     restart: unless-stopped
     # Ping監視の常時監視（worker が PING する）にも、backend と同じ ICMP の権限が要る
     cap_add:
@@ -134,6 +136,7 @@ services:
   beat:
     build:
       context: ./backend
+      args: { OS_UPGRADE: "${OS_UPGRADE:-}" }  # setup.sh が日付を渡す（OS のパッケージの更新を日に 1 回やり直す）
     restart: unless-stopped
     environment: *backend-env
     depends_on: *backend-depends
@@ -143,6 +146,7 @@ services:
     build:
       context: ./frontend
       target: prod
+      args: { OS_UPGRADE: "${OS_UPGRADE:-}" }
     restart: unless-stopped
     environment:
       # HTTP から HTTPS へ転送するときのポート（外から見たポート番号）
