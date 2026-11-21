@@ -8,6 +8,7 @@
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
   on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
   on_ping（Ping監視の応答なし・復旧）
+- 通知先は Discord / Slack の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
 import json
@@ -56,6 +57,8 @@ class NotificationSetting(Base):
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="inherit")
     discord_webhook: Mapped[str | None] = mapped_column(EncryptedString(1024), nullable=True)
     slack_webhook: Mapped[str | None] = mapped_column(EncryptedString(1024), nullable=True)
+    # メールの宛先（カンマ区切り。送信はメールサーバーの設定＝mail_server を使う）
+    email_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     all_devices: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     device_group_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON の配列
     include_ungrouped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -91,3 +94,7 @@ class NotificationSetting(Base):
         if device_group_id is None:
             return self.include_ungrouped
         return device_group_id in self.group_ids
+
+    @property
+    def emails(self) -> list[str]:
+        return [a.strip() for a in (self.email_to or "").split(",") if a.strip()]

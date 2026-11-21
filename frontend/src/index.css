@@ -757,6 +757,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 
 /* ===== 通知設定 ===== */
 .ntf-card { max-width: 860px; }
+/* メールサーバー（通知設定） */
+.mail-grid { display: grid; grid-template-columns: 2fr 1fr 1.2fr; gap: 12px; }
+.mail-grid .form-group { min-width: 0; }
+.mail-grid-2 { grid-template-columns: 1fr 1fr; }
+.mail-hint { margin: -6px 0 12px; }
+.mail-consent { border: 1px solid var(--color-border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+.mail-consent ol { margin: 6px 0 8px 18px; }
+@media (max-width: 720px) { .mail-grid { grid-template-columns: 1fr; } }
 .ntf-lead { font-size: 13px; margin-bottom: 12px; line-height: 1.6; }
 .ntf-muted { font-size: 12px; color: var(--color-muted); line-height: 1.6; }
 .ntf-ok { font-size: 12px; color: var(--color-success); margin-top: 8px; }

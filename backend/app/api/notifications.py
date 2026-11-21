@@ -21,8 +21,9 @@ from app.core.permissions import Perm
 from app.models.device import CredentialProfileAccess, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
+from app.services import mail
 from app.services.audit import Audit, get_audit
-from app.services.notify import KINDS, mask_webhook, resolve_destinations, send_test, valid_webhook
+from app.services.notify import KINDS, has_target, mask_webhook, resolve_destinations, send_test, valid_webhook
 
 router = APIRouter()
 
@@ -33,11 +34,12 @@ WebhookUrl = Annotated[str, StringConstraints(strip_whitespace=True, max_length=
 
 
 class NotificationIn(BaseModel):
-    """Webhook は None なら変更しない、空文字なら削除する"""
+    """Webhook・メールの宛先は None なら変更しない、空文字なら削除する"""
 
     mode: Literal["inherit", "custom", "off"]
     discord_webhook: WebhookUrl | None = None
     slack_webhook: WebhookUrl | None = None
+    email_to: Annotated[str, StringConstraints(max_length=3000)] | None = None  # カンマ・改行区切り
     all_devices: bool = True
     device_group_ids: list[str] = Field(default_factory=list, max_length=500)
     include_ungrouped: bool = False
@@ -59,6 +61,7 @@ class NotificationOut(BaseModel):
     slack_webhook: str | None = None
     has_discord: bool = False
     has_slack: bool = False
+    email_to: list[str] = []
     all_devices: bool = True
     device_group_ids: list[str] = []
     include_ungrouped: bool = False
@@ -105,7 +108,7 @@ class GroupOut(BaseModel):
 
 class PreviewItem(BaseModel):
     kind: str
-    webhook: str  # 伏せ字
+    webhook: str  # 伏せ字（メールはメールアドレス）
     via: list[str]
 
 
@@ -121,6 +124,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         slack_webhook=mask_webhook(s.slack_webhook),
         has_discord=bool(s.discord_webhook),
         has_slack=bool(s.slack_webhook),
+        email_to=s.emails,
         all_devices=s.all_devices,
         device_group_ids=s.group_ids,
         include_ungrouped=s.include_ungrouped,
@@ -148,6 +152,17 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
             raise HTTPException(
                 status_code=422, detail=f"{kind.capitalize()} の Webhook URL の形式が正しくありません（{example}）"
             )
+    emails = mail.parse_addresses(p.email_to) if p.email_to else []
+    if emails:
+        if len(emails) > mail.MAX_RECIPIENTS:
+            raise HTTPException(status_code=422, detail=f"メールの宛先は {mail.MAX_RECIPIENTS} 件までです")
+        cfg = await mail.load_config(db)
+        if not cfg.enabled:
+            raise HTTPException(status_code=422,
+                                detail="メール送信が設定されていません（管理者が「通知設定 → メールサーバー」で設定します）")
+        for a in emails:
+            if err := mail.check_address(a, cfg.allowed_domains):
+                raise HTTPException(status_code=422, detail=err)
     ids = list(dict.fromkeys(p.device_group_ids))
     if ids:
         found = set((await db.execute(select(DeviceGroup.id).where(DeviceGroup.id.in_(ids)))).scalars())
@@ -165,6 +180,9 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
         if v is not None:
             setattr(s, f"{kind}_webhook", v or None)
             changes[f"{kind}_webhook"] = "（変更）" if v else "（削除）"
+    if p.email_to is not None:
+        s.email_to = ",".join(emails) or None
+        changes["email_to"] = len(emails)
     s.mode = p.mode
     s.all_devices = p.all_devices
     s.device_group_ids = json.dumps(ids)
@@ -177,17 +195,18 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system
                                     or p.on_inventory or p.on_ping):
         raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
-    if p.mode == "custom" and not (s.discord_webhook or s.slack_webhook):
-        raise HTTPException(status_code=422, detail="通知先（Discord または Slack の Webhook URL）を1つ以上登録してください")
+    if p.mode == "custom" and not has_target(s):
+        raise HTTPException(status_code=422,
+                            detail="通知先（Discord・Slack の Webhook URL かメールの宛先）を1つ以上登録してください")
     if p.mode == "custom" and not p.all_devices and not ids and not p.include_ungrouped:
         raise HTTPException(status_code=422, detail="通知の対象にする機器グループを1つ以上選んでください")
     return s, changes
 
 
-async def _test(s: NotificationSetting | None, label: str) -> dict:
-    if s is None or not (s.discord_webhook or s.slack_webhook):
+async def _test(db: AsyncSession, s: NotificationSetting | None, label: str) -> dict:
+    if not has_target(s):
         raise HTTPException(status_code=400, detail="通知先が登録されていません")
-    results = await send_test(s, label)
+    results = await send_test(s, label, await mail.load_config(db) if s.emails else None)
     return {"results": {k: (err or "ok") for k, err in results.items()}}
 
 
@@ -232,7 +251,7 @@ async def test_my_notification(
     user: User = Depends(require(Perm.NOTIFY_SELF)),
     audit: Audit = Depends(get_audit),
 ):
-    result = await _test(await _get_setting(db, "user", user.id), f"ユーザー {user.username}")
+    result = await _test(db, await _get_setting(db, "user", user.id), f"ユーザー {user.username}")
     audit("notify.test", target_type="user", target_id=user.id, target_name=user.username, detail=result["results"])
     await db.commit()
     return result
@@ -338,7 +357,7 @@ async def delete_group(group_id: str, db: AsyncSession = Depends(get_db), audit:
 @router.post("/groups/{group_id}/test", dependencies=[Depends(require(Perm.USER_ADMIN))])
 async def test_group_notification(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     g = await _get_group(db, group_id)
-    result = await _test(await _get_setting(db, "group", g.id), f"グループ {g.name}")
+    result = await _test(db, await _get_setting(db, "group", g.id), f"グループ {g.name}")
     audit("notify.test", target_type="user_group", target_id=g.id, target_name=g.name, detail=result["results"])
     await db.commit()
     return result
@@ -349,4 +368,5 @@ async def preview(device_group_id: str | None = None, event: PreviewEvent = "cha
                   db: AsyncSession = Depends(get_db)):
     """指定した機器グループ（未指定なら未分類）の機器で event が起きたとき、どこへ通知されるか"""
     dests = await resolve_destinations(db, device_group_id or None, event)
-    return [PreviewItem(kind=d.kind, webhook=mask_webhook(d.url) or "", via=sorted(d.via)) for d in dests]
+    return [PreviewItem(kind=d.kind, webhook=(d.url if d.kind == "email" else mask_webhook(d.url) or ""), via=sorted(d.via))
+            for d in dests]

@@ -18,6 +18,7 @@ from app.api import (
     device_groups,
     devices,
     jump_hosts,
+    mail,
     monitoring,
     notifications,
     ping,
@@ -89,7 +90,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.49.0",
+    version="1.50.0",
     lifespan=lifespan,
 )
 
@@ -124,6 +125,7 @@ app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependenci
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"], dependencies=protected)
 app.include_router(ping.router, prefix="/api/ping", tags=["ping"], dependencies=protected)
 app.include_router(system.router, prefix="/api/system", tags=["system"], dependencies=protected)
+app.include_router(mail.router, prefix="/api/mail", tags=["mail"], dependencies=protected)
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
 app.include_router(monitoring.router, prefix="/api/monitoring", tags=["monitoring"], dependencies=protected)
 app.include_router(

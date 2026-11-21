@@ -26,6 +26,7 @@ interface Component {
     last?: BackupResult | null; schedule?: { enabled: boolean; calendar: string | null; since: string } | null;
     url?: string; branch?: string; // 外部 Git（last は GitExportState）
     images?: ImageInfo[]; pull_failed?: string[]; reported_at?: string; // コンテナのイメージ（setup.sh が伝える）
+    host?: string; auth?: string; mail_last?: { at: string; ok: boolean } | null; // メール送信
   };
 }
 /** コンテナのイメージ（名前・作成日時。stale_days より前なら古い） */
@@ -55,6 +56,7 @@ const HELP: Record<string, string> = {
   backup: "DB・コンフィグ履歴・.env などの定期バックアップ（scripts/backup.sh）",
   git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
   images: "PostgreSQL・Redis と、ビルドの土台（Python・Node.js・nginx）のイメージ。setup.sh で取り直す",
+  mail: "メール通知の送信（通知設定 → メールサーバー）。最後の送信の結果",
 };
 
 function fmt(iso: string | null | undefined): string {
@@ -131,6 +133,14 @@ function Detail({ c }: { c: Component }) {
   if (c.key === "cert" && d.expires_at) return <p className="sys-sub">期限: {fmt(d.expires_at)}</p>;
   if (c.key === "backup" && (d.last || d.schedule)) return <BackupDetail d={d} />;
   if (c.key === "git_export" && d.url) return <GitExportDetail d={d} />;
+  if (c.key === "mail" && d.host) {
+    return (
+      <ul className="sys-list">
+        <li>SMTP サーバー: <span className="mono">{d.host}</span>（{d.auth}）</li>
+        {d.mail_last && <li>最後の送信: {fmt(d.mail_last.at)}（{d.mail_last.ok ? "成功" : "失敗"}）</li>}
+      </ul>
+    );
+  }
   if (c.key === "images" && d.images) {
     return (
       <ul className="sys-list">

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import MailServerTab from "../components/MailServerTab";
 
 /**
- * 通知（Discord / Slack）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
+ * 通知（Discord / Slack / メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
  * - 自分の通知: 所属グループの設定を使う / 個別に設定する / 通知しない
  * - ユーザーグループ（管理者）: メンバーとグループの通知先・対象
+ * - メールサーバー（管理者）: メールの送信の設定（SMTP Auth・OAuth 2.0）
  */
 
 type Mode = "inherit" | "custom" | "off";
@@ -15,6 +17,7 @@ interface Notification {
   slack_webhook: string | null;
   has_discord: boolean;
   has_slack: boolean;
+  email_to: string[];
   all_devices: boolean;
   device_group_ids: string[];
   include_ungrouped: boolean;
@@ -35,7 +38,9 @@ interface UserGroup { id: string; name: string; description: string | null; memb
 interface UserItem { id: string; username: string; role_label?: string; is_active: boolean; }
 interface PreviewItem { kind: string; webhook: string; via: string[]; }
 
-const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack" };
+const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack", email: "メール" };
+
+const hasTarget = (n: Notification) => n.has_discord || n.has_slack || (n.email_to?.length ?? 0) > 0;
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -66,7 +71,7 @@ function eventsText(n: Notification): string {
 }
 
 function channelText(n: Notification): string {
-  const c = [n.has_discord && "Discord", n.has_slack && "Slack"].filter(Boolean);
+  const c = [n.has_discord && "Discord", n.has_slack && "Slack", n.email_to?.length && `メール（${n.email_to.length} 件）`].filter(Boolean);
   return c.length ? c.join("・") : "（未登録）";
 }
 
@@ -75,6 +80,7 @@ function channelText(n: Notification): string {
 interface FormState {
   discord: string; clearDiscord: boolean;
   slack: string; clearSlack: boolean;
+  email: string; // 1 行に 1 件
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
   on_change: boolean; on_violation: boolean; on_failure: boolean; on_system: boolean;
   on_inventory: boolean; on_ping: boolean;
@@ -82,7 +88,7 @@ interface FormState {
 
 function initForm(n: Notification | null): FormState {
   return {
-    discord: "", clearDiscord: false, slack: "", clearSlack: false,
+    discord: "", clearDiscord: false, slack: "", clearSlack: false, email: (n?.email_to ?? []).join("\n"),
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
     on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false, on_system: n?.on_system ?? true,
     on_inventory: n?.on_inventory ?? true, on_ping: n?.on_ping ?? true,
@@ -95,6 +101,7 @@ function toPayload(mode: Mode, f: FormState) {
     // 空欄は変更なし（null）、削除にチェックがあれば空文字で削除
     discord_webhook: f.clearDiscord ? "" : f.discord.trim() || null,
     slack_webhook: f.clearSlack ? "" : f.slack.trim() || null,
+    email_to: f.email.trim(), // 空なら削除
     all_devices: f.all_devices,
     device_group_ids: f.all_devices ? [] : f.device_group_ids,
     include_ungrouped: f.all_devices ? false : f.include_ungrouped,
@@ -135,6 +142,14 @@ function TargetForm({
           </div>
         );
       })}
+      <div className="form-group">
+        <label className="form-label" htmlFor={`${idPrefix}-email`}>メールの宛先（1 行に 1 件、10 件まで）</label>
+        <textarea id={`${idPrefix}-email`} rows={2} value={form.email} onChange={(e) => set("email", e.target.value)}
+          placeholder="network-team@example.com" />
+        <p className="ntf-muted" style={{ marginTop: 4 }}>
+          送信には管理者による「メールサーバー」の設定が必要です。宛先ごとに 1 通ずつ送ります（ほかの宛先は見えません）
+        </p>
+      </div>
       <div className="form-group">
         <span className="form-label">通知する内容</span>
         {EVENT_OPTIONS.map(([k, label, hint]) => (
@@ -186,7 +201,7 @@ function TestResult({ r }: { r: Record<string, string> | null }) {
     <div className="ntf-test">
       {Object.entries(r).map(([k, v]) => (
         <div key={k}>
-          {KIND_LABEL[k]}: {v === "ok" ? <span style={{ color: "var(--color-success)" }}>送信しました</span> : <span style={{ color: "var(--color-danger)" }}>{v}</span>}
+          {k.startsWith("email:") ? `メール（${k.slice(6)}）` : KIND_LABEL[k]}: {v === "ok" ? <span style={{ color: "var(--color-success)" }}>送信しました</span> : <span style={{ color: "var(--color-danger)" }}>{v}</span>}
         </div>
       ))}
     </div>
@@ -237,11 +252,11 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const activeGroups = data.groups.filter((g) => g.notification.mode === "custom");
   return (
     <div className="card ntf-card">
-      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なしを、Discord / Slack に要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
+      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なしを、Discord / Slack・メールに要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
       <div className="ntf-modes" role="radiogroup">
         {([
           ["inherit", "所属グループの設定を使う", "管理者が設定したユーザーグループの通知先・対象で通知します"],
-          ["custom", "個別に設定する", "自分の Webhook と、通知する機器のグループを指定します"],
+          ["custom", "個別に設定する", "自分の Webhook・メールの宛先と、通知する機器のグループを指定します"],
           ["off", "通知しない", ""],
         ] as [Mode, string, string][]).map(([v, label, desc]) => (
           <label key={v} className={`ntf-mode${mode === v ? " active" : ""}`}>
@@ -286,7 +301,7 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
       {msg && <p className="ntf-ok">{msg}</p>}
       <TestResult r={test} />
       <div className="btn-row">
-        {mode === "custom" && (data.has_discord || data.has_slack) && (
+        {mode === "custom" && hasTarget(data) && (
           <button className="btn" onClick={sendTest}>テスト通知を送る</button>
         )}
         <button className="btn btn-primary" onClick={save} disabled={busy}>保存</button>
@@ -413,7 +428,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
       )}
       {error && <p className="form-error">{error}</p>}
       <div className="ntf-toolbar">
-        <p className="ntf-muted">「所属グループの設定を使う」ユーザーは、所属する各グループ（通知が有効なもの）の設定で通知されます。同じ Webhook へは1回だけ送ります。</p>
+        <p className="ntf-muted">「所属グループの設定を使う」ユーザーは、所属する各グループ（通知が有効なもの）の設定で通知されます。同じ Webhook・メールの宛先へは1回だけ送ります。</p>
         <button className="btn btn-primary" onClick={() => setEditing("new")}>＋ ユーザーグループを作成</button>
       </div>
       {groups.length === 0 && <div className="card ntf-muted">ユーザーグループはまだありません。</div>}
@@ -424,7 +439,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
               <b>{g.name}</b>
               {g.notification.mode === "custom" ? <span className="badge badge-success">通知 有効</span> : <span className="badge badge-neutral">通知 無効</span>}
               <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                {(g.notification.has_discord || g.notification.has_slack) && <button className="btn btn-sm" onClick={() => test(g)}>テスト通知</button>}
+                {hasTarget(g.notification) && <button className="btn btn-sm" onClick={() => test(g)}>テスト通知</button>}
                 <button className="btn btn-sm" onClick={() => setEditing(g)}>編集</button>
                 <button className="btn btn-sm btn-danger" onClick={() => remove(g)}>削除</button>
               </span>
@@ -461,7 +476,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
         {preview && (
           preview.length === 0 ? <p className="ntf-muted" style={{ marginTop: 8 }}>通知先はありません</p> : (
             <table className="data-table" style={{ marginTop: 8 }}>
-              <thead><tr><th>通知先</th><th>Webhook</th><th>理由</th></tr></thead>
+              <thead><tr><th>通知先</th><th>Webhook・宛先</th><th>理由</th></tr></thead>
               <tbody>
                 {preview.map((p) => (
                   <tr key={p.kind + p.webhook}><td>{KIND_LABEL[p.kind]}</td><td className="mono">{p.webhook}</td><td>{p.via.join("、")}</td></tr>
@@ -478,7 +493,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
 export default function NotificationsPage() {
   const { can } = useAuth();
   const isAdmin = can(PERM.USER_ADMIN);
-  const [tab, setTab] = useState<"me" | "groups">("me");
+  const [tab, setTab] = useState<"me" | "groups" | "mail">("me");
   const [deviceGroups, setDeviceGroups] = useState<DeviceGroup[]>([]);
   useEffect(() => {
     api.get<DeviceGroup[]>("/device-groups/").then((r) => setDeviceGroups(r.data)).catch(() => undefined);
@@ -492,11 +507,14 @@ export default function NotificationsPage() {
           <div className="seg-tabs" role="tablist">
             <button role="tab" aria-selected={tab === "me"} className={`seg-tab${tab === "me" ? " active" : ""}`} onClick={() => setTab("me")}>自分の通知</button>
             <button role="tab" aria-selected={tab === "groups"} className={`seg-tab${tab === "groups" ? " active" : ""}`} onClick={() => setTab("groups")}>ユーザーグループ</button>
+            <button role="tab" aria-selected={tab === "mail"} className={`seg-tab${tab === "mail" ? " active" : ""}`} onClick={() => setTab("mail")}>メールサーバー</button>
           </div>
         )}
       </div>
       <div className="page-body">
-        {tab === "me" ? <MyTab deviceGroups={deviceGroups} /> : <GroupsTab deviceGroups={deviceGroups} />}
+        {tab === "me" && <MyTab deviceGroups={deviceGroups} />}
+        {tab === "groups" && <GroupsTab deviceGroups={deviceGroups} />}
+        {tab === "mail" && <MailServerTab />}
       </div>
     </div>
   );

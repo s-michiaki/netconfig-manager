@@ -1,4 +1,4 @@
-"""通知（Discord / Slack の Webhook）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
+"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
 
 通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
@@ -9,7 +9,8 @@ on_system（システムの異常）は機器に結び付かないため、対�
     - グループの設定を使う（inherit・設定なし）: 所属する各ユーザーグループの設定（有効なもの）で、
       対象に含まれるものの通知先へ
     - 通知しない（off）: 何もしない
-  同じ Webhook URL は1回だけ送る（グループの Webhook はメンバーが何人いても1回）。
+  同じ Webhook URL・同じメールの宛先は1回だけ送る（グループの Webhook はメンバーが何人いても1回）。
+  メールは宛先ごとに 1 通（ほかの宛先を見せない）。送信の設定（SMTP・OAuth 2.0）は services/mail.py。
   メンバーがいない・全員が個別設定のグループの Webhook には送らない。
 
 通知内容は要約と画面へのリンクのみ（差分の中身はパスワードのハッシュ等を含みうるため載せない）。
@@ -33,13 +34,13 @@ from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
-from app.services import inventory
+from app.services import inventory, mail
 from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("discord", "slack")
-KIND_LABELS = {"discord": "Discord", "slack": "Slack"}
+KINDS = ("discord", "slack")  # Webhook の種類
+KIND_LABELS = {"discord": "Discord", "slack": "Slack", "email": "メール"}
 # 宛先を公式の Webhook に限る（任意の URL にサーバーからリクエストを送らせないため）
 WEBHOOK_RE = {
     "discord": re.compile(
@@ -79,13 +80,22 @@ def setting_webhooks(s: NotificationSetting) -> dict[str, str]:
     return {k: url for k in KINDS if (url := getattr(s, f"{k}_webhook"))}
 
 
+def setting_targets(s: NotificationSetting) -> list[tuple[str, str]]:
+    """通知先の一覧（種類, Webhook URL かメールアドレス）"""
+    return list(setting_webhooks(s).items()) + [("email", a) for a in s.emails]
+
+
+def has_target(s: NotificationSetting | None) -> bool:
+    return bool(s and (s.discord_webhook or s.slack_webhook or s.emails))
+
+
 # ---------------------------------------------------------------- 通知先の決定
 
 
 @dataclass
 class Destination:
     kind: str
-    url: str
+    url: str  # Webhook URL、メールならメールアドレス
     setting_ids: set[str] = field(default_factory=set)  # この宛先を設定している通知設定（送信結果の記録用）
     via: set[str] = field(default_factory=set)  # 誰の設定で送るか（「ユーザー: xx」「グループ: yy」）
 
@@ -108,8 +118,9 @@ async def resolve_destinations(db: AsyncSession, device_group_id: str | None,
     dests: dict[tuple[str, str], Destination] = {}
 
     def add(s: NotificationSetting, label: str) -> None:
-        for kind, url in setting_webhooks(s).items():
-            d = dests.setdefault((kind, url), Destination(kind, url))
+        for kind, url in setting_targets(s):
+            key = (kind, url.lower() if kind == "email" else url)
+            d = dests.setdefault(key, Destination(kind, url))
             d.setting_ids.add(s.id)
             d.via.add(label)
 
@@ -163,6 +174,8 @@ def build_payload(kind: str, ev: ChangeEvent) -> dict:
         ("世代", ev.commit_hash[:8]),
     ]
     url = history_url(ev.device_id)
+    if kind == "email":
+        return _message(kind, title, facts, url, "差分を画面で確認", 0x4F8EF7)
     if kind == "discord":
         embed = {
             "title": title,
@@ -182,6 +195,9 @@ def build_payload(kind: str, ev: ChangeEvent) -> dict:
 
 def build_test_payload(kind: str, owner_label: str) -> dict:
     text = f"NetConfig Manager からのテスト通知です（{owner_label} の通知設定）"
+    if kind == "email":
+        return {"title": "テスト通知", "body": text, "facts": [], "url": _page_url("/notifications"),
+                "link_text": "通知設定を画面で確認"}
     if kind == "discord":
         return {"username": "NetConfig Manager", "content": text}
     return {"text": text}
@@ -218,6 +234,13 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
     return "レート制限のため送信できませんでした"
 
 
+def _send(kind: str, url: str, payload: dict, cfg: "mail.MailConfig | None") -> str | None:
+    """1 か所へ送る（スレッドで実行）。メールは mail.send_notification、ほかは Webhook"""
+    if kind == "email":
+        return mail.send_notification(cfg or mail.MailConfig(), url, payload)
+    return send_webhook(kind, url, payload)
+
+
 def _retry_after(e: urllib.error.HTTPError) -> float:
     try:
         return float(e.headers.get("Retry-After") or json.loads(e.read() or b"{}").get("retry_after", 1))
@@ -230,9 +253,9 @@ async def _deliver(db: AsyncSession, event: str, sends: list[tuple[Destination, 
     """送信して結果を記録する（アクティビティログ・通知設定の last_sent_at / last_error）"""
     if not sends:
         return {"sent": 0, "failed": 0}
-    results = await asyncio.gather(
-        *(asyncio.to_thread(send_webhook, d.kind, d.url, payload) for d, payload, _ in sends)
-    )
+    cfg = await mail.load_config(db) if any(d.kind == "email" for d, _, _ in sends) else None
+    results = await asyncio.gather(*(asyncio.to_thread(_send, d.kind, d.url, payload, cfg) for d, payload, _ in sends))
+    await mail.record_last([err for (d, _, _), err in zip(sends, results, strict=True) if d.kind == "email"])
     now = utcnow()
     errors: dict[str, list[str]] = {}
     label = EVENT_LABELS[event]
@@ -241,7 +264,7 @@ async def _deliver(db: AsyncSession, event: str, sends: list[tuple[Destination, 
             errors.setdefault(sid, [])
             if err:
                 errors[sid].append(f"{KIND_LABELS[d.kind]}: {err}")
-        # 送信先の URL（秘密）は残さず、種類と誰の設定かだけ記録する
+        # 送信先の URL（秘密）・メールアドレスは残さず、種類と誰の設定かだけ記録する
         via = "・".join(sorted(d.via))
         where = {"device_id": device.id, "device_name": device.name} if device else {}
         if err:
@@ -277,7 +300,9 @@ async def notify_change(db: AsyncSession, device_id: str, commit_hash: str, adde
 
 def _message(kind: str, title: str, facts: list[tuple[str, str]], url: str | None, link_text: str,
              color: int, body: str | None = None) -> dict:
-    """Discord（埋め込み）/ Slack（テキスト）の通知を組み立てる"""
+    """Discord（埋め込み）/ Slack（テキスト）/ メール（件名・本文の材料。組み立ては mail.build_message）の通知"""
+    if kind == "email":
+        return {"title": title, "facts": facts, "url": url, "link_text": link_text, "body": body}
     if kind == "discord":
         embed: dict = {
             "title": title, "color": color,
@@ -511,8 +536,9 @@ async def resolve_user_destinations(db: AsyncSession, user_id: str) -> list[Dest
     dests: dict[tuple[str, str], Destination] = {}
 
     def add(s: NotificationSetting, label: str) -> None:
-        for kind, url in setting_webhooks(s).items():
-            d = dests.setdefault((kind, url), Destination(kind, url))
+        for kind, url in setting_targets(s):
+            key = (kind, url.lower() if kind == "email" else url)
+            d = dests.setdefault(key, Destination(kind, url))
             d.setting_ids.add(s.id)
             d.via.add(label)
 
@@ -561,10 +587,12 @@ async def wants_any(db: AsyncSession, event: str) -> bool:
         NotificationSetting.mode == "custom", col.is_(True)).limit(1))).first() is not None
 
 
-async def send_test(s: NotificationSetting, owner_label: str) -> dict[str, str | None]:
-    """設定されている通知先へテスト通知を送る。{kind: エラー or None}"""
-    hooks = setting_webhooks(s)
+async def send_test(s: NotificationSetting, owner_label: str,
+                    cfg: "mail.MailConfig | None" = None) -> dict[str, str | None]:
+    """設定されている通知先へテスト通知を送る。{kind: エラー or None}（メールは宛先ごとに "email:<宛先>"）"""
+    targets = setting_targets(s)
     results = await asyncio.gather(
-        *(asyncio.to_thread(send_webhook, k, url, build_test_payload(k, owner_label)) for k, url in hooks.items())
+        *(asyncio.to_thread(_send, k, url, build_test_payload(k, owner_label), cfg) for k, url in targets)
     )
-    return dict(zip(hooks.keys(), results, strict=True))
+    await mail.record_last([err for (k, _), err in zip(targets, results, strict=True) if k == "email"])
+    return {(f"email:{url}" if k == "email" else k): err for (k, url), err in zip(targets, results, strict=True)}

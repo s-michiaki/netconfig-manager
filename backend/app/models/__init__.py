@@ -14,6 +14,7 @@ from app.models.device import (
     JumpHost,
     Schedule,
 )
+from app.models.mail import MailServer
 from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface, SnmpSetting
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.ping import PingMonitor, PingResult, PingTarget
@@ -37,6 +38,7 @@ __all__ = [
     "FwRuleHit",
     "IfSample",
     "JumpHost",
+    "MailServer",
     "MonInterface",
     "NotificationSetting",
     "PingMonitor",

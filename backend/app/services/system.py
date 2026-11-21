@@ -17,6 +17,7 @@
              app.tools.backup_report を呼んで Redis に書いた記録を読む。記録が無い環境（バックアップを
              使っていない・開発環境）では unknown にして、警告も通知もしない
   git_export : コンフィグ履歴の外部 Git への push（services/git_export.py）の最後の結果。設定していなければ unknown
+  mail     : メール送信の設定と最後の送信の結果（有効にしていなければ unknown）
   images   : コンテナのイメージ（DB・Redis・ビルドの土台）の作成日時。setup.sh が app.tools.image_report で伝える。
              古い（IMAGE_STALE_DAYS 日より前）・取り直せなかったら warn
 
@@ -57,7 +58,7 @@ DISK_WARN_PCT, DISK_ERROR_PCT = 15, 5
 CERT_WARN_DAYS, CERT_ERROR_DAYS = 30, 7
 RANK = {"unknown": 0, "ok": 0, "warn": 1, "error": 2}
 # 通知する項目（db は、止まっていると通知先も読めないため対象外）
-ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup", "git_export", "images")
+ALERT_KEYS = ("redis", "worker", "beat", "collect", "disk", "cert", "backup", "git_export", "images", "mail")
 GRACE_KEYS = ("redis", "worker", "beat")  # 一時的な停止では通知しない項目
 
 
@@ -409,6 +410,32 @@ async def check_git_export(redis_ok: bool = True) -> Component:
     return Component(key, label, "ok", state.get("message") or "push できています", detail)
 
 
+async def check_mail(db: AsyncSession, redis_ok: bool = True) -> Component:
+    """メール送信（通知設定 → メールサーバー）の最後の結果。有効にしていなければ unknown"""
+    from app.services import mail  # notify → mail の循環を避ける
+
+    key, label = "mail", "メール送信"
+    cfg = await mail.load_config(db)
+    if not cfg.enabled:
+        return Component(key, label, "unknown", "使っていません（通知設定 → メールサーバー）")
+    detail: dict = {"host": f"{cfg.host}:{cfg.port}", "auth": mail.AUTH_LABELS.get(cfg.auth, cfg.auth)}
+    if problem := mail.check_config(cfg):
+        return Component(key, label, "error", problem, detail, items=["config"])
+    last = None
+    if redis_ok:
+        try:
+            last = await mail.last_result()
+        except (RedisError, OSError, ValueError):
+            last = None
+    detail["mail_last"] = last
+    if not last:
+        return Component(key, label, "ok", "設定済み（まだ送っていません）", detail)
+    if not last.get("ok"):
+        # 失敗が続いている間は同じ注意（items）なので、通知は最初の 1 回だけ。成功すると「復旧」を知らせる
+        return Component(key, label, "error", f"最後の送信に失敗しました: {last.get('error')}", detail, items=["send"])
+    return Component(key, label, "ok", "送信できています", detail)
+
+
 async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[Component]:
     now = now or utcnow()
     database = await check_db(db)
@@ -416,7 +443,7 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     worker = await check_worker(redis_c.status == "ok")
     out = [database, redis_c, worker, check_beat(heartbeat, worker, now)]
     if database.status == "ok":
-        out += [await check_schedules(db), await check_collect(db, now)]
+        out += [await check_schedules(db), await check_collect(db, now), await check_mail(db, redis_c.status == "ok")]
     return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok"),
             await check_git_export(redis_c.status == "ok"), await check_images(now, redis_c.status == "ok")]
 
