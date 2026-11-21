@@ -204,11 +204,17 @@ def test_search_history():
         assert did not in [x["id"] for x in d["devices"]] and did in [x["id"] for x in d["unmatched"]]
         assert did in [x["id"] for x in search(query=ip_old).json()["devices"]]
         # 期間で絞る（未来の期間なら世代が無く「一致しなかった」）
-        future = (dt.date.today() + dt.timedelta(days=3)).isoformat()
+        # 期間の日付は設定のタイムゾーン（TIMEZONE）で読む。UTC の日付と違う時間帯でも通るよう、同じタイムゾーンの「今日」を使う
+        from zoneinfo import ZoneInfo
+
+        from app.core.config import settings
+
+        today = dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date().isoformat()
+        future = (dt.datetime.now(ZoneInfo(settings.TIMEZONE)).date() + dt.timedelta(days=3)).isoformat()
         d = search(since=future).json()
         assert did in [x["id"] for x in d["unmatched"]]
-        assert did in [x["id"] for x in search(until=dt.date.today().isoformat()).json()["devices"]]
-        assert search(since=future, until=dt.date.today().isoformat()).status_code == 422
+        assert did in [x["id"] for x in search(until=today).json()["devices"]]
+        assert search(since=future, until=today).status_code == 422
         assert search(scope="all").status_code == 422
         # 世代の上限で打ち切ったら partial に入る
         import pytest
