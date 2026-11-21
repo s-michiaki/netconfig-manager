@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
+import { useAuth } from "../auth";
 
 /**
  * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push、コンテナのイメージの新しさ
  * 「止まっていることに気づけない」をなくすための画面。異常は通知設定（システムの異常）の通知先にも送られる
+ *
+ * 「項目」メニュー（再確認の横）: 全項目の状態を一覧で確認でき、選ぶと詳細を表示する。＋/− で画面に大きく（カードで）
+ * 表示するかを切り替える。表示しない項目はブラウザに覚える（ユーザーごと）。表示しない項目の異常も「要確認」に数える
  */
 
 type Status = "ok" | "warn" | "error" | "unknown";
@@ -182,7 +186,97 @@ function GitExportDetail({ d }: { d: Component["detail"] }) {
   );
 }
 
+// ---------------------------------------------------------------- 表示する項目（ブラウザに保存）
+
+function hiddenKey(username: string | undefined) {
+  return `ncm.system.hidden.${username ?? ""}`;
+}
+function readHidden(username: string | undefined): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(hiddenKey(username)) ?? "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function writeHidden(username: string | undefined, keys: string[]) {
+  try {
+    localStorage.setItem(hiddenKey(username), JSON.stringify(keys));
+  } catch {
+    /* 保存できなくても、この画面を開いている間は効く */
+  }
+}
+
+function ItemMenu({
+  components, hidden, onToggle, onShowAll, onClose,
+}: {
+  components: Component[]; hidden: string[]; onToggle: (key: string) => void; onShowAll: () => void; onClose: () => void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const shown = components.length - components.filter((c) => hidden.includes(c.key)).length;
+  return (
+    <div className="sys-menu" role="dialog" aria-label="項目の状態と表示">
+      <div className="sys-menu-head">
+        <b>項目</b>
+        <span className="topo-muted topo-small">画面に表示: {shown} / {components.length}</span>
+        <span style={{ flex: 1 }} />
+        {hidden.length > 0 && <button className="btn btn-sm" onClick={onShowAll}>すべて表示</button>}
+        <button className="btn btn-sm" onClick={onClose} aria-label="閉じる">×</button>
+      </div>
+      <p className="topo-muted topo-small sys-menu-help">項目を選ぶと状態を表示します。＋ で画面に大きく表示、− で画面から外します（ここではいつでも確認できます）</p>
+      <ul className="sys-menu-list">
+        {components.map((c) => {
+          const isHidden = hidden.includes(c.key);
+          const expanded = open === c.key;
+          return (
+            <li key={c.key} className={`sys-menu-item${expanded ? " open" : ""}`}>
+              <div className="sys-menu-row">
+                <button className="sys-menu-name" onClick={() => setOpen(expanded ? null : c.key)} aria-expanded={expanded}>
+                  <span className={`sys-dot sys-dot-${c.status}`} aria-hidden="true" />
+                  <span className="sys-menu-label">{c.label}</span>
+                  <span className={`badge ${BADGE[c.status][0]}`}>{BADGE[c.status][1]}</span>
+                </button>
+                <button
+                  className={`btn btn-sm sys-menu-toggle${isHidden ? "" : " on"}`}
+                  onClick={() => onToggle(c.key)}
+                  title={isHidden ? "画面に大きく表示する" : "画面から外す"}
+                  aria-label={isHidden ? `${c.label} を画面に表示する` : `${c.label} を画面から外す`}
+                >
+                  {isHidden ? "＋" : "−"}
+                </button>
+              </div>
+              {expanded && (
+                <div className="sys-menu-detail">
+                  <p className="sys-summary">{c.summary}</p>
+                  <Detail c={c} />
+                  <p className="sys-help">{HELP[c.key]}</p>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export default function SystemPage() {
+  const { me } = useAuth();
+  const [hidden, setHidden] = useState<string[]>(() => readHidden(me?.username));
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setHidden(readHidden(me?.username)); }, [me?.username]);
+  const updateHidden = (keys: string[]) => { setHidden(keys); writeHidden(me?.username, keys); };
+  const toggle = (key: string) => updateHidden(hidden.includes(key) ? hidden.filter((k) => k !== key) : [...hidden, key]);
+  // メニューの外を押す・Esc で閉じる
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [menuOpen]);
   const [data, setData] = useState<SystemStatus | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -200,6 +294,8 @@ export default function SystemPage() {
   }, [load]);
 
   const bad = data?.components.filter((c) => c.status === "error" || c.status === "warn") ?? [];
+  const visible = data?.components.filter((c) => !hidden.includes(c.key)) ?? [];
+  const hiddenBad = bad.filter((c) => hidden.includes(c.key));
   return (
     <div className="page">
       <div className="page-header">
@@ -208,13 +304,36 @@ export default function SystemPage() {
         <span style={{ flex: 1 }} />
         {data && <span className="topo-muted topo-small">確認: {fmt(data.checked_at)}（30秒ごとに更新）</span>}
         <button className="btn" onClick={load} disabled={loading}>再確認</button>
+        {data && (
+          <div className="sys-menu-wrap" ref={menuRef}>
+            <button className="btn" onClick={() => setMenuOpen(!menuOpen)} aria-expanded={menuOpen} aria-haspopup="dialog">
+              項目 ▾{hidden.length > 0 && <span className="sys-menu-count">{hidden.length} 件非表示</span>}
+            </button>
+            {menuOpen && (
+              <ItemMenu components={data.components} hidden={hidden} onToggle={toggle}
+                onShowAll={() => updateHidden([])} onClose={() => setMenuOpen(false)} />
+            )}
+          </div>
+        )}
       </div>
       <div className="page-body">
         {error && <p className="form-error">{error}</p>}
         {data && (
           <>
+            {hiddenBad.length > 0 && (
+              <div className="sys-hidden-alert">
+                画面に表示していない項目に要確認があります: {hiddenBad.map((c, i) => (
+                  <span key={c.key}>{i > 0 && "、"}
+                    <button className="sys-link" onClick={() => toggle(c.key)} title="画面に表示する">{c.label}（{BADGE[c.status][1]}）</button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {visible.length === 0 && (
+              <div className="card topo-muted">画面に表示する項目がありません。「項目」メニューで ＋ を押すと表示します。</div>
+            )}
             <div className="sys-grid">
-              {data.components.map((c) => (
+              {visible.map((c) => (
                 <div key={c.key} className={`card sys-card sys-${c.status}`}>
                   <div className="sys-head">
                     <b>{c.label}</b>
