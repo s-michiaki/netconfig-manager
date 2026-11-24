@@ -69,6 +69,9 @@ export default function TopologyPage() {
   // 構成図が指定されていなければ、前回開いていた構成図（無ければ先頭）を開く
   useEffect(() => {
     if (maps && maps.length && (!mapId || !maps.some((m) => m.id === mapId))) {
+      // 一覧の読み込み中にほかのメニューへ移動していたら何もしない（移動先の画面の読み込み待ちの間はこの画面が
+      // 残っており、ここで構成図へ移動すると、押したメニューから構成図へ引き戻されてしまう）
+      if (!window.location.pathname.startsWith("/topology")) return;
       const last = lastMap();
       navigate(`/topology/${maps.some((m) => m.id === last) ? last : maps[0].id}${viewQuery}`, { replace: true });
     }
