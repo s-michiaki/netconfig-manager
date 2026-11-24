@@ -15,6 +15,7 @@ from app.models.device import (
     JumpHost,
     Schedule,
 )
+from app.models.ignore_rule import ConfigIgnoreRule
 from app.models.mail import MailServer
 from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface, SnmpSetting
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
@@ -31,6 +32,7 @@ __all__ = [
     "ComplianceResult",
     "ComplianceRule",
     "ConfigComment",
+    "ConfigIgnoreRule",
     "ConfigReview",
     "ConfigSnapshot",
     "CredentialProfile",

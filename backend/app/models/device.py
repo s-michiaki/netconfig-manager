@@ -142,6 +142,9 @@ class Device(Base):
     config_reviews: Mapped[list["ConfigReview"]] = relationship(
         "ConfigReview", back_populates="device", cascade="all, delete-orphan"
     )
+    ignore_rules: Mapped[list["ConfigIgnoreRule"]] = relationship(  # noqa: F821 - models/ignore_rule.py
+        "ConfigIgnoreRule", back_populates="device", cascade="all, delete-orphan"
+    )
 
 
 class ConfigSnapshot(Base):

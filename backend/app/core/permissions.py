@@ -19,6 +19,7 @@ class Perm(str, Enum):
     CONFIG_READ = "config:read"  # 履歴・差分・コンフィグ内容の閲覧
     CONFIG_COMMENT = "config:comment"  # 世代へのコメント（作業内容のメモ）の追加・編集・削除。閲覧は CONFIG_READ
     CONFIG_REVIEW = "config:review"  # 変更（世代）の確認（確認済み・想定外）を付ける・戻す。閲覧は CONFIG_READ
+    CONFIG_IGNORE = "config:ignore"  # 収集時に無視する行（正規表現）の設定。管理者のみ（機器の出力に当てる正規表現のため）
     COLLECT = "collect:run"  # 収集の実行・タスク状態の確認
     TERMINAL = "terminal:use"  # SSHターミナル（機器を直接操作できる）
     SCHEDULE_READ = "schedule:read"

@@ -26,6 +26,9 @@ EVENTS: dict[str, tuple[str, str]] = {
     "compliance.exception_expired": ("例外の期限切れ", "info"),
     "compliance.summary": ("検査結果の変化", "info"),
     "compliance.run": ("コンプライアンスチェックの実行", "info"),
+    "ignore.timeout": ("無視する行の照合が時間切れ", "warning"),
+    "ignore.skipped": ("無視する行の正規表現が使えない", "warning"),
+    "ignore.broad": ("無視する行で多くの行が消えた", "warning"),
     "notify.sent": ("通知の送信", "info"),
     "notify.failed": ("通知の失敗", "error"),
     "inventory.changed": ("機器情報の変化", "info"),
@@ -43,6 +46,7 @@ EVENTS: dict[str, tuple[str, str]] = {
 }
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
+    "ignore": "無視する行",
     "monitor": "モニタリング", "ping": "Ping監視",
     "system": "システム", "backup": "バックアップ", "export": "外部 Git",
 }

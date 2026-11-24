@@ -8,7 +8,7 @@ export const USERS = {
 
 /** サイドメニューから開ける全画面（navigation.spec.ts・csp.spec.ts で使う） */
 export const PAGES = ["/dashboard", "/devices", "/topology", "/jump-hosts", "/credential-profiles", "/collect", "/ping", "/history", "/reviews", "/search", "/terminal", "/schedules",
-  "/compliance", "/notifications", "/activity", "/audit", "/users", "/system"];
+  "/compliance", "/ignore-rules", "/notifications", "/activity", "/audit", "/users", "/system"];
 
 /** ログインしてデバイス管理を開く */
 export async function login(page: Page, user: { name: string; password: string } = USERS.admin) {

@@ -19,6 +19,7 @@ const PERM_LABELS: Record<string, string> = {
   "config:read": "コンフィグ・差分の閲覧・比較・保存",
   "config:comment": "変更へのコメント（作業内容のメモ）",
   "config:review": "変更の確認（確認済み・想定外を付ける）",
+  "config:ignore": "収集時に無視する行の設定",
   "collect:run": "収集の実行",
   "terminal:use": "SSHターミナル",
   "schedule:read": "スケジュール閲覧",

@@ -309,6 +309,9 @@ class CollectResult:
     retryable: bool = False
     first: bool = False  # 初めての取得（変更ではないので通知しない）
     inventory: dict | None = None  # 機器台帳（モデル・シリアル番号など）。読み取れなかった・対象外なら None
+    # 適用できずに飛ばした「無視する行」のルール（ignore_rules.Skipped。理由付き）。1 件でもあれば保存しない
+    ignore_skipped: list = field(default_factory=list)
+    ignore_dropped: tuple[int, int] | None = None  # 無視する行で消した行数と、消す前の行数（警告に使う）
 
     def as_dict(self) -> dict:
         return {
@@ -365,7 +368,15 @@ def migrate_legacy_repo(device_id: str, device_name: str) -> bool:
     return False
 
 
-def normalize_config(text: str, platform: str) -> str:
+def normalize_config(
+    text: str, platform: str, extra_ignore: list[str] | None = None, skipped: list | None = None,
+    stats: dict | None = None,
+) -> str:
+    """保存前の整形。機種ごとの置換・除外のあと、画面で設定した無視する行（extra_ignore）を取り除く
+
+    extra_ignore の正規表現は時間切れ付きで当てる（services/ignore_rules.py）。適用できずに飛ばしたものは
+    skipped に理由付きで積む。stats を渡すと、無視する行で消した行数（dropped）と消す前の行数（before）を入れる
+    """
     spec = PLATFORMS.get(platform)
     patterns = [re.compile(p) for p in (spec.ignore_patterns if spec else [])]
     text = text.replace("\r\n", "\n")
@@ -376,6 +387,14 @@ def normalize_config(text: str, platform: str) -> str:
         for line in text.replace("\r\n", "\n").split("\n")
         if not any(p.match(line) for p in patterns)
     ]
+    if extra_ignore:
+        from app.services.ignore_rules import drop_lines  # compliance → config_service の循環 import を避ける
+        def count(xs: list[str]) -> int:  # 空行は数えない（割合が空行の数で薄まらないように）
+            return sum(1 for x in xs if x.strip())
+        before = count(lines)
+        lines = drop_lines(lines, extra_ignore, skipped)
+        if stats is not None:
+            stats.update(before=before, dropped=before - count(lines))
     return "\n".join(lines).strip("\n") + "\n"
 
 
@@ -557,21 +576,35 @@ def describe_failure(e: BaseException, device: DeviceConnectionInfo) -> tuple[st
     return describe_ssh_error(e), True
 
 
-def collect_config_sync(device: DeviceConnectionInfo, triggered_by: str = "manual") -> CollectResult:
-    """同期的にコンフィグを収集する（Celeryワーカーから呼び出す）"""
+def collect_config_sync(
+    device: DeviceConnectionInfo, triggered_by: str = "manual", extra_ignore: list[str] | None = None,
+) -> CollectResult:
+    """同期的にコンフィグを収集する（Celeryワーカーから呼び出す）
+
+    extra_ignore: 画面で設定した「無視する行」の正規表現（機種のもの＋機器のもの）
+    """
     try:
         raw, facts = fetch_config(device)
     except Exception as e:  # noqa: BLE001
         msg, retryable = describe_failure(e, device)
         return CollectResult(success=False, error=msg, retryable=retryable)
 
-    config_text = normalize_config(raw, device.platform)
+    skipped: list = []
+    stats: dict = {}
+    config_text = normalize_config(raw, device.platform, extra_ignore, skipped, stats)
+    if skipped:
+        # 飛ばしたルールがあるまま保存すると、消える回と消えない回が混ざって偽の変更になる。
+        # 保存せず、再試行できる失敗にする（時間切れは機器や worker の負荷で一時的に起きることもある）
+        from app.services.ignore_rules import skipped_message
+        return CollectResult(success=False, error=skipped_message(skipped), retryable=True, ignore_skipped=skipped)
     if not config_text.strip():
         return CollectResult(success=False, error="取得したコンフィグが空でした")
 
     try:
         result = save_config(device.id, config_text, triggered_by)
         result.inventory = facts
+        if stats.get("dropped"):
+            result.ignore_dropped = (stats["dropped"], stats["before"])
         return result
     except Exception as e:  # noqa: BLE001
         logger.exception("Gitへの保存に失敗: %s", device.name)

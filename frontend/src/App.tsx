@@ -44,6 +44,7 @@ const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
 const SystemPage = lazyPage(() => import("./pages/SystemPage"));
 const DashboardPage = lazyPage(() => import("./pages/DashboardPage"));
 const ReviewsPage = lazyPage(() => import("./pages/ReviewsPage"));
+const IgnoreRulesPage = lazyPage(() => import("./pages/IgnoreRulesPage"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
@@ -62,6 +63,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; featur
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
   { path: "/compliance", label: "コンプライアンス", icon: "✔", perm: PERM.COMPLIANCE_READ },
+  { path: "/ignore-rules", label: "無視する行", icon: "🚫", perm: PERM.CONFIG_IGNORE },
   { path: "/notifications", label: "通知設定", icon: "🔔", perm: PERM.NOTIFY_SELF },
   { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
   { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
@@ -213,6 +215,7 @@ function Layout() {
           <Route path="/ping" element={<RequirePerm perm={PERM.PING_USE}><PingPage /></RequirePerm>} />
           <Route path="/monitoring" element={<RequirePerm perm={PERM.MONITOR_READ}><MonitoringPage /></RequirePerm>} />
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
+          <Route path="/ignore-rules" element={<RequirePerm perm={PERM.CONFIG_IGNORE}><IgnoreRulesPage /></RequirePerm>} />
           <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />
           <Route path="/notifications" element={<RequirePerm perm={PERM.NOTIFY_SELF}><NotificationsPage /></RequirePerm>} />
           <Route path="/activity" element={<RequirePerm perm={PERM.ACTIVITY_READ}><ActivityPage /></RequirePerm>} />

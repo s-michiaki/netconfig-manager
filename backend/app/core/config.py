@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     LOGIN_LOCK_MIN: int = 15  # 上限に達したときにログインを止める時間（分）
     # コンプライアンスの正規表現の照合にかけられる時間（1回の評価＝ルール × 機器 あたりの合計秒数。ReDoS 対策）
     COMPLIANCE_REGEX_TIMEOUT: float = 2.0
+    # 収集時に無視する行（services/ignore_rules.py）の正規表現にかけられる時間（秒）。
+    # 1 ルールあたり（全行の合計）と全ルールの合計。超えたらその回は保存せず、収集の失敗（再試行あり）にする
+    IGNORE_RULE_TIMEOUT: float = Field(default=1.0, gt=0, le=30)
+    IGNORE_TOTAL_TIMEOUT: float = Field(default=5.0, gt=0, le=120)
     # 保持日数（0 なら削除しない）。毎日1回、古いものを削除する
     AUDIT_LOG_RETENTION_DAYS: int = Field(default=365, ge=0)
     TERMINAL_LOG_RETENTION_DAYS: int = Field(default=180, ge=0)

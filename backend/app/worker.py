@@ -43,6 +43,8 @@ from app.services.config_service import (
     collect_config_sync,
 )
 from app.services.connection import load_connection_info
+from app.services.ignore_rules import SKIP_TIMEOUT, SKIP_TOO_HEAVY, WARN_RATIO
+from app.services.ignore_rules import load_patterns as load_ignore_patterns
 from app.services.notify import (
     notify_change,
     notify_failure,
@@ -160,6 +162,18 @@ async def _get_device(device_id: str) -> DeviceConnectionInfo | None:
         return await load_connection_info(db, device_id)
 
 
+async def _get_ignore_patterns(device: DeviceConnectionInfo) -> list[str]:
+    """機器に効く「無視する行」の正規表現。読めなければ例外のまま返す
+
+    無視せずに保存すると、その回だけ行が戻る偽の変更になるため、呼び出し側は保存しない（再試行できる失敗にする）
+    """
+    async with _sessionmaker()() as db:
+        return await load_ignore_patterns(db, device.id, device.platform)
+
+
+IGNORE_LOAD_FAILED = "無視する行の設定を読み込めなかったため、コンフィグを保存しませんでした"
+
+
 def _actor(triggered_by: str, actor: str | None) -> str:
     """アクティビティログの「きっかけ」（手動ならユーザー名、スケジュールならスケジュール名）"""
     if actor:
@@ -210,6 +224,22 @@ async def _save_result(
                            "seconds": seconds}, **kw)
         elif settings.ACTIVITY_LOG_UNCHANGED:
             record(db, "collect.unchanged", "変更はありませんでした", detail={"seconds": seconds}, **kw)
+        for sk in result.ignore_skipped:
+            # 時間切れと、そもそも使えない正規表現（不正・繰り返しの上限超え）は分けて記録する
+            detail = {"pattern": sk.pattern[:500], "reason": sk.reason}
+            if sk.reason == SKIP_TIMEOUT:
+                record(db, "ignore.timeout", "「無視する行」の正規表現の照合が時間切れになったため、"
+                       "コンフィグを保存しませんでした", level="warning", detail=detail, **kw)
+            else:
+                why = "繰り返しの回数が上限を超えています" if sk.reason == SKIP_TOO_HEAVY else "正規表現が正しくありません"
+                record(db, "ignore.skipped", "「無視する行」の正規表現を使えなかったため、"
+                       f"コンフィグを保存しませんでした（{why}）", level="warning", detail=detail, **kw)
+        if result.success and result.ignore_dropped:
+            dropped, before = result.ignore_dropped
+            if before and dropped / before >= WARN_RATIO:
+                record(db, "ignore.broad", f"「無視する行」で全行の {int(dropped * 100 / before)}% が消えました"
+                       f"（{dropped} / {before} 行）。正規表現が広すぎないか確認してください",
+                       level="warning", detail={"dropped": dropped, "lines": before}, **kw)
         inventory_changes: list[list[str]] = []
         if result.success and result.inventory:
             inventory_changes = await _save_inventory(db, device_id, result.inventory, kw)
@@ -277,10 +307,19 @@ def collect_device_config(
         if not device:
             return {"success": False, "error": f"Device {device_id} not found"}
 
+        try:
+            extra: list[str] | None = _run_async(_get_ignore_patterns(device))
+        except Exception:  # noqa: BLE001 - 読めないまま無視せずに保存すると偽の変更になるので、接続もしない
+            logger.exception("無視する行の設定を読めませんでした device=%s", device_id)
+            extra = None
         ssh = _ssh_lock(device_id)
-        if ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
+        if extra is None:
+            result = CollectResult(False, error=IGNORE_LOAD_FAILED, retryable=True)
+        elif ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
             try:
-                result = collect_config_sync(device, triggered_by)
+                # 設定が無いときは引数を足さない（従来の呼び出しのまま）
+                result = (collect_config_sync(device, triggered_by, extra_ignore=extra) if extra
+                          else collect_config_sync(device, triggered_by))
             finally:
                 try:
                     ssh.release()
