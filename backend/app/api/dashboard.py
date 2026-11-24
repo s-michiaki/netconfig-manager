@@ -17,6 +17,7 @@ from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceResult, ComplianceRule
 from app.models.device import CollectLog, ConfigComment, ConfigReview, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.models.user import User
+from app.services.config_service import PLATFORMS
 
 router = APIRouter()
 LIST_LIMIT = 10
@@ -117,6 +118,13 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
     # 基準の世代: 基準を指定した機器の数とずれている機器の数（コンフィグを閲覧できる人にだけ出す）
     baselines = await count_baselines(db) if has_permission(user.role, Perm.CONFIG_READ) else None
 
+    # 保存し忘れ（startup と running の不一致）。対象の機種の機器が無く、未保存も無ければ画面には出さない
+    startup_platforms = {k for k, v in PLATFORMS.items() if v.startup_command}
+    startup = {"enabled": settings.STARTUP_CHECK_ENABLED,
+               "targets": sum(1 for d in devices if d.platform in startup_platforms),
+               "unsaved": sum(1 for d in devices if d.startup_state == "unsaved" and d.platform in startup_platforms)
+               if settings.STARTUP_CHECK_ENABLED else 0}
+
     return {
         "devices": {"total": len(devices), "active": len(active), "inactive": len(devices) - len(active),
                     "failing": len(failing), "never": len(never),
@@ -134,6 +142,7 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
                                 "first": firsts.get(s.device_id) == s.commit_hash} for s in snaps]},
         "reviews": reviews,
         "baselines": baselines,
+        "startup": startup,
         "compliance": {"rules": rules, "by_severity": by_severity, "violations": sum(by_severity.values()),
                        "devices": len({d for d, _ in fails if d in names})},
         "schedules": {"active": len(upcoming), "upcoming": upcoming[:5]},

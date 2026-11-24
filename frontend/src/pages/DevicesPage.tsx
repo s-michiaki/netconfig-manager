@@ -4,6 +4,7 @@ import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { downloadCsv } from "../components/CsvButton";
 import DeviceImportModal from "../components/DeviceImportModal";
+import StartupDiffModal from "../components/StartupDiffModal";
 import { usePlatforms } from "../platforms";
 import type { CredentialProfile } from "./CredentialProfilesPage";
 
@@ -34,6 +35,11 @@ interface Device {
   os_version: string | null;
   reported_hostname: string | null;
   inventory_at: string | null;
+  // 保存し忘れの検出（startup と running の不一致）。対象外の機種・無効なら null
+  startup_state: "synced" | "unsaved" | "unknown" | null;
+  startup_added: number | null;
+  startup_removed: number | null;
+  startup_checked_at: string | null;
 }
 
 // ---- 収集の状態（GET /devices/collect-status）
@@ -602,14 +608,22 @@ function writePref(key: string, value: unknown) {
   }
 }
 
+/** 保存し忘れを最後に比べた日時（読み取れなかった回は更新しないため、古いことがある） */
+function startupChecked(d: Device): string {
+  if (!d.startup_checked_at) return "";
+  const iso = d.startup_checked_at;
+  return `最後に比べた日時: ${new Date(iso.endsWith("Z") || iso.includes("+") ? iso : iso + "Z").toLocaleString("ja-JP")}。`;
+}
+
 function DeviceCard({
   d, canWrite, canTerminal, selecting, selected, showGroup, groupColor, collectActive, collectLast,
-  onToggle, onOpen, onEdit, onDelete,
+  onToggle, onOpen, onEdit, onDelete, onShowStartup,
 }: {
   collectActive?: CollectActive; collectLast?: CollectLast;
   d: Device; canWrite: boolean; canTerminal: boolean; selecting: boolean; selected: boolean; showGroup: boolean;
   groupColor: string | null; onToggle: () => void; onOpen: () => void;
   onEdit: (e: React.MouseEvent) => void; onDelete: (e: React.MouseEvent) => void;
+  onShowStartup?: (e: React.MouseEvent) => void; // 差分を開く（コンフィグを閲覧できる人だけ）
 }) {
   const { label: platformLabel } = usePlatforms();
   return (
@@ -627,6 +641,17 @@ function DeviceCard({
           <span className={`badge ${d.is_active ? "badge-success" : "badge-neutral"}`}>
             {d.is_active ? "● Active" : "Inactive"}
           </span>
+          {d.startup_state === "unsaved" && (
+            onShowStartup ? (
+              <button type="button" className="badge badge-warning startup-badge" onClick={onShowStartup}
+                title={`running-config に startup-config へ保存されていない変更があります（+${d.startup_added ?? 0} / -${d.startup_removed ?? 0} 行）。${startupChecked(d)}クリックで差分を表示`}>
+                未保存
+              </button>
+            ) : (
+              <span className="badge badge-warning"
+                title={`running-config に startup-config へ保存されていない変更があります（+${d.startup_added ?? 0} / -${d.startup_removed ?? 0} 行）。${startupChecked(d)}`}>未保存</span>
+            )
+          )}
         </div>
         {canWrite && !selecting && (
           <div style={{ display: "flex", gap: 4 }}>
@@ -674,6 +699,8 @@ export default function DevicesPage() {
   const { can } = useAuth();
   const canWrite = can(PERM.DEVICE_WRITE);
   const canTerminal = can(PERM.TERMINAL);
+  const canConfigRead = can(PERM.CONFIG_READ);
+  const [startupFor, setStartupFor] = useState<Device | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [modal, setModal] = useState<{ device: Device | null; groupId?: string } | null>(null);
@@ -861,11 +888,13 @@ export default function DevicesPage() {
       collectActive={collectStatus?.active[d.id]} collectLast={collectStatus?.last[d.id]}
       onToggle={() => toggle(d.id)} onOpen={() => navigate(`/terminal/${d.id}`)}
       onEdit={(e) => { e.stopPropagation(); setModal({ device: d }); }} onDelete={(e) => deleteDevice(d, e)}
+      onShowStartup={canConfigRead ? (e) => { e.stopPropagation(); setStartupFor(d); } : undefined}
     />
   );
 
   return (
     <div className="page">
+      {startupFor && <StartupDiffModal deviceId={startupFor.id} deviceName={startupFor.name} onClose={() => setStartupFor(null)} />}
       {modal && (
         <DeviceModal device={modal.device} jumpHosts={jumpHosts} groups={groups} profiles={profiles} defaultGroupId={modal.groupId}
           onClose={() => setModal(null)} onSave={load} />

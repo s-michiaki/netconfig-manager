@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     # 機器台帳の自動取得（収集のついでに show version などを実行して、モデル・シリアル番号・OS バージョンを読み取る）
     INVENTORY_ENABLED: bool = True
     INVENTORY_TIMEOUT: int = Field(default=30, ge=5, le=600)  # 台帳用コマンドの応答待ち（秒）。機器の応答待ち時間が短ければそちら
+    # 保存し忘れの検出（収集のついでに show startup-config を実行し、running-config と比べる。対象の機種だけ）
+    STARTUP_CHECK_ENABLED: bool = True
+    # show startup-config の応答待ち（秒）。機器の応答待ち時間が短ければそちら
+    STARTUP_CHECK_TIMEOUT: int = Field(default=30, ge=5, le=600)
     MONITORING_ENABLED: bool = False
     MONITOR_INTERVAL_SEC: int = Field(default=300, ge=60, le=3600)  # 帯域を取得する間隔
     MONITOR_RETENTION_DAYS: int = Field(default=30, ge=1, le=400)  # 帯域の記録を残す日数

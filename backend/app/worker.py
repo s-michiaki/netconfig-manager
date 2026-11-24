@@ -8,6 +8,7 @@ Celeryワーカー定義
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
 - send_drift_notification: 基準の世代からずれたとき（ずれなし → ずれあり）の通知
+- send_unsaved_notification: running-config が startup-config に保存されていない状態に変わったときの通知
 - ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
 - git_export_sync: コンフィグ履歴を外部 Git へ push（GIT_EXPORT_URL を設定したとき。収集で変わったときと 1 時間ごと）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
@@ -55,6 +56,7 @@ from app.services.notify import (
     notify_failures,
     notify_inventory,
     notify_ping,
+    notify_unsaved,
     notify_violations,
     wants_any,
 )
@@ -247,6 +249,8 @@ async def _save_result(
         inventory_changes: list[list[str]] = []
         if result.success and result.inventory:
             inventory_changes = await _save_inventory(db, device_id, result.inventory, kw)
+        if result.success and result.startup is not None:
+            result.unsaved_notify = await _save_startup(db, device_id, result.startup, kw)
         await db.commit()
         return inventory_changes
 
@@ -272,6 +276,45 @@ async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dic
         record(db, "inventory.changed", f"機器情報が変わりました（{text}）", level=level,
                detail={f: {"before": a, "after": b} for f, a, b in diff}, **kw)
     return [[f, a, b] for f, a, b in diff]
+
+
+async def _save_startup(db: AsyncSession, device_id: str, check, kw: dict) -> tuple[int, int] | None:
+    """保存し忘れ（startup と running の不一致）の状態を機器に保存する。収集が成功した回だけ呼ぶ。
+
+    - 対象外・無効（state が None）なら、前回の値を消して NULL に戻す
+    - unknown（読み取れなかった・比べられなかった）の回は、前回の状態・行数・差分・日時を上書きしない
+      （startup_checked_at は「最後に比べられた日時」のまま）。理由は（中身を含まない短い文で）ログにだけ残す。
+      一度も比べられていない機器（state が NULL）のときだけ unknown を保存する
+    - 通知するのは synced → unsaved のときだけ（追加, 削除の行数を返す）。初めて比べられた回（NULL・unknown → unsaved）は、
+      導入直後に未保存の機器の通知がまとめて届かないよう通知しない。unsaved のままの間も通知しない
+    - unsaved → synced はアクティビティに残すだけ
+    差分の本文は機器にだけ保存し、アクティビティ・通知には行数しか入れない（コンフィグの中身を含むため）
+    """
+    d = await db.get(Device, device_id)
+    if d is None:
+        return None
+    before = d.startup_state
+    if check.state is None:
+        d.startup_state = d.startup_added = d.startup_removed = d.startup_diff = d.startup_checked_at = None
+        return None
+    if check.state == "unknown":
+        logger.info("startup と running を比べられませんでした device=%s: %s", device_id, check.reason)
+        if before is None:
+            d.startup_state = "unknown"
+            d.startup_added = d.startup_removed = d.startup_diff = d.startup_checked_at = None
+        return None
+    d.startup_state = check.state
+    d.startup_added, d.startup_removed = check.added, check.removed
+    d.startup_diff = check.diff if check.state == "unsaved" else None
+    d.startup_checked_at = utcnow()
+    if check.state == "unsaved" and before != "unsaved":
+        record(db, "startup.unsaved", f"running-config が startup-config に保存されていません"
+               f"（+{check.added} / -{check.removed} 行）", level="warning",
+               detail={"added": check.added, "removed": check.removed}, **kw)
+        return (check.added or 0, check.removed or 0) if before == "synced" else None
+    if check.state == "synced" and before == "unsaved":
+        record(db, "startup.synced", "running-config が startup-config に保存されました", **kw)
+    return None
 
 
 async def _recheck_baseline(device_id: str, device_name: str, actor: str | None, ref: str | None,
@@ -408,6 +451,12 @@ def collect_device_config(
                     send_inventory_notification.delay(device_id, inventory_changes, ref)
             except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
                 logger.exception("機器情報の変化の通知を投入できませんでした device=%s", device_id)
+        if result.unsaved_notify:
+            try:
+                if _run_async(_wants("unsaved")):
+                    send_unsaved_notification.delay(device_id, *result.unsaved_notify, ref)
+            except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
+                logger.exception("保存し忘れの通知を投入できませんでした device=%s", device_id)
         if result.success:
             # 基準の世代があれば、最新とのずれを計算し直す（失敗しても収集は成功のまま）。変更なしの回は古い・未計算のときだけ
             try:
@@ -487,6 +536,19 @@ def send_drift_notification(device_id: str, added: int, removed: int, baseline_h
         return _run_async(run())
     except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
         logger.exception("基準からのずれの通知に失敗しました device=%s", device_id)
+        return {"error": True}
+
+
+@celery_app.task
+def send_unsaved_notification(device_id: str, added: int, removed: int, ref: str | None = None):
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_unsaved(db, device_id, added, removed, ref=ref)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
+        logger.exception("保存し忘れの通知に失敗しました device=%s", device_id)
         return {"error": True}
 
 

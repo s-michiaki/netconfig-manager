@@ -23,6 +23,7 @@ interface Dashboard {
   failing: Failing[];
   never: Never[];
   reviews: { days: number; unreviewed: number; unexpected: number } | null; // コンフィグを閲覧できない人には null
+  startup: { enabled: boolean; targets: number; unsaved: number }; // 保存し忘れ（対象の機種の機器数と、保存されていない機器数）
   baselines: { total: number; drift: number; unknown: number } | null; // 基準を指定した機器の数とずれている機器の数（閲覧できない人には null）
   changes: { last_24h: number; last_7d: number; recent: Change[] };
   compliance: { rules: number; by_severity: { high: number; medium: number; low: number }; violations: number; devices: number };
@@ -110,6 +111,10 @@ export default function DashboardPage() {
           {bl && bl.total > 0 && (
             <Tile label="基準からずれている機器" value={bl.drift} to="/reviews?tab=drift" tone={bl.drift ? "warn" : "good"}
                   sub={`${bl.drift ? `基準を指定した ${bl.total} 台のうち` : bl.unknown ? `基準を指定した ${bl.total} 台` : `基準を指定した ${bl.total} 台はすべて基準どおり`}${bl.unknown ? `（未計算 ${bl.unknown} 台）` : ""}`} />
+          )}
+          {data.startup.enabled && (data.startup.unsaved > 0 || data.startup.targets > 0) && (
+            <Tile label="保存されていない変更" value={data.startup.unsaved} to="/devices" tone={data.startup.unsaved ? "warn" : "good"}
+                  sub={data.startup.unsaved ? `running を startup に保存し忘れた機器（対象 ${data.startup.targets} 台）` : `対象 ${data.startup.targets} 台はすべて保存済み`} />
           )}
           <Tile label="コンプライアンス違反" value={cp.violations} to="/compliance" tone={sev.high ? "bad" : cp.violations ? "warn" : cp.rules ? "good" : undefined}
                 sub={cp.rules === 0 ? "ルールが登録されていません"

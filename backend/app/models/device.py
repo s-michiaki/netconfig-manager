@@ -125,6 +125,14 @@ class Device(Base):
     os_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reported_hostname: Mapped[str | None] = mapped_column(String(128), nullable=True)  # 機器に設定されているホスト名
     inventory_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # 最後に読み取れた日時
+    # 保存し忘れの検出（startup-config と running-config の不一致。services/startup_check.py）
+    # startup_state: synced（一致）/ unsaved（保存されていない変更がある）/ unknown（比べられなかった）/ NULL（対象外・無効）
+    startup_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    startup_added: Mapped[int | None] = mapped_column(Integer, nullable=True)  # running にだけある行数
+    startup_removed: Mapped[int | None] = mapped_column(Integer, nullable=True)  # startup にだけある行数
+    # unified diff（コンフィグの中身を含むので、API は GET /api/devices/{id}/startup-diff だけで返す）
+    startup_diff: Mapped[str | None] = mapped_column(Text, nullable=True, deferred=True)  # 一覧では読み込まない
+    startup_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 

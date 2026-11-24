@@ -28,6 +28,7 @@ interface Notification {
   on_inventory: boolean;
   on_ping: boolean;
   on_drift: boolean;
+  on_unsaved: boolean;
   last_sent_at: string | null;
   last_error: string | null;
 }
@@ -56,7 +57,7 @@ function targetText(n: Notification, groups: DeviceGroup[]): string {
   return names.length ? names.join("・") : "（なし）";
 }
 
-type EventKey = "on_change" | "on_violation" | "on_failure" | "on_inventory" | "on_ping" | "on_drift" | "on_system";
+type EventKey = "on_change" | "on_violation" | "on_failure" | "on_inventory" | "on_ping" | "on_drift" | "on_unsaved" | "on_system";
 const EVENT_OPTIONS: [EventKey, string, string][] = [
   ["on_change", "コンフィグの変更", "収集で設定の変更が見つかったとき"],
   ["on_violation", "コンプライアンス違反の発生", "新しく違反になったとき（同時に多数の機器が違反になったときは1通にまとめます）"],
@@ -64,6 +65,7 @@ const EVENT_OPTIONS: [EventKey, string, string][] = [
   ["on_inventory", "機器情報の変化", "OS のバージョンアップ、シリアル番号・モデルの変化（機器の交換）など、収集のついでに読み取った機器情報が変わったとき"],
   ["on_ping", "Ping監視", "常時監視している機器・IP が続けて応答しなくなったとき、応答が戻ったとき（同時に多数が落ちたときは1通にまとめます）"],
   ["on_drift", "基準からのずれ", "基準の世代を指定した機器が、基準と違うコンフィグになったとき（ずれたままの間は、収集のたびには通知しません）"],
+  ["on_unsaved", "保存し忘れ", "running-config が startup-config に保存されていない状態になったとき（保存されないままの間は、収集のたびには通知しません）"],
   ["on_system", "システムの異常", "worker・スケジューラーの停止、長期間収集できていない機器、ディスク・証明書の期限など（対象の機器に関係なく通知）"],
 ];
 
@@ -85,7 +87,7 @@ interface FormState {
   email: string; // 1 行に 1 件
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
   on_change: boolean; on_violation: boolean; on_failure: boolean; on_system: boolean;
-  on_inventory: boolean; on_ping: boolean; on_drift: boolean;
+  on_inventory: boolean; on_ping: boolean; on_drift: boolean; on_unsaved: boolean;
 }
 
 function initForm(n: Notification | null): FormState {
@@ -93,7 +95,7 @@ function initForm(n: Notification | null): FormState {
     discord: "", clearDiscord: false, slack: "", clearSlack: false, email: (n?.email_to ?? []).join("\n"),
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
     on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false, on_system: n?.on_system ?? true,
-    on_inventory: n?.on_inventory ?? true, on_ping: n?.on_ping ?? true, on_drift: n?.on_drift ?? false,
+    on_inventory: n?.on_inventory ?? true, on_ping: n?.on_ping ?? true, on_drift: n?.on_drift ?? false, on_unsaved: n?.on_unsaved ?? false,
   };
 }
 
@@ -108,7 +110,7 @@ function toPayload(mode: Mode, f: FormState) {
     device_group_ids: f.all_devices ? [] : f.device_group_ids,
     include_ungrouped: f.all_devices ? false : f.include_ungrouped,
     on_change: f.on_change, on_violation: f.on_violation, on_failure: f.on_failure, on_system: f.on_system,
-    on_inventory: f.on_inventory, on_ping: f.on_ping, on_drift: f.on_drift,
+    on_inventory: f.on_inventory, on_ping: f.on_ping, on_drift: f.on_drift, on_unsaved: f.on_unsaved,
   };
 }
 
@@ -254,7 +256,7 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const activeGroups = data.groups.filter((g) => g.notification.mode === "custom");
   return (
     <div className="card ntf-card">
-      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なし・基準からのずれを、Discord / Slack・メールに要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
+      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なし・基準からのずれ・保存し忘れを、Discord / Slack・メールに要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
       <div className="ntf-modes" role="radiogroup">
         {([
           ["inherit", "所属グループの設定を使う", "管理者が設定したユーザーグループの通知先・対象で通知します"],
@@ -473,6 +475,7 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
             <option value="inventory">機器情報の変化</option>
             <option value="ping">Ping監視</option>
             <option value="drift">基準からのずれ</option>
+            <option value="unsaved">保存し忘れ</option>
           </select>
           <button className="btn" onClick={runPreview}>確認</button>
         </div>

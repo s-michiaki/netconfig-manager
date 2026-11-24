@@ -43,6 +43,24 @@ test("機器台帳（モデル・OS・シリアル）を表示し、検索と CS
   expect(text).toContain("SW-2F");
 });
 
+test("保存し忘れの機器に「未保存」のバッジが出て、押すと差分を表示する", async ({ page }) => {
+  await login(page, USERS.viewer);
+  // 一致している機器・対象外の機器にはバッジを出さない
+  await expect(page.locator(".device-card", { hasText: "Core-SW01" }).locator(".startup-badge")).toHaveCount(0);
+  const card = page.locator(".device-card", { hasText: "SW-2F" });
+  await card.getByRole("button", { name: "未保存" }).click();
+  const modal = page.getByRole("dialog", { name: "保存されていない変更" });
+  await expect(modal).toContainText("+2 行 / -1 行");
+  await expect(modal.locator(".diff-add").filter({ hasText: "+ shutdown" })).toBeVisible();
+  await expect(modal.locator(".diff-del").filter({ hasText: "- description old-uplink" })).toBeVisible();
+  await modal.getByRole("button", { name: "閉じる" }).click();
+  await expect(modal).toHaveCount(0);
+  // ダッシュボードのタイル
+  await page.goto("/dashboard");
+  const tile = page.locator(".dash-tile", { hasText: "保存されていない変更" });
+  await expect(tile.locator(".dash-tile-value")).toHaveText("1");
+});
+
 /** CSV 一括登録のテストで作った機器を消す（e2e の DB は全テストで共有。ほかのテストの件数を変えないように） */
 async function deleteImported(page: import("@playwright/test").Page, prefix: string) {
   const token = await page.evaluate(() => localStorage.getItem("access_token"));

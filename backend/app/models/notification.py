@@ -7,7 +7,7 @@
 - 対象は機器のグループ（device_group_ids、未分類は include_ungrouped）。all_devices なら全機器
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
   on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
-  on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）
+  on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）/ on_unsaved（保存し忘れ）
 - 通知先は Discord / Slack の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
@@ -73,6 +73,8 @@ class NotificationSetting(Base):
     on_ping: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=sa_false())
     # 基準からのずれ（ずれなし → ずれあり に変わったとき）。既定は無効
     on_drift: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # 保存し忘れ（startup と running の不一致に変わったとき）。既定は無効
+    on_unsaved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -86,7 +88,7 @@ class NotificationSetting(Base):
         return [x for x in v if isinstance(x, str)]
 
     def wants(self, event: str) -> bool:
-        """この設定で通知する内容か（change / violation / failure / system / inventory / ping / drift）"""
+        """この設定で通知する内容か（change / violation / failure / system / inventory / ping / drift / unsaved）"""
         return bool(getattr(self, f"on_{event}", False))
 
     def matches(self, device_group_id: str | None) -> bool:

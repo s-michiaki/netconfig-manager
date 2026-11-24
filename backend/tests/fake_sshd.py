@@ -1,6 +1,10 @@
 """テスト用の簡易SSHサーバー（Cisco風 / PAN-OS風 / FortiGate風 / AlliedWare Plus風 / 汎用プロンプト）
 
 start(pubkey=..., password=..., mode="cisco"|"panos"|"fortinet"|"awplus"|"generic") で起動
+- cisco / awplus は show startup-config に応答する。start(startup=...) か state["startup"] で出力を切り替える
+  "same"（running と同じ。既定）/ "different"（保存されていない変更がある）/ "absent"（startup-config が無い）/
+  "pager"（--More-- で止まる）/ "empty"（何も出さない）/ "silent"（応答もプロンプトも返さない）/
+  "close"（チャネルを閉じる）/ "error"（コンフィグではない短いエラーの文言）
 - パスワード認証・キーボード対話認証・公開鍵認証に対応
 """
 import socket
@@ -112,6 +116,24 @@ def _lines(ch):
             yield line
 
 
+def _startup_output(running: str, mode: str, platform: str = "cisco") -> str | None:
+    """show startup-config の出力。None なら応答しない（--More-- で止まる）。
+    実機と同じく、startup には running の出力にだけ付く行（Building configuration... など）が無く、別の見出しが付く"""
+    if mode == "absent":
+        return "startup-config is not present"
+    if mode == "empty":
+        return ""
+    if mode == "error":
+        return "% Unable to read the configuration.\r\n% Please try again later."
+    body = [ln for ln in running.split("\r\n")
+            if not ln.startswith(("Building configuration", "Current configuration", "! Last configuration change"))]
+    if mode == "different":
+        body = [" description 保存済みの説明" if ln.strip().startswith("description") else ln for ln in body]
+    head = ["Using 1234 out of 262144 bytes", "! Last configuration change at 12:00:00 JST", "! NVRAM config last updated at 12:00:00 JST"
+            ] if platform == "cisco" else []
+    return "\r\n".join([*head, *body])
+
+
 def _cisco(ch, pager=None, state=None):
     state = state if state is not None else {}
     ch.send("R1#")
@@ -130,6 +152,17 @@ def _cisco(ch, pager=None, state=None):
             continue
         if line.strip() == "show running-config":
             out = CONFIG
+        elif line.strip() == "show startup-config":
+            mode = state.get("startup", "same")
+            out = _startup_output(CONFIG, mode)
+            if mode == "silent":
+                continue  # 応答もプロンプトも返さない（読み取りが時間切れになる）
+            if mode == "close":
+                ch.close()
+                return
+            if mode == "pager":
+                ch.send(line + "\r\nUsing 1234 out of 262144 bytes\r\n --More-- ")
+                continue
         elif line.strip() == "exit":
             ch.send(line + "\r\n")
             ch.close()
@@ -278,6 +311,12 @@ def _awplus(ch, state, enable_password=None):
             priv = True
         elif cmd == "show system":
             out = state.get("inventory", AWPLUS_SYSTEM)
+        elif cmd == "show startup-config":
+            mode = state.get("startup", "same")
+            if mode == "pager":
+                ch.send(line + "\r\n!\r\nhostname awplus\r\n--More--")
+                continue
+            out = _startup_output(AWPLUS_CONFIG, mode, "awplus")
         elif cmd == "show running-config":
             if not priv:
                 out = "% Invalid input detected at '^' marker."
@@ -324,6 +363,7 @@ def handle(sock, key, state, cfg=None):
     if ch is None:
         return
     state["server"] = srv
+    state.setdefault("startup", cfg.get("startup", "same"))
     state["auth_method"] = srv.auth_method
     try:
         if cfg["mode"] == "panos":

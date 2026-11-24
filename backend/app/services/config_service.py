@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import git
 from netmiko import (
@@ -68,6 +69,8 @@ class PlatformSpec:
     note: str | None = None
     # Netmiko の device_type（省略時はプラットフォームのキーと同じ）
     driver: str | None = None
+    # 保存済みの設定（startup-config）を表示するコマンド。running との不一致（保存し忘れ）の検出に使う。None なら対象外
+    startup_command: str | None = None
 
     @property
     def device_type(self) -> str:
@@ -89,16 +92,18 @@ _FASTPATH_IGNORE = [
 # 先頭に出る「曜日 月 日 時刻」の行（IOS-XR など）
 _TIMESTAMP_LINE = r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d+ \d{2}:\d{2}:\d{2}"
 
+_STARTUP_CMD = "show startup-config"  # 保存し忘れの検出の対象（Cisco IOS / IOS-XE / NX-OS・Arista EOS・AlliedWare Plus）
+
 _FW_NOTE_ENABLE = "特権モードのパスワードが必要な場合は Enable パスワードを設定してください"
 
 PLATFORMS: dict[str, PlatformSpec] = {
     # ---------------------------------------------------------------- Cisco
     "cisco_ios": _spec("Cisco IOS", "Cisco", ["show running-config"], supports_enable=True,
-                       ignore_patterns=_CISCO_IOS_IGNORE),
+                       ignore_patterns=_CISCO_IOS_IGNORE, startup_command=_STARTUP_CMD),
     "cisco_xe": _spec("Cisco IOS-XE", "Cisco", ["show running-config"], supports_enable=True,
-                      ignore_patterns=_CISCO_IOS_IGNORE),
+                      ignore_patterns=_CISCO_IOS_IGNORE, startup_command=_STARTUP_CMD),
     "cisco_nxos": _spec(
-        "Cisco NX-OS", "Cisco", ["show running-config"],
+        "Cisco NX-OS", "Cisco", ["show running-config"], startup_command=_STARTUP_CMD,
         ignore_patterns=[r"^!Time: ", r"^!Running configuration last done at: ", r"^!Command: show running-config"],
         icon="l3switch",
     ),
@@ -123,6 +128,7 @@ PLATFORMS: dict[str, PlatformSpec] = {
     "juniper_screenos": _spec("Juniper ScreenOS", "Juniper", ["get config"], icon="firewall"),
     # ---------------------------------------------------------------- Arista
     "arista_eos": _spec("Arista EOS", "Arista", ["show running-config"], supports_enable=True,
+                        startup_command=_STARTUP_CMD,
                         ignore_patterns=[r"^! Command: show running-config"]),
     # ---------------------------------------------------------------- Fortinet
     # show は既定値以外の設定だけを出す（full-configuration は既定値も含み膨大になる）。
@@ -157,7 +163,7 @@ PLATFORMS: dict[str, PlatformSpec] = {
     # ---------------------------------------------------------------- Allied Telesis
     "allied_telesis_awplus": _spec(
         "Allied Telesis AlliedWare Plus", "Allied Telesis", ["show running-config"], supports_enable=True,
-        auto_enable=True,
+        auto_enable=True, startup_command=_STARTUP_CMD,
         note="AlliedWare Plus（x シリーズ・AR シリーズ・GS900 / SH シリーズなど）に対応。"
              "ログイン後に自動で enable します（パスワードを設定している場合は Enable パスワード欄に入力）。"
              "旧 CentreCOM（AlliedWare、Manager > のプロンプト）には未対応です",
@@ -312,6 +318,9 @@ class CollectResult:
     # 適用できずに飛ばした「無視する行」のルール（ignore_rules.Skipped。理由付き）。1 件でもあれば保存しない
     ignore_skipped: list = field(default_factory=list)
     ignore_dropped: tuple[int, int] | None = None  # 無視する行で消した行数と、消す前の行数（警告に使う）
+    # 保存し忘れの検出（startup_check.StartupCheck）。収集に成功したときだけ入る（state が None なら対象外・無効）
+    startup: Any = None
+    unsaved_notify: tuple[int, int] | None = None  # 保存し忘れに変わったとき（追加, 削除の行数）。worker が通知に使う
 
     def as_dict(self) -> dict:
         return {
@@ -440,9 +449,27 @@ def _gather_inventory(conn, device: DeviceConnectionInfo, read_timeout: int) -> 
         return None
 
 
-def fetch_config(device: DeviceConnectionInfo) -> tuple[str, dict | None]:
-    """機器に接続してコンフィグを取得する（生の出力。normalize_config の前）。あわせて機器台帳も読み取る"""
-    def work(conn, spec: PlatformSpec, read_timeout: int) -> tuple[str, dict | None]:
+def _gather_startup(conn, device: DeviceConnectionInfo, spec: PlatformSpec, read_timeout: int) -> str | None:
+    """コンフィグの取得後に、同じセッションで startup-config を読み取る（保存し忘れの検出用）。
+
+    対象外の機種・無効のときは何も送らない。失敗しても収集は失敗にしない（None を返し、状態は unknown になる）
+    """
+    if not settings.STARTUP_CHECK_ENABLED or not spec.startup_command:
+        return None
+    timeout = min(read_timeout, settings.STARTUP_CHECK_TIMEOUT)
+    try:
+        return _send(conn, spec.startup_command, timeout)
+    except Exception as e:  # noqa: BLE001 - startup は付加情報。running は取得済みなので収集は成功として扱う
+        logger.warning("startup-config を取得できませんでした: %s (%s: %s)", device.name, type(e).__name__, e)
+        return None
+
+
+def fetch_config(device: DeviceConnectionInfo) -> tuple[str, dict | None, str | None]:
+    """機器に接続してコンフィグを取得する（生の出力。normalize_config の前）。
+
+    あわせて機器台帳と startup-config（対象の機種だけ）も同じ接続で読み取る。どちらも読めなければ None
+    """
+    def work(conn, spec: PlatformSpec, read_timeout: int) -> tuple[str, dict | None, str | None]:
         output = []
         for cmd in spec.commands:
             output.append(_send(conn, cmd, read_timeout))
@@ -453,7 +480,9 @@ def fetch_config(device: DeviceConnectionInfo) -> tuple[str, dict | None]:
                     output.append(_send(conn, cmd, read_timeout))
             finally:
                 conn.exit_config_mode()
-        return "\n".join(output), _gather_inventory(conn, device, read_timeout)
+        facts = _gather_inventory(conn, device, read_timeout)
+        # startup は最後に読む（読めずに応答が乱れても、コンフィグと台帳には影響しない）
+        return "\n".join(output), facts, _gather_startup(conn, device, spec, read_timeout)
 
     return _with_session(device, work)
 
@@ -576,6 +605,14 @@ def describe_failure(e: BaseException, device: DeviceConnectionInfo) -> tuple[st
     return describe_ssh_error(e), True
 
 
+def _check_startup(device: DeviceConnectionInfo, raw: str, startup_raw: str | None, extra_ignore: list[str] | None):
+    """running と startup を比べる。対象外・無効なら state=None。比べられなくても収集は失敗にしない"""
+    from app.services import startup_check  # startup_check → config_service の循環 import を避ける
+    if not startup_check.enabled_for(device.platform):
+        return startup_check.StartupCheck(None)
+    return startup_check.compare(raw, startup_raw, device.platform, extra_ignore)
+
+
 def collect_config_sync(
     device: DeviceConnectionInfo, triggered_by: str = "manual", extra_ignore: list[str] | None = None,
 ) -> CollectResult:
@@ -584,7 +621,7 @@ def collect_config_sync(
     extra_ignore: 画面で設定した「無視する行」の正規表現（機種のもの＋機器のもの）
     """
     try:
-        raw, facts = fetch_config(device)
+        raw, facts, startup_raw = fetch_config(device)
     except Exception as e:  # noqa: BLE001
         msg, retryable = describe_failure(e, device)
         return CollectResult(success=False, error=msg, retryable=retryable)
@@ -605,10 +642,17 @@ def collect_config_sync(
         result.inventory = facts
         if stats.get("dropped"):
             result.ignore_dropped = (stats["dropped"], stats["before"])
-        return result
     except Exception as e:  # noqa: BLE001
         logger.exception("Gitへの保存に失敗: %s", device.name)
         return CollectResult(success=False, error=f"保存に失敗しました: {type(e).__name__}")
+    # 保存し忘れの検出は付加情報。失敗しても「保存に失敗」にせず、状態を不明にする
+    try:
+        result.startup = _check_startup(device, raw, startup_raw, extra_ignore)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("保存し忘れの検出に失敗しました: %s (%s: %s)", device.name, type(e).__name__, e)
+        from app.services import startup_check
+        result.startup = startup_check.StartupCheck(startup_check.UNKNOWN, reason="検出に失敗しました")
+    return result
 
 
 # ---------------------------------------------------------------- Read

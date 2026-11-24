@@ -70,6 +70,13 @@ def main() -> None:
             await db.execute(update(Device).where(Device.name == "Core-SW01").values(
                 model="C9300-24T", serial_number="FCW2245L0AB", os_version="17.06.05", reported_hostname="Core-SW01",
                 inventory_at=utcnow()))
+            # 保存し忘れの検出（実際は収集のとき worker が startup-config と比べて記録する）。SW-2F だけ未保存
+            await db.execute(update(Device).where(Device.name == "SW-2F").values(
+                startup_state="unsaved", startup_added=2, startup_removed=1, startup_checked_at=utcnow(),
+                startup_diff="--- startup-config\n+++ running-config\n@@ -3,2 +3,3 @@\n interface Gi0/1\n- description old-uplink\n"
+                             "+ description uplink-to-core\n+ shutdown"))
+            await db.execute(update(Device).where(Device.name == "Core-SW01").values(
+                startup_state="synced", startup_added=0, startup_removed=0, startup_checked_at=utcnow()))
             # ダッシュボードの「直近の変更」に出す世代（実際は収集のときに worker が記録する）
             db.add(ConfigSnapshot(device_id=devs["Core-SW01"]["id"], commit_hash=second.commit_hash, collected_at=utcnow(),
                                   lines_added=second.added, lines_removed=second.removed, triggered_by="schedule"))

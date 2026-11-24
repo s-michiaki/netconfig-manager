@@ -1,6 +1,7 @@
-"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準からのずれ
+"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準のずれ・保存し忘れ
 
-通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping / on_drift）。
+通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping / on_drift /
+on_unsaved）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
@@ -54,13 +55,13 @@ TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収�
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
                 "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知",
-                "drift": "基準からのずれの通知"}
+                "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
                  "inventory": "機器情報の変化を通知しました",
                  "ping": "Ping監視の応答なし・復旧を通知しました",
                  "profile": "認証情報プロファイルへの操作を所有者に通知しました",
-                 "drift": "基準からのずれを通知しました"}
+                 "drift": "基準からのずれを通知しました", "unsaved": "保存し忘れを通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
@@ -164,6 +165,11 @@ def _local(at: datetime) -> str:
 def history_url(device_id: str) -> str | None:
     base = settings.PUBLIC_URL.rstrip("/")
     return f"{base}/history?device={device_id}" if base else None
+
+
+def devices_url() -> str | None:
+    base = settings.PUBLIC_URL.rstrip("/")
+    return f"{base}/devices" if base else None
 
 
 def build_payload(kind: str, ev: ChangeEvent) -> dict:
@@ -486,6 +492,22 @@ async def notify_drift(db: AsyncSession, device_id: str, added: int, removed: in
     url = history_url(device.id)
     return await _deliver(db, "drift", [
         (d, _message(d.kind, f"基準からのずれ: {device.name}", facts, url, "差分を画面で確認", 0xF87171), device)
+        for d in dests
+    ], ref)
+
+
+async def notify_unsaved(db: AsyncSession, device_id: str, added: int, removed: int, ref: str | None = None) -> dict:
+    """機器の running-config が startup-config に保存されていないこと（保存し忘れ）を通知する。差分の中身は載せない"""
+    device = await db.get(Device, device_id)
+    if device is None:
+        return {"sent": 0, "failed": 0}
+    group = await db.get(DeviceGroup, device.group_id) if device.group_id else None
+    dests = await resolve_destinations(db, device.group_id, "unsaved")
+    facts = [("機器", f"{device.name}（{device.hostname}）"), ("グループ", group.name if group else "未分類"),
+             ("保存されていない変更", f"+{added} 行 / -{removed} 行"), ("検出", _local(utcnow()))]
+    url = devices_url()
+    return await _deliver(db, "unsaved", [
+        (d, _message(d.kind, f"保存し忘れ: {device.name}", facts, url, "機器の一覧を開く", 0xFBBF24), device)
         for d in dests
     ], ref)
 

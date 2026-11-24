@@ -42,7 +42,7 @@ from app.models.device import (
     DeviceGroup,
     JumpHost,
 )
-from app.services import collect_state, device_import, inventory, login_limit, profile_access
+from app.services import collect_state, device_import, inventory, login_limit, profile_access, startup_check
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
 from app.services.connection import effective_credentials
@@ -161,6 +161,11 @@ class DeviceResponse(BaseModel):
     os_version: str | None = None
     reported_hostname: str | None = None
     inventory_at: datetime | None = None
+    # 保存し忘れの検出（startup と running の不一致）。対象外の機種・無効なら null。差分の本文は含めない
+    startup_state: Literal["synced", "unsaved", "unknown"] | None = None
+    startup_added: int | None = None
+    startup_removed: int | None = None
+    startup_checked_at: datetime | None = None
 
 
 @dataclass
@@ -197,6 +202,9 @@ def _to_response(device: Device, refs: _Refs) -> DeviceResponse:
     resp.jump_host_name = refs.names.get(device.jump_host_id) if device.jump_host_id else None
     resp.group_name = refs.names.get(device.group_id) if device.group_id else None
     resp.credential_profile_name = profile.name if profile is not None else None
+    if not startup_check.enabled_for(device.platform):
+        # 無効・対象外の機種は、以前の値が残っていても出さない（古い「未保存」を出し続けない）
+        resp.startup_state = resp.startup_added = resp.startup_removed = resp.startup_checked_at = None
     return resp
 
 
@@ -472,6 +480,18 @@ async def trigger_collect_all(db: AsyncSession = Depends(get_db), audit: Audit =
 @router.get("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_READ))])
 async def get_device(device_id: str, db: AsyncSession = Depends(get_db)):
     return _to_response(await _get_or_404(db, device_id), await _refs(db))
+
+
+@router.get("/{device_id}/startup-diff", dependencies=[Depends(require(Perm.CONFIG_READ))])
+async def get_startup_diff(device_id: str, db: AsyncSession = Depends(get_db)):
+    """startup-config → running-config の差分（保存されていない変更）。コンフィグの中身なので閲覧権限が要る"""
+    device = await _get_or_404(db, device_id)
+    if not startup_check.enabled_for(device.platform):
+        return {"state": None, "added": None, "removed": None, "diff": None, "checked_at": None}
+    await db.refresh(device, ["startup_diff"])  # 差分は一覧では読み込まない（deferred）。ここでだけ読む
+    return {"state": device.startup_state, "added": device.startup_added, "removed": device.startup_removed,
+            "diff": device.startup_diff if device.startup_state == "unsaved" else None,
+            "checked_at": device.startup_checked_at}
 
 
 @router.put("/{device_id}", response_model=DeviceResponse, dependencies=[Depends(require(Perm.DEVICE_WRITE))])

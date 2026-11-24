@@ -253,6 +253,9 @@ body {
   max-height: 400px;
 }
 
+.startup-badge { border: 0; cursor: pointer; font: inherit; font-size: 11px; }
+.startup-badge:hover { filter: brightness(1.2); }
+
 .diff-add { color: #3fb950; }
 .diff-del { color: #f85149; }
 .diff-meta { color: #8b949e; }
