@@ -83,16 +83,22 @@ test("認証情報プロファイルを作って機器に割り当て、カー�
   await expect(page.locator(".device-card-profile")).toHaveCount(0);
 });
 
-test("認証情報プロファイルのメニューは管理者だけに表示する", async ({ page }) => {
+test("認証情報プロファイルのメニューは管理者だけに表示する", async ({ browser }) => {
   for (const user of [USERS.op, USERS.viewer]) {
-    await login(page, user);
-    await expect(page.locator('a[href="/devices"]').first()).toBeVisible();
-    await expect(page.locator('a[href="/credential-profiles"]')).toHaveCount(0);
-    await page.evaluate(() => localStorage.clear());
+    // ユーザーごとに新しいコンテキストを使う（古い画面のポーリングが 401 でログイン画面へ移動し、次のログインと重なるのを防ぐ）
+    const context = await browser.newContext();
+    try {
+      const page = await context.newPage();
+      await login(page, user);
+      await expect(page.locator('a[href="/devices"]').first()).toBeVisible();
+      await expect(page.locator('a[href="/credential-profiles"]')).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
   }
 });
 
-test("ほかの管理者のプロファイルは編集・割り当てできず、引き継ぐと扱えるようになる", async ({ page }) => {
+test("ほかの管理者のプロファイルは編集・割り当てできず、引き継ぐと扱えるようになる", async ({ page, browser }) => {
   const NAME = "E2E-所有者テスト";
   const OTHER = { name: "e2e-admin2", password: "password-1234" };
   await login(page);
@@ -125,27 +131,34 @@ test("ほかの管理者のプロファイルは編集・割り当てできず�
     await expect(row.getByRole("button", { name: "編集" })).toBeVisible();
 
     // 別の管理者: 見えるが、編集も割り当てもできない
-    await page.evaluate(() => localStorage.clear());
-    await login(page, OTHER);
-    await page.locator('a[href="/credential-profiles"]').first().click();
-    await expect(row).toContainText("admin");
-    await expect(row).toContainText("操作できません");
-    await expect(row.getByRole("button", { name: "編集" })).toHaveCount(0);
-    await page.locator('a[href="/devices"]').first().click();
-    await page.locator(".device-card", { hasText: "SW-3F" }).getByRole("button", { name: "編集" }).click();
-    const dm = page.locator(".modal");
-    await dm.getByRole("tab", { name: "プロファイルを使う" }).click();
-    const option = dm.getByLabel("認証情報プロファイル").locator("option", { hasText: NAME });
-    await expect(option).toBeDisabled();
-    await expect(option).toContainText("使用できません");
-    await dm.getByRole("button", { name: "キャンセル" }).click();
+    // 別の管理者は別のコンテキストで開く（同じ page で clear → login すると古い画面のポーリングと重なる）
+    const otherContext = await browser.newContext();
+    try {
+      const page2 = await otherContext.newPage();
+      await login(page2, OTHER);
+      const row2 = page2.locator("tr", { hasText: NAME });
+      await page2.locator('a[href="/credential-profiles"]').first().click();
+      await expect(row2).toContainText("admin");
+      await expect(row2).toContainText("操作できません");
+      await expect(row2.getByRole("button", { name: "編集" })).toHaveCount(0);
+      await page2.locator('a[href="/devices"]').first().click();
+      await page2.locator(".device-card", { hasText: "SW-3F" }).getByRole("button", { name: "編集" }).click();
+      const dm = page2.locator(".modal");
+      await dm.getByRole("tab", { name: "プロファイルを使う" }).click();
+      const option = dm.getByLabel("認証情報プロファイル").locator("option", { hasText: NAME });
+      await expect(option).toBeDisabled();
+      await expect(option).toContainText("使用できません");
+      await dm.getByRole("button", { name: "キャンセル" }).click();
 
-    // 引き継ぐと所有者になり、編集できる
-    await page.locator('a[href="/credential-profiles"]').first().click();
-    page.once("dialog", (d) => { expect(d.message()).toContain("監査ログに残り"); void d.accept(); });
-    await row.getByRole("button", { name: "引き継ぐ" }).click();
-    await expect(row.getByRole("button", { name: "編集" })).toBeVisible();
-    await expect(row).toContainText(OTHER.name);
+      // 引き継ぐと所有者になり、編集できる
+      await page2.locator('a[href="/credential-profiles"]').first().click();
+      page2.once("dialog", (d) => { expect(d.message()).toContain("監査ログに残り"); void d.accept(); });
+      await row2.getByRole("button", { name: "引き継ぐ" }).click();
+      await expect(row2.getByRole("button", { name: "編集" })).toBeVisible();
+      await expect(row2).toContainText(OTHER.name);
+    } finally {
+      await otherContext.close();
+    }
   } finally {
     await removeProfile(await authHeaders(page));
     await removeUser();

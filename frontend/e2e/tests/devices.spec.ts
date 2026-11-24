@@ -93,12 +93,18 @@ test("CSV から機器をまとめて登録する（内容を確認してから�
   }
 });
 
-test("CSV 取り込みは管理者だけに表示する", async ({ page }) => {
+test("CSV 取り込みは管理者だけに表示する", async ({ browser }) => {
   for (const user of [USERS.op, USERS.viewer]) {
-    await login(page, user);
-    await expect(page.getByRole("button", { name: "台帳 CSV" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "CSV 取り込み" })).toHaveCount(0);
-    await page.evaluate(() => localStorage.clear());
+    // ユーザーごとに新しいコンテキストを使う（古い画面のポーリングが 401 でログイン画面へ移動し、次のログインと重なるのを防ぐ）
+    const context = await browser.newContext();
+    try {
+      const page = await context.newPage();
+      await login(page, user);
+      await expect(page.getByRole("button", { name: "台帳 CSV" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "CSV 取り込み" })).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
   }
 });
 
