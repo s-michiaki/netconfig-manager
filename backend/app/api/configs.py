@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.config_comments import comment_dict, comments_for
+from app.api.config_reviews import review_dict, reviews_for
 from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name
@@ -93,13 +94,16 @@ async def list_history(
     limit: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """デバイスのコンフィグ収集履歴（Gitコミット一覧）を返す。世代へのコメントも含める"""
+    """デバイスのコンフィグ収集履歴（Gitコミット一覧）を返す。世代へのコメント・確認の状態も含める"""
     await _ensure_device(db, device_id)
     history = await run_in_threadpool(get_config_history, device_id, limit)
-    comments = await comments_for(db, device_id, [c["full_hash"] for c in history])
+    hashes = [c["full_hash"] for c in history]
+    comments = await comments_for(db, device_id, hashes)
+    reviews = await reviews_for(db, device_id, hashes)
     for c in history:
         found = comments.get(c["full_hash"])
         c["comment"] = comment_dict(found) if found else None
+        c["review"] = review_dict(reviews.get(c["full_hash"]))  # 最初の世代（is_first）は確認の対象外
     return history
 
 

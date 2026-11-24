@@ -7,6 +7,7 @@ from app.models.compliance import ComplianceException, ComplianceResult, Complia
 from app.models.device import (
     CollectLog,
     ConfigComment,
+    ConfigReview,
     ConfigSnapshot,
     CredentialProfile,
     Device,
@@ -30,6 +31,7 @@ __all__ = [
     "ComplianceResult",
     "ComplianceRule",
     "ConfigComment",
+    "ConfigReview",
     "ConfigSnapshot",
     "CredentialProfile",
     "Device",

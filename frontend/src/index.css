@@ -266,7 +266,20 @@ body {
   background: var(--color-accent-dim); color: var(--color-text);
 }
 .hist-actions { display: flex; gap: 4px; flex-wrap: nowrap; }
+.hist-actions .btn { white-space: nowrap; }
 .hist-has-comment td { border-bottom: none; }
+/* 変更の確認 */
+.review-badge { margin-left: 6px; white-space: nowrap; }
+.review-badge-btn { border: none; cursor: pointer; font-family: inherit; }
+.review-badge-btn:hover { filter: brightness(1.2); }
+.review-filters { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; margin-bottom: 12px; }
+.review-filters .audit-field { width: 140px; }
+.review-bulk { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-surface2); }
+.review-message { color: var(--color-success); font-size: 12px; margin: 0 0 8px; }
+.review-table td { vertical-align: middle; font-size: 12px; }
+.review-hash { color: var(--color-accent); }
+.review-memo { max-width: 260px; }
+.review-comment { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); }
 .hist-comment-row td { padding-top: 0; }
 .hist-comment {
   display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 8px;

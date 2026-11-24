@@ -139,6 +139,9 @@ class Device(Base):
     config_comments: Mapped[list["ConfigComment"]] = relationship(
         "ConfigComment", back_populates="device", cascade="all, delete-orphan"
     )
+    config_reviews: Mapped[list["ConfigReview"]] = relationship(
+        "ConfigReview", back_populates="device", cascade="all, delete-orphan"
+    )
 
 
 class ConfigSnapshot(Base):
@@ -181,6 +184,30 @@ class ConfigComment(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     device: Mapped["Device"] = relationship("Device", back_populates="config_comments")
+
+
+class ConfigReview(Base):
+    """変更（世代）の確認の状態。確認済み（confirmed）か想定外（unexpected）。付いていない世代は「未確認」
+
+    config_comments と同じく Git のコミットに結び付ける。確認した人は名前で持つ（ユーザーを削除しても残す）
+    """
+
+    __tablename__ = "config_reviews"
+    __table_args__ = (UniqueConstraint("device_id", "commit_hash", name="uq_config_reviews_device_commit"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    device_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("devices.id", name="fk_config_reviews_device_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)  # 完全な 40 桁
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # confirmed / unexpected
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reviewed_by_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    device: Mapped["Device"] = relationship("Device", back_populates="config_reviews")
 
 
 class CollectLog(Base):

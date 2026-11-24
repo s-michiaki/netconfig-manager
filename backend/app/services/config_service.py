@@ -597,6 +597,7 @@ def get_config_history(device_id: str, limit: int = 50) -> list[dict]:
             # タイムゾーン付きで返す（ブラウザ側でローカル時刻に正しく変換される）
             "date": datetime.fromtimestamp(c.committed_date, tz=UTC).isoformat(),
             "author": c.author.name,
+            "is_first": not c.parents,  # 最初の世代（初回の収集）。変更の確認の対象外
         }
         for c in commits
     ]
@@ -652,6 +653,52 @@ def get_config_version(device_id: str, commit_hash: str | None = None) -> dict |
         "date": datetime.fromtimestamp(commit.committed_date, tz=UTC).isoformat(),
         "content": blob.data_stream.read().decode("utf-8", errors="replace"),
     }
+
+
+def resolve_commit_info(device_id: str, commit_hash: str) -> tuple[str, bool] | None:
+    """短縮ハッシュを完全な 40 桁にし、最初の世代（親のコミットが無い）かどうかも返す。その機器の世代でなければ None
+
+    コンフィグの本文は読まない（一括で多数の世代を調べるため）
+    """
+    _check_hash(commit_hash)
+    repo = _open_repo(device_id)
+    if repo is None:
+        return None
+    try:
+        commit = repo.commit(commit_hash)
+        return commit.hexsha, not commit.parents
+    except (ValueError, AttributeError, git.BadName, git.BadObject, git.GitCommandError):
+        return None
+
+
+# 機器 ID → 最初のコミット（初回の収集）のハッシュ。最初のコミットは変わらないのでプロセス内に覚える
+_FIRST_COMMITS: dict[str, str] = {}
+_FIRST_COMMITS_MAX = 5000
+
+
+def peek_first_commit(device_id: str) -> str | None:
+    """覚えている最初のコミット。Git は読まない"""
+    return _FIRST_COMMITS.get(device_id)
+
+
+def first_commit_hash(device_id: str) -> str | None:
+    """機器の最初のコミット（親の無いコミット）のハッシュ。リポジトリ・コミットが無ければ None（その場合は覚えない）"""
+    cached = _FIRST_COMMITS.get(device_id)
+    if cached:
+        return cached
+    repo = _open_repo(device_id)
+    if repo is None:
+        return None
+    try:
+        roots = repo.git.rev_list("--max-parents=0", "HEAD").split()
+    except (ValueError, git.GitCommandError):  # コミットが 1 件も無いリポジトリ
+        return None
+    if not roots:
+        return None
+    if len(_FIRST_COMMITS) >= _FIRST_COMMITS_MAX:
+        _FIRST_COMMITS.pop(next(iter(_FIRST_COMMITS)))
+    _FIRST_COMMITS[device_id] = roots[-1]  # 新しい順に並ぶので、最後が最も古い
+    return roots[-1]
 
 
 def has_config(device_id: str) -> bool:

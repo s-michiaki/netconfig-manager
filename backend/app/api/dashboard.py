@@ -7,13 +7,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.config_reviews import count_unexpected, count_unreviewed, first_commits, review_dict
 from app.api.deps import get_current_user, require
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm, has_permission
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceResult, ComplianceRule
-from app.models.device import CollectLog, ConfigComment, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models.device import CollectLog, ConfigComment, ConfigReview, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.models.user import User
 
 router = APIRouter()
@@ -96,6 +97,22 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
             text = " ".join(c.body.split())
             comments[(c.device_id, c.commit_hash)] = text if len(text) <= COMMENT_EXCERPT else text[:COMMENT_EXCERPT] + "…"
 
+    # 変更の確認（未確認の変更の数・想定外の数・直近の変更ごとの状態）。コンフィグを閲覧できる人にだけ出す
+    reviews = None
+    recent_reviews: dict[tuple[str, str], dict | None] = {}
+    firsts: dict[str, str] = {}
+    if has_permission(user.role, Perm.CONFIG_READ):
+        reviews = {"days": settings.CHANGE_REVIEW_DAYS,
+                   "unreviewed": await count_unreviewed(db, settings.CHANGE_REVIEW_DAYS),
+                   "unexpected": await count_unexpected(db)}
+        if snaps:
+            firsts = await first_commits({s.device_id for s in snaps})
+            found = await db.execute(select(ConfigReview).where(
+                ConfigReview.device_id.in_({s.device_id for s in snaps}),
+                ConfigReview.commit_hash.in_({s.commit_hash for s in snaps}),
+            ))
+            recent_reviews = {(r.device_id, r.commit_hash): review_dict(r) for r in found.scalars()}
+
     return {
         "devices": {"total": len(devices), "active": len(active), "inactive": len(devices) - len(active),
                     "failing": len(failing), "never": len(never),
@@ -107,7 +124,11 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
                     "recent": [{"device_id": s.device_id, "device_name": names.get(s.device_id, "（削除済み）"),
                                 "at": s.collected_at, "added": s.lines_added, "removed": s.lines_removed,
                                 "commit": s.commit_hash[:8], "full_commit": s.commit_hash, "triggered_by": s.triggered_by,
-                                "comment": comments.get((s.device_id, s.commit_hash))} for s in snaps]},
+                                "comment": comments.get((s.device_id, s.commit_hash)),
+                                # 確認の状態（None は未確認）。最初の世代は確認の対象外なので first を付ける
+                                "review": recent_reviews.get((s.device_id, s.commit_hash)),
+                                "first": firsts.get(s.device_id) == s.commit_hash} for s in snaps]},
+        "reviews": reviews,
         "compliance": {"rules": rules, "by_severity": by_severity, "violations": sum(by_severity.values()),
                        "devices": len({d for d, _ in fails if d in names})},
         "schedules": {"active": len(upcoming), "upcoming": upcoming[:5]},

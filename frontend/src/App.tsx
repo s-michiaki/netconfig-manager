@@ -43,6 +43,7 @@ const UsersPage = lazyPage(() => import("./pages/UsersPage"));
 const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
 const SystemPage = lazyPage(() => import("./pages/SystemPage"));
 const DashboardPage = lazyPage(() => import("./pages/DashboardPage"));
+const ReviewsPage = lazyPage(() => import("./pages/ReviewsPage"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
 
 const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
@@ -56,6 +57,7 @@ const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; featur
   // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
   { path: "/monitoring", label: "モニタリング", icon: "📈", perm: PERM.MONITOR_READ, feature: "monitoring" },
   { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
+  { path: "/reviews", label: "変更の確認", icon: "☑", perm: PERM.CONFIG_READ },
   { path: "/search", label: "コンフィグ検索", icon: "🔎", perm: PERM.CONFIG_READ },
   { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
   { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
@@ -204,6 +206,7 @@ function Layout() {
             element={<RequirePerm perm={PERM.DEVICE_WRITE}><CredentialProfilesPage /></RequirePerm>} />
           <Route path="/collect" element={<RequirePerm perm={PERM.COLLECT}><CollectPage /></RequirePerm>} />
           <Route path="/history" element={<RequirePerm perm={PERM.CONFIG_READ}><HistoryPage /></RequirePerm>} />
+          <Route path="/reviews" element={<RequirePerm perm={PERM.CONFIG_READ}><ReviewsPage /></RequirePerm>} />
           <Route path="/search" element={<RequirePerm perm={PERM.CONFIG_READ}><SearchPage /></RequirePerm>} />
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />

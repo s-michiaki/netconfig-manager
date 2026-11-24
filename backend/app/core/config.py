@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     GIT_EXPORT_DELAY_SEC: int = Field(default=60, ge=0, le=3600)  # 収集で変わってから push するまで（まとめるため）
     GIT_EXPORT_TIMEOUT: int = Field(default=120, ge=10, le=1800)  # push の上限（秒）
     TIMEZONE: str = "Asia/Tokyo"
+    # 変更の確認（未確認の変更の一覧・ダッシュボードの「未確認の変更」で数える期間。日数）
+    CHANGE_REVIEW_DAYS: int = Field(default=30, ge=1, le=365)
 
     # --- 認証 ---
     # 必須。デフォルト値は持たせない（未設定・弱い値なら起動時にエラー）

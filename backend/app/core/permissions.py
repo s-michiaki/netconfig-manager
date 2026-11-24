@@ -18,6 +18,7 @@ class Perm(str, Enum):
     DEVICE_WRITE = "device:write"  # 機器の登録・編集・削除（認証情報を扱うため admin のみ）
     CONFIG_READ = "config:read"  # 履歴・差分・コンフィグ内容の閲覧
     CONFIG_COMMENT = "config:comment"  # 世代へのコメント（作業内容のメモ）の追加・編集・削除。閲覧は CONFIG_READ
+    CONFIG_REVIEW = "config:review"  # 変更（世代）の確認（確認済み・想定外）を付ける・戻す。閲覧は CONFIG_READ
     COLLECT = "collect:run"  # 収集の実行・タスク状態の確認
     TERMINAL = "terminal:use"  # SSHターミナル（機器を直接操作できる）
     SCHEDULE_READ = "schedule:read"
@@ -42,6 +43,7 @@ _VIEWER = {
 }
 _OPERATOR = _VIEWER | {
     Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE, Perm.CONFIG_COMMENT,
+    Perm.CONFIG_REVIEW,
 }
 _ADMIN = set(Perm)
 

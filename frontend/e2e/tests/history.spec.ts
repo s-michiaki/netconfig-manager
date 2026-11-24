@@ -5,7 +5,7 @@ import { USERS, login } from "./helpers";
 // Linux のブラウザは文字コードが UTF-8 の環境でないと日本語のファイル名を "download" に置き換えるため、UTF-8 で起動する
 test.use({ launchOptions: { env: { ...process.env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" } } });
 
-// Core-SW01 は 2 世代（2 世代目で logging host を追加）。他の機器は 1 世代（seed.py）
+// Core-SW01 は 2 世代（2 世代目で logging host を追加）。SW-3F も 2 世代（変更の確認用。reviews.spec.ts）。他の機器は 1 世代（seed.py）
 
 test("世代を日時で選んで差分を見られ、一覧の A・B でも選べる", async ({ page }) => {
   await login(page, USERS.viewer);

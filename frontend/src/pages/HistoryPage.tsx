@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { downloadFile } from "../components/CsvButton";
+import ReviewModal, { ReviewBadge, type Review } from "../components/ReviewModal";
 
 interface Device { id: string; name: string; group_name: string | null; }
 /** 世代へのコメント（作業内容のメモ） */
@@ -10,7 +11,10 @@ interface Comment {
   body: string; created_by: string | null; created_by_id: string | null; created_at: string | null;
   updated_by: string | null; updated_at: string | null;
 }
-interface Commit { hash: string; full_hash: string; message: string; date: string; author: string; comment: Comment | null; }
+interface Commit {
+  hash: string; full_hash: string; message: string; date: string; author: string; comment: Comment | null;
+  review: Review | null; is_first: boolean; // 最初の世代（初回の収集）は確認の対象外
+}
 interface Side { device_id: string; name: string; hash: string; full_hash: string; date: string; }
 interface CompareResult { diff: string; message?: string; truncated: boolean; a: Side; b: Side; }
 
@@ -139,6 +143,7 @@ function CommentModal({ deviceId, commit, editable, onClose, onSaved }: {
 export default function HistoryPage() {
   const { me, can } = useAuth();
   const canComment = can(PERM.CONFIG_COMMENT);
+  const canReview = can(PERM.CONFIG_REVIEW);
   const isAdmin = can(PERM.USER_ADMIN);
   const [devices, setDevices] = useState<Device[]>([]);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
@@ -162,6 +167,7 @@ export default function HistoryPage() {
   const [diffTitle, setDiffTitle] = useState("");
   const [diffComments, setDiffComments] = useState<{ label: string; full_hash: string; comment: Comment | null }[]>([]);
   const [editing, setEditing] = useState<Commit | null>(null);
+  const [reviewing, setReviewing] = useState<Commit | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [contentCommit, setContentCommit] = useState<Commit | null>(null);
@@ -316,6 +322,9 @@ export default function HistoryPage() {
     setDiffComments((d) => d.map((x) => (x.full_hash === full && (mode === "self" || x.label === "A") ? { ...x, comment } : x)));
     setEditing(null);
   };
+  // 確認を付けた・戻したら、API の応答でその世代の状態だけ書き換える（一覧は取り直さない）
+  const reviewSaved = (full: string, review: Review | null) =>
+    setHistory((h) => h.map((c) => (c.full_hash === full ? { ...c, review } : c)));
   const editable = (c: Commit) => !c.comment || isAdmin || c.comment.created_by_id === me?.id;
 
   // 一覧の「A」: 比べる元の世代にする（別の機器と比べるときは、この機器の側の世代）
@@ -339,7 +348,7 @@ export default function HistoryPage() {
 
       <div className="page-body" style={{ display: "flex", gap: 16, height: "100%", paddingBottom: 0 }}>
         {/* 左: コミット一覧 */}
-        <div style={{ width: 440, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ width: 500, flexShrink: 0, display: "flex", flexDirection: "column" }}>
           <p className="section-label">コミット履歴</p>
           {history.length === 0 ? (
             <p style={{ color: "var(--color-muted)", fontSize: 13 }}>
@@ -366,6 +375,9 @@ export default function HistoryPage() {
                             {c.hash}
                           </span>
                           {mark && <span className="hist-mark">{mark}</span>}
+                          {!c.is_first && (
+                            <ReviewBadge review={c.review} onClick={canReview ? () => setReviewing(c) : undefined} />
+                          )}
                         </td>
                         <td style={{ fontSize: 11, color: "var(--color-muted)" }}>
                           {fmt(c.date)}
@@ -385,6 +397,9 @@ export default function HistoryPage() {
                             )}
                             {canComment && (
                               <button className="btn" style={smallBtn} title="作業内容のメモを書きます" onClick={() => setEditing(c)}>メモ</button>
+                            )}
+                            {canReview && !c.is_first && (
+                              <button className="btn" style={smallBtn} title="この変更を「確認済み」「想定外」にします" onClick={() => setReviewing(c)}>確認</button>
                             )}
                           </div>
                         </td>
@@ -491,6 +506,11 @@ export default function HistoryPage() {
           </div>
         </div>
       </div>
+      {reviewing && (
+        <ReviewModal targets={[{ device_id: selectedDevice, commit_hash: reviewing.full_hash, label: `${deviceName(selectedDevice)} ${reviewing.hash}` }]}
+          current={reviewing.review} onClose={() => setReviewing(null)}
+          onDone={(info) => { reviewSaved(reviewing.full_hash, info.review ?? null); setReviewing(null); }} />
+      )}
       {editing && (
         <CommentModal deviceId={selectedDevice} commit={editing} editable={editable(editing)} onClose={() => setEditing(null)}
           onSaved={(c) => commentSaved(editing.full_hash, c)} />

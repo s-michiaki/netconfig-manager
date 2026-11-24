@@ -31,14 +31,17 @@ def main() -> None:
         hq = call("POST", "/device-groups/", h, json={"name": "本社", "color": "#4f8ef7"})
         dc = call("POST", "/device-groups/", h, json={"name": "データセンター", "color": "#c084fc"})
         devs = {}
+        first_gen = {}
         for name, host, group, ng in [("Core-SW01", "10.0.1.1", hq, False), ("SW-2F", "10.0.1.12", hq, True),
                                       ("SW-3F", "10.0.1.13", hq, False), ("DC-SW01", "10.0.2.1", dc, True)]:
             d = call("POST", "/devices/", h, json={"name": name, "hostname": host, "platform": "cisco_ios",
                                                    "username": "admin", "password": "pw", "group_id": group["id"]})
             devs[name] = d
-            cs.save_config(d["id"], (CONFIG_NG if ng else CONFIG_OK).format(name=name), "manual")
+            first_gen[name] = cs.save_config(d["id"], (CONFIG_NG if ng else CONFIG_OK).format(name=name), "manual")
         # 世代の比較用に Core-SW01 だけ 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
         second = cs.save_config(devs["Core-SW01"]["id"], CONFIG_OK.format(name="Core-SW01") + "logging host 10.0.9.9\n", "schedule")
+        # 変更の確認（reviews.spec.ts）用に SW-3F を 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
+        sw3f_second = cs.save_config(devs["SW-3F"]["id"], CONFIG_OK.format(name="SW-3F") + "snmp-server location rack-12\n", "schedule")
         # ルールを作ると収集済みのコンフィグを検査する（SW-2F・DC-SW01 が違反）
         call("POST", "/compliance/rules", h, json={
             "name": "HTTP サーバーの無効化", "severity": "medium", "match_type": "regex", "expect": "absent",
@@ -54,6 +57,8 @@ def main() -> None:
     # 機器台帳（実際は収集のときに読み取る）。Core-SW01 だけ取得済みにしておく
     import asyncio
 
+    from datetime import timedelta
+
     from sqlalchemy import update
 
     from app.core.database import AsyncSessionLocal
@@ -68,10 +73,14 @@ def main() -> None:
             # ダッシュボードの「直近の変更」に出す世代（実際は収集のときに worker が記録する）
             db.add(ConfigSnapshot(device_id=devs["Core-SW01"]["id"], commit_hash=second.commit_hash, collected_at=utcnow(),
                                   lines_added=second.added, lines_removed=second.removed, triggered_by="schedule"))
+            # SW-3F: 最初の世代（初回の収集。変更の確認の対象外）と、その後の変更（未確認）
+            db.add(ConfigSnapshot(device_id=devs["SW-3F"]["id"], commit_hash=first_gen["SW-3F"].commit_hash,
+                                  collected_at=utcnow() - timedelta(days=2), lines_added=4, lines_removed=0, triggered_by="manual"))
+            db.add(ConfigSnapshot(device_id=devs["SW-3F"]["id"], commit_hash=sw3f_second.commit_hash,
+                                  collected_at=utcnow() - timedelta(hours=2), lines_added=sw3f_second.added,
+                                  lines_removed=sw3f_second.removed, triggered_by="schedule"))
             # ターミナルの記録（実際は SSH ターミナルの切断時に保存する）。色・打ち直しを含む出力を 1 件
             import uuid
-            from datetime import timedelta
-
             from app.models.audit import TerminalSession
             from app.services.audit import TerminalRecorder
 

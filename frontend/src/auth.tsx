@@ -7,6 +7,7 @@ export const PERM = {
   DEVICE_WRITE: "device:write",
   CONFIG_READ: "config:read",
   CONFIG_COMMENT: "config:comment",
+  CONFIG_REVIEW: "config:review",
   COLLECT: "collect:run",
   TERMINAL: "terminal:use",
   SCHEDULE_READ: "schedule:read",

@@ -32,7 +32,7 @@ from app.core.ssh_keys import (
     normalize_private_key,
 )
 from app.models.compliance import ComplianceException, ComplianceResult
-from app.models.device import CollectLog, ConfigComment, CredentialProfile, Device, DeviceGroup, JumpHost
+from app.models.device import CollectLog, ConfigComment, ConfigReview, CredentialProfile, Device, DeviceGroup, JumpHost
 from app.services import collect_state, device_import, inventory, login_limit, profile_access
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.config_service import PLATFORMS
@@ -560,6 +560,7 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
     await db.execute(delete(ComplianceException).where(ComplianceException.device_id == device.id))
     await delete_device_monitoring(db, device.id)
     await db.execute(delete(ConfigComment).where(ConfigComment.device_id == device.id))
+    await db.execute(delete(ConfigReview).where(ConfigReview.device_id == device.id))
     await db.delete(device)
     audit("device.delete", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname})

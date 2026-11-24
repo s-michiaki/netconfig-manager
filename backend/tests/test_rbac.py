@@ -70,6 +70,12 @@ def test_me_returns_permissions(client, users):
         # コメントは operator 以上（未収集の機器なので、権限を通ったあと世代が見つからず 404）
         ("put", "/api/configs/{dev}/comments/0000000", {"body": "x"}, {"viewer": 403, "operator": 404, "admin": 404}),
         ("delete", "/api/configs/{dev}/comments/0000000", None, {"viewer": 403, "operator": 404}),
+        # 変更の確認も operator 以上（付ける側）。一覧は閲覧者も読める
+        ("put", "/api/configs/{dev}/reviews/0000000", {"status": "confirmed"}, {"viewer": 403, "operator": 404, "admin": 404}),
+        ("delete", "/api/configs/{dev}/reviews/0000000", None, {"viewer": 403, "operator": 404}),
+        ("post", "/api/configs/reviews/bulk", {"items": [{"device_id": "x", "commit_hash": "0000000"}], "status": "confirmed"},
+         {"viewer": 403, "operator": 200}),
+        ("get", "/api/configs/reviews", None, {"viewer": 200, "operator": 200, "admin": 200}),
         ("get", "/api/schedules/", None, {"viewer": 200, "operator": 200}),
         ("post", "/api/schedules/", {"name": "s", "cron_expression": "0 9 * * *"}, {"viewer": 403, "operator": 403, "admin": 201}),
         ("get", "/api/tasks/abc", None, {"viewer": 403}),
