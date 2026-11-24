@@ -6,6 +6,7 @@ from app.models.base import Base
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import (
     CollectLog,
+    ConfigBaseline,
     ConfigComment,
     ConfigReview,
     ConfigSnapshot,
@@ -31,6 +32,7 @@ __all__ = [
     "ComplianceException",
     "ComplianceResult",
     "ComplianceRule",
+    "ConfigBaseline",
     "ConfigComment",
     "ConfigIgnoreRule",
     "ConfigReview",

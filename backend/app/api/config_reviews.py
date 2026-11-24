@@ -55,7 +55,7 @@ class BulkBody(BaseModel):
     note: Note | None = None
 
 
-def _iso(dt: datetime | None) -> str | None:
+def iso_utc(dt: datetime | None) -> str | None:
     return dt.replace(tzinfo=UTC).isoformat() if dt else None
 
 
@@ -63,7 +63,7 @@ def review_dict(r: ConfigReview | None) -> dict | None:
     """画面に返す確認の状態。付いていなければ None（未確認）"""
     if r is None:
         return None
-    return {"status": r.status, "note": r.note, "reviewed_by": r.reviewed_by, "reviewed_at": _iso(r.reviewed_at)}
+    return {"status": r.status, "note": r.note, "reviewed_by": r.reviewed_by, "reviewed_at": iso_utc(r.reviewed_at)}
 
 
 async def reviews_for(db: AsyncSession, device_id: str, hashes: list[str]) -> dict[str, ConfigReview]:
@@ -119,7 +119,7 @@ async def load_changes(db: AsyncSession, *, since: datetime | None = None, group
         seen.add(key)
         changes.append({
             "device_id": snap.device_id, "device_name": name, "group_id": gid, "group_name": groups.get(gid) if gid else None,
-            "commit_hash": snap.commit_hash, "hash": snap.commit_hash[:8], "collected_at": _iso(snap.collected_at),
+            "commit_hash": snap.commit_hash, "hash": snap.commit_hash[:8], "collected_at": iso_utc(snap.collected_at),
             "added": snap.lines_added, "removed": snap.lines_removed, "triggered_by": snap.triggered_by,
             "review": review_dict(reviews.get(key)),
         })

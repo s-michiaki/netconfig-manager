@@ -688,6 +688,17 @@ def get_config_version(device_id: str, commit_hash: str | None = None) -> dict |
     }
 
 
+def head_commit_hash(device_id: str) -> str | None:
+    """最新の世代（HEAD）の 40 桁のハッシュ。本文は読まない。リポジトリ・世代が無ければ None"""
+    repo = _open_repo(device_id)
+    if repo is None:
+        return None
+    try:
+        return repo.head.commit.hexsha
+    except (ValueError, AttributeError, git.BadName, git.BadObject, git.GitCommandError):
+        return None
+
+
 def resolve_commit_info(device_id: str, commit_hash: str) -> tuple[str, bool] | None:
     """短縮ハッシュを完全な 40 桁にし、最初の世代（親のコミットが無い）かどうかも返す。その機器の世代でなければ None
 

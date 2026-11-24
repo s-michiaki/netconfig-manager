@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { downloadFile } from "../components/CsvButton";
+import BaselineModal, { BaselineBadge, driftOf, isUnknown, type Baseline } from "../components/BaselineModal";
 import ReviewModal, { ReviewBadge, type Review } from "../components/ReviewModal";
 
 interface Device { id: string; name: string; group_name: string | null; }
@@ -14,6 +15,7 @@ interface Comment {
 interface Commit {
   hash: string; full_hash: string; message: string; date: string; author: string; comment: Comment | null;
   review: Review | null; is_first: boolean; // 最初の世代（初回の収集）は確認の対象外
+  baseline_hash: string | null; // この機器の基準の世代（全行で同じ値）
 }
 interface Side { device_id: string; name: string; hash: string; full_hash: string; date: string; }
 interface CompareResult { diff: string; message?: string; truncated: boolean; a: Side; b: Side; }
@@ -168,6 +170,10 @@ export default function HistoryPage() {
   const [diffComments, setDiffComments] = useState<{ label: string; full_hash: string; comment: Comment | null }[]>([]);
   const [editing, setEditing] = useState<Commit | null>(null);
   const [reviewing, setReviewing] = useState<Commit | null>(null);
+  // 基準の世代とずれ。baselining は確認中の操作（commit が null なら解除）
+  const [baseline, setBaselineState] = useState<Baseline | null>(null);
+  const [baselining, setBaselining] = useState<{ commit: Commit | null } | null>(null);
+  const initialDrift = useRef(searchParams.get("drift") === "1"); // 変更の確認の「基準からのずれ」から開いたとき、基準 → 最新の差分を出す
   const [truncated, setTruncated] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [contentCommit, setContentCommit] = useState<Commit | null>(null);
@@ -185,6 +191,7 @@ export default function HistoryPage() {
   useEffect(() => {
     // デバイスを切り替えたら前のデバイスの選択・表示内容をすべてリセットする（比較先の機器は残す）
     setHistory([]);
+    setBaselineState(null);
     setSelectedA("");
     setSelectedB("");
     setSelfHash("");
@@ -221,6 +228,16 @@ export default function HistoryPage() {
         }
       })
       .catch((e) => !cancelled && setError(errorMessage(e)));
+    api.get<Baseline | null>(`/configs/${encodeURIComponent(selectedDevice)}/baseline`)
+      .then((r) => {
+        if (cancelled) return;
+        setBaselineState(r.data);
+        if (initialDrift.current && r.data) {
+          initialDrift.current = false;
+          void showDrift(selectedDevice, r.data);
+        }
+      })
+      .catch(() => undefined); // 基準が読めなくても、世代の一覧は使える
     return () => {
       cancelled = true;
     };
@@ -239,6 +256,27 @@ export default function HistoryPage() {
       cancelled = true;
     };
   }, [otherDevice]);
+
+  // 基準 → 最新の差分（最新は、サーバーがずれを計算した相手の世代）
+  const showDrift = async (deviceId: string, b: Baseline) => {
+    setError("");
+    if (!b.latest_hash) {
+      setError("ずれをまだ計算していません。次の収集のあとに表示できます");
+      return;
+    }
+    try {
+      const r = await api.get(`/configs/${encodeURIComponent(deviceId)}/diff`, {
+        params: { from_hash: b.commit_hash, to_hash: b.latest_hash },
+      });
+      setDiff(r.data.diff || "差分なし");
+      setDiffTitle(`基準 ${b.hash} → 最新 ${b.latest}`);
+      setDiffComments([]);
+      setTruncated(false);
+      setView("diff");
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
 
   const loadDiff = async (deviceId: string, a: Commit, b: Commit) => {
     setError("");
@@ -348,8 +386,24 @@ export default function HistoryPage() {
 
       <div className="page-body" style={{ display: "flex", gap: 16, height: "100%", paddingBottom: 0 }}>
         {/* 左: コミット一覧 */}
-        <div style={{ width: 500, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ width: 580, flexShrink: 0, display: "flex", flexDirection: "column" }}>
           <p className="section-label">コミット履歴</p>
+          {baseline && (
+            <div className={`baseline-banner${driftOf(baseline) ? " drift" : ""}`} data-testid="baseline-banner">
+              {driftOf(baseline) ? (
+                <>
+                  <span>基準 <span className="mono">{baseline.hash}</span> から <span className="dash-add">+{baseline.drift_added}</span> <span className="dash-del">-{baseline.drift_removed}</span> 行のずれ</span>
+                  <button className="btn" style={smallBtn} onClick={() => showDrift(selectedDevice, baseline)}>差分を見る</button>
+                </>
+              ) : isUnknown(baseline) ? (
+                <span>基準 <span className="mono">{baseline.hash}</span>（ずれは未計算。次の収集のあとに計算します）</span>
+              ) : (
+                <span>基準 <span className="mono">{baseline.hash}</span>（ずれなし）</span>
+              )}
+              <span className="baseline-spacer" />
+              {canReview && <button className="btn" style={smallBtn} onClick={() => setBaselining({ commit: null })}>基準を解除</button>}
+            </div>
+          )}
           {history.length === 0 ? (
             <p style={{ color: "var(--color-muted)", fontSize: 13 }}>
               {selectedDevice ? "履歴なし" : "デバイスを選択してください"}
@@ -375,6 +429,7 @@ export default function HistoryPage() {
                             {c.hash}
                           </span>
                           {mark && <span className="hist-mark">{mark}</span>}
+                          {c.baseline_hash === c.full_hash && <BaselineBadge baseline={baseline} />}
                           {!c.is_first && (
                             <ReviewBadge review={c.review} onClick={canReview ? () => setReviewing(c) : undefined} />
                           )}
@@ -400,6 +455,9 @@ export default function HistoryPage() {
                             )}
                             {canReview && !c.is_first && (
                               <button className="btn" style={smallBtn} title="この変更を「確認済み」「想定外」にします" onClick={() => setReviewing(c)}>確認</button>
+                            )}
+                            {canReview && c.baseline_hash !== c.full_hash && (
+                              <button className="btn" style={smallBtn} title="この世代を「承認済みの状態」（基準）にします" onClick={() => setBaselining({ commit: c })}>基準にする</button>
                             )}
                           </div>
                         </td>
@@ -506,6 +564,11 @@ export default function HistoryPage() {
           </div>
         </div>
       </div>
+      {baselining && (
+        <BaselineModal deviceId={selectedDevice} deviceName={deviceName(selectedDevice)} commitHash={baselining.commit?.full_hash ?? null}
+          hash={baselining.commit?.hash} current={baseline} onClose={() => setBaselining(null)}
+          onDone={(b) => { setBaselineState(b); setHistory((h) => h.map((c) => ({ ...c, baseline_hash: b?.commit_hash ?? null }))); setBaselining(null); }} />
+      )}
       {reviewing && (
         <ReviewModal targets={[{ device_id: selectedDevice, commit_hash: reviewing.full_hash, label: `${deviceName(selectedDevice)} ${reviewing.hash}` }]}
           current={reviewing.review} onClose={() => setReviewing(null)}

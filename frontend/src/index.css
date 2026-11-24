@@ -280,6 +280,11 @@ body {
 .review-hash { color: var(--color-accent); }
 .review-memo { max-width: 260px; }
 .review-comment { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); }
+/* 基準の世代 */
+.baseline-badge { margin-left: 6px; white-space: nowrap; background: var(--color-accent-dim); color: var(--color-accent); }
+.baseline-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-surface2); font-size: 12px; }
+.baseline-banner.drift { border-color: var(--color-warning); }
+.baseline-banner .baseline-spacer { flex: 1; }
 .hist-comment-row td { padding-top: 0; }
 .hist-comment {
   display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 4px 8px;

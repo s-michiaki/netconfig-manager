@@ -7,6 +7,7 @@ Celeryワーカー定義
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
+- send_drift_notification: 基準の世代からずれたとき（ずれなし → ずれあり）の通知
 - ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
 - git_export_sync: コンフィグ履歴を外部 Git へ push（GIT_EXPORT_URL を設定したとき。収集で変わったときと 1 時間ごと）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
@@ -24,13 +25,14 @@ from zoneinfo import ZoneInfo
 import redis
 from celery import Celery
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.core.timeutil import utcnow
-from app.models import CollectLog, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models import CollectLog, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.services import baseline as baseline_svc
 from app.services import collect_state, failure_batch, fw_hits, git_export, inventory, monitoring, system
 from app.services import ping_monitor as ping_monitor_svc
 from app.services.activity import SYSTEM_ACTOR, record
@@ -41,12 +43,14 @@ from app.services.config_service import (
     CollectResult,
     DeviceConnectionInfo,
     collect_config_sync,
+    head_commit_hash,
 )
 from app.services.connection import load_connection_info
 from app.services.ignore_rules import SKIP_TIMEOUT, SKIP_TOO_HEAVY, WARN_RATIO
 from app.services.ignore_rules import load_patterns as load_ignore_patterns
 from app.services.notify import (
     notify_change,
+    notify_drift,
     notify_failure,
     notify_failures,
     notify_inventory,
@@ -270,6 +274,61 @@ async def _save_inventory(db: AsyncSession, device_id: str, facts: dict, kw: dic
     return [[f, a, b] for f, a, b in diff]
 
 
+async def _recheck_baseline(device_id: str, device_name: str, actor: str | None, ref: str | None,
+                            only_if_stale: bool = False):
+    """基準の世代があれば、最新とのずれを計算し直して保存する。
+
+    only_if_stale: 世代が増えなかった収集で呼ぶとき。保存した値が最新（HEAD）のものでなく、または未計算のときだけ計算する
+    （HEAD は本文を読まずに確かめる）。
+
+    保存は「読んだときの基準のまま」のときだけ行う（計算している間に API で基準が付け替えられたら、結果は捨てる）。
+    ずれなし → ずれあり に変わったときだけ（added, removed, 基準の世代, 最新の世代）を返す（通知する）。
+    未計算 → ずれあり（計算できなかった後など）は通知しない。ずれあり → ずれなしはアクティビティに残すだけ。
+    計算できないとき（基準の世代・リポジトリが無いなど）は、ずれを未計算に戻し、アクティビティに警告（baseline.error）を
+    1 回だけ残す（同じ状態が続く間は増やさない）
+    """
+    async with _sessionmaker()() as db:
+        row = await db.get(ConfigBaseline, device_id)
+        if row is None:
+            return None
+        base_hash = row.commit_hash
+        was_unknown = baseline_svc.is_unknown(row)
+        was_drift = baseline_svc.drift_total(row) > 0
+        had_error = was_unknown and row.checked_at is not None  # 前回までに計算を試みて失敗している
+        if only_if_stale and not was_unknown:
+            head = await asyncio.to_thread(head_commit_hash, device_id)
+            if head is not None and row.latest_hash == head:
+                return None
+        drift = await asyncio.to_thread(baseline_svc.compute_drift, device_id, base_hash)
+        kw = dict(device_id=device_id, device_name=device_name, actor=actor, ref=ref)
+        same = (ConfigBaseline.device_id == device_id) & (ConfigBaseline.commit_hash == base_hash)
+        if drift is None:
+            logger.warning("基準からのずれを計算できませんでした（基準の世代か最新の世代を読めません）device=%s", device_id)
+            res = await db.execute(update(ConfigBaseline).where(same).values(
+                drift_added=None, drift_removed=None, latest_hash=None, checked_at=utcnow()))
+            if res.rowcount and not had_error:
+                record(db, "baseline.error", "基準からのずれを計算できませんでした（基準の世代がコンフィグの履歴に無いか、"
+                       "履歴を読めません）。基準を指定し直してください", level="warning",
+                       detail={"baseline": base_hash}, **kw)
+            await db.commit()
+            return None
+        res = await db.execute(update(ConfigBaseline).where(same).values(
+            drift_added=drift.added, drift_removed=drift.removed, latest_hash=drift.latest_hash, checked_at=utcnow()))
+        if not res.rowcount:  # 計算の間に基準が付け替えられた・解除された。古い基準の結果は捨てる
+            await db.rollback()
+            return None
+        detail = {"baseline": base_hash, "latest": drift.latest_hash, "added": drift.added, "removed": drift.removed}
+        if drift.total > 0 and not was_drift:
+            record(db, "baseline.drift", f"基準の世代からずれました（+{drift.added} / -{drift.removed} 行）",
+                   detail=detail, **kw)
+        elif drift.total == 0 and was_drift:
+            record(db, "baseline.resolved", "基準の世代と同じ状態に戻りました", detail=detail, **kw)
+        await db.commit()
+        if drift.total > 0 and not was_drift and not was_unknown:
+            return drift.added, drift.removed, base_hash, drift.latest_hash
+        return None
+
+
 async def _record(event: str, message: str, **kw) -> None:
     async with _sessionmaker()() as db:
         record(db, event, message, **kw)
@@ -349,6 +408,15 @@ def collect_device_config(
                     send_inventory_notification.delay(device_id, inventory_changes, ref)
             except Exception:  # noqa: BLE001 - 通知の投入の失敗で収集の結果を変えない
                 logger.exception("機器情報の変化の通知を投入できませんでした device=%s", device_id)
+        if result.success:
+            # 基準の世代があれば、最新とのずれを計算し直す（失敗しても収集は成功のまま）。変更なしの回は古い・未計算のときだけ
+            try:
+                drifted = _run_async(_recheck_baseline(device_id, device.name, actor, ref,
+                                                       only_if_stale=not result.commit_hash))
+                if drifted and _run_async(_wants("drift")):
+                    send_drift_notification.delay(device_id, *drifted, ref)
+            except Exception:  # noqa: BLE001 - ずれの再計算・通知の投入の失敗で収集の結果を変えない
+                logger.warning("基準からのずれの再計算に失敗しました device=%s", device_id, exc_info=True)
         if result.success and result.commit_hash:
             try:
                 schedule_git_export()
@@ -405,6 +473,20 @@ def send_inventory_notification(device_id: str, changes: list[list[str]], ref: s
         return _run_async(run())
     except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
         logger.exception("機器情報の変化の通知に失敗しました device=%s", device_id)
+        return {"error": True}
+
+
+@celery_app.task
+def send_drift_notification(device_id: str, added: int, removed: int, baseline_hash: str, latest_hash: str,
+                            ref: str | None = None):
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_drift(db, device_id, added, removed, baseline_hash, latest_hash, ref=ref)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001 - 通知の失敗は収集に影響させない
+        logger.exception("基準からのずれの通知に失敗しました device=%s", device_id)
         return {"error": True}
 
 

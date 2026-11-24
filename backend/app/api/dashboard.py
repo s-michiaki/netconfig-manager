@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.config_baselines import count_baselines
 from app.api.config_reviews import count_unexpected, count_unreviewed, first_commits, review_dict
 from app.api.deps import get_current_user, require
 from app.core.config import settings
@@ -113,6 +114,9 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
             ))
             recent_reviews = {(r.device_id, r.commit_hash): review_dict(r) for r in found.scalars()}
 
+    # 基準の世代: 基準を指定した機器の数とずれている機器の数（コンフィグを閲覧できる人にだけ出す）
+    baselines = await count_baselines(db) if has_permission(user.role, Perm.CONFIG_READ) else None
+
     return {
         "devices": {"total": len(devices), "active": len(active), "inactive": len(devices) - len(active),
                     "failing": len(failing), "never": len(never),
@@ -129,6 +133,7 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
                                 "review": recent_reviews.get((s.device_id, s.commit_hash)),
                                 "first": firsts.get(s.device_id) == s.commit_hash} for s in snaps]},
         "reviews": reviews,
+        "baselines": baselines,
         "compliance": {"rules": rules, "by_severity": by_severity, "violations": sum(by_severity.values()),
                        "devices": len({d for d, _ in fails if d in names})},
         "schedules": {"active": len(upcoming), "upcoming": upcoming[:5]},

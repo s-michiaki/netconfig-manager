@@ -76,6 +76,11 @@ def test_me_returns_permissions(client, users):
         ("post", "/api/configs/reviews/bulk", {"items": [{"device_id": "x", "commit_hash": "0000000"}], "status": "confirmed"},
          {"viewer": 403, "operator": 200}),
         ("get", "/api/configs/reviews", None, {"viewer": 200, "operator": 200, "admin": 200}),
+        # 基準の世代も、指定・解除は operator 以上、閲覧は viewer も可（未収集の機器なので指定は世代が見つからず 404）
+        ("put", "/api/configs/{dev}/baseline", {"commit_hash": "0000000"}, {"viewer": 403, "operator": 404, "admin": 404}),
+        ("delete", "/api/configs/{dev}/baseline", None, {"viewer": 403, "operator": 404}),
+        ("get", "/api/configs/{dev}/baseline", None, {"viewer": 200, "operator": 200}),
+        ("get", "/api/configs/baselines", None, {"viewer": 200, "operator": 200, "admin": 200}),
         ("get", "/api/schedules/", None, {"viewer": 200, "operator": 200}),
         ("post", "/api/schedules/", {"name": "s", "cron_expression": "0 9 * * *"}, {"viewer": 403, "operator": 403, "admin": 201}),
         ("get", "/api/tasks/abc", None, {"viewer": 403}),

@@ -17,7 +17,7 @@ from app.core.config import settings
 from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
-from app.models.device import Device, DeviceGroup
+from app.models.device import ConfigBaseline, Device, DeviceGroup
 from app.models.user import User
 from app.services import config_search
 from app.services.audit import Audit, get_audit
@@ -100,7 +100,9 @@ async def list_history(
     hashes = [c["full_hash"] for c in history]
     comments = await comments_for(db, device_id, hashes)
     reviews = await reviews_for(db, device_id, hashes)
+    baseline = await db.get(ConfigBaseline, device_id)
     for c in history:
+        c["baseline_hash"] = baseline.commit_hash if baseline else None  # 全行に同じ値（画面が「基準」のバッジを付ける）
         found = comments.get(c["full_hash"])
         c["comment"] = comment_dict(found) if found else None
         c["review"] = review_dict(reviews.get(c["full_hash"]))  # 最初の世代（is_first）は確認の対象外

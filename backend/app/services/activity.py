@@ -29,6 +29,9 @@ EVENTS: dict[str, tuple[str, str]] = {
     "ignore.timeout": ("無視する行の照合が時間切れ", "warning"),
     "ignore.skipped": ("無視する行の正規表現が使えない", "warning"),
     "ignore.broad": ("無視する行で多くの行が消えた", "warning"),
+    "baseline.drift": ("基準からのずれ", "warning"),
+    "baseline.error": ("基準からのずれを計算できない", "warning"),
+    "baseline.resolved": ("基準からのずれの解消", "info"),
     "notify.sent": ("通知の送信", "info"),
     "notify.failed": ("通知の失敗", "error"),
     "inventory.changed": ("機器情報の変化", "info"),
@@ -46,7 +49,7 @@ EVENTS: dict[str, tuple[str, str]] = {
 }
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
-    "ignore": "無視する行",
+    "ignore": "無視する行", "baseline": "基準の世代",
     "monitor": "モニタリング", "ping": "Ping監視",
     "system": "システム", "backup": "バックアップ", "export": "外部 Git",
 }

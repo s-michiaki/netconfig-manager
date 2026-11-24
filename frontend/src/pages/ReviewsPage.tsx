@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import BaselineModal, { LATEST, type Baseline } from "../components/BaselineModal";
 import ReviewModal, { ReviewBadge, bulkMessage, bulkReview, clearReview, reviewError, setReview, type Review, type ReviewTarget } from "../components/ReviewModal";
 
 /**
  * 変更の確認: 検出した変更（世代）に「確認済み」「想定外」を付け、未確認の変更を一覧にする。
- * 画面はタブで分ける（いまは変更の一覧だけ。TABS に足すと増やせる）
+ * 画面はタブで分ける（変更の一覧 / 基準からのずれ。TABS に足すと増やせる）
  */
 
 interface Change {
@@ -18,7 +19,7 @@ interface ListResult { total: number; limit: number; days: number; counts: Recor
 interface Group { id: string; name: string; }
 type State = "unreviewed" | "unexpected" | "confirmed";
 
-const TABS = [{ key: "changes", label: "変更の一覧" }] as const;
+const TABS = [{ key: "changes", label: "変更の一覧" }, { key: "drift", label: "基準からのずれ" }] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
 const STATES: { key: State | "all"; label: string }[] = [
@@ -206,13 +207,118 @@ function ChangesTab() {
   );
 }
 
+interface DriftItem {
+  device_id: string; device_name: string; group_id: string | null; group_name: string | null; state: "drift" | "ok" | "unknown" | "none";
+  baseline: (Baseline & { collected_at: string | null }) | null;
+}
+interface DriftResult { total: number; counts: { drift: number; ok: number; unknown: number; none: number }; items: DriftItem[]; }
+
+/** 基準からのずれ: 機器ごとに基準の世代を決め、最新のコンフィグとの差（ずれ）が出た機器を一覧にする */
+function DriftTab() {
+  const { can } = useAuth();
+  const canReview = can(PERM.CONFIG_REVIEW);
+  const [groupId, setGroupId] = useState("");
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [data, setData] = useState<DriftResult | null>(null);
+  const [modal, setModal] = useState<DriftItem | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.get<Group[]>("/device-groups/").then((r) => setGroups(r.data)).catch(() => undefined);
+  }, []);
+  const load = useCallback(() => {
+    api.get<DriftResult>("/configs/baselines", { params: { state: "all", group_id: groupId || undefined } })
+      .then((r) => { setData({ ...r.data, items: r.data.items.filter((i) => i.state === "drift" || i.state === "unknown") }); setError(""); })
+      .catch((e) => setError(errorMessage(e)));
+  }, [groupId]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const items = data?.items ?? [];
+  return (
+    <>
+      <div className="review-filters">
+        <label className="audit-field">
+          <span className="form-label">機器グループ</span>
+          <select aria-label="機器グループ" value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+            <option value="">すべて</option>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+        </label>
+        {data && (
+          <p className="topo-muted topo-small" style={{ margin: 0 }} data-testid="drift-counts">
+            ずれている {data.counts.drift} 台・基準どおり {data.counts.ok} 台・未計算 {data.counts.unknown} 台・基準が未指定 {data.counts.none} 台
+          </p>
+        )}
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      {message && <p className="review-message">{message}</p>}
+      {data && !items.length ? (
+        <p className="topo-muted">
+          {data.counts.ok + data.counts.drift + data.counts.unknown ? "基準からずれている機器はありません。" : "基準を指定した機器がありません。"}
+          基準は、世代管理で承認済みの世代の「基準にする」から指定します。
+        </p>
+      ) : (
+        <table className="data-table review-table">
+          <thead>
+            <tr><th>機器</th><th>基準の世代</th><th>ずれ</th><th>最新の世代</th><th>メモ</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            {items.map((i) => {
+              const b = i.baseline!;
+              return (
+                <tr key={i.device_id} className="drift-row">
+                  <td>
+                    <b>{i.device_name}</b>
+                    {i.group_name && <div className="topo-muted topo-small">{i.group_name}</div>}
+                  </td>
+                  <td className="nowrap">
+                    <span className="mono review-hash">{b.hash}</span>
+                    <div className="topo-muted topo-small">{b.collected_at ? `収集 ${fmt(b.collected_at)}` : b.set_at ? `指定 ${fmt(b.set_at)}` : ""}</div>
+                  </td>
+                  <td className="nowrap">
+                    {i.state === "unknown" ? <span className="topo-muted" title="次の収集のあとに計算します">未計算</span>
+                      : <><span className="dash-add">+{b.drift_added}</span> <span className="dash-del">-{b.drift_removed}</span></>}
+                  </td>
+                  <td className="nowrap"><span className="mono">{b.latest ?? "—"}</span></td>
+                  <td className="review-memo">
+                    {b.note && <div title={b.note} className="review-comment">{b.note}</div>}
+                    <div className="topo-muted topo-small">{b.set_by ? `指定: ${b.set_by}` : ""}</div>
+                  </td>
+                  <td>
+                    <div className="hist-actions">
+                      <Link className="btn" style={{ padding: "2px 8px", fontSize: 11 }} to={`/history?device=${i.device_id}&drift=1`}>差分</Link>
+                      {canReview && (
+                        <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setModal(i)}>最新を基準にする</button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+      {modal && modal.baseline && (
+        <BaselineModal deviceId={modal.device_id} deviceName={modal.device_name} commitHash={LATEST}
+          current={modal.baseline} onClose={() => setModal(null)}
+          onDone={(b) => { setModal(null); setMessage(`${modal.device_name} の基準を ${b?.hash ?? ""} に更新しました`); load(); }} />
+      )}
+    </>
+  );
+}
+
 export default function ReviewsPage() {
-  const [tab, setTab] = useState<TabKey>("changes");
+  const [params, setParams] = useSearchParams();
+  const tab: TabKey = params.get("tab") === "drift" ? "drift" : "changes";
+  const setTab = (t: TabKey) => setParams(t === "drift" ? { tab: "drift" } : {}, { replace: true });
   return (
     <div className="page">
       <div className="page-header">
         <span className="page-title">変更の確認</span>
-        <span className="topo-muted topo-small">収集で検出した変更に「確認済み」「想定外」を付けます。付いていない変更が「未確認」です（各機器の最初の世代は対象外）</span>
+        <span className="topo-muted topo-small">収集で検出した変更に「確認済み」「想定外」を付けます。付いていない変更が「未確認」です（各機器の最初の世代は対象外）。承認済みの世代（基準）からのずれも確認できます</span>
       </div>
       <div className="page-body">
         {TABS.length > 1 && (
@@ -223,6 +329,7 @@ export default function ReviewsPage() {
           </div>
         )}
         {tab === "changes" && <ChangesTab />}
+        {tab === "drift" && <DriftTab />}
       </div>
     </div>
   );

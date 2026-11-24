@@ -1,6 +1,6 @@
-"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
+"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準からのずれ
 
-通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping）。
+通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping / on_drift）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
@@ -53,12 +53,14 @@ MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
-                "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知"}
+                "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知",
+                "drift": "基準からのずれの通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
                  "inventory": "機器情報の変化を通知しました",
                  "ping": "Ping監視の応答なし・復旧を通知しました",
-                 "profile": "認証情報プロファイルへの操作を所有者に通知しました"}
+                 "profile": "認証情報プロファイルへの操作を所有者に通知しました",
+                 "drift": "基準からのずれを通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
@@ -466,6 +468,24 @@ async def notify_inventory(db: AsyncSession, device_id: str, changes: list[list[
     return await _deliver(db, "inventory", [
         (d, _message(d.kind, title, facts, url, "アクティビティを画面で確認", 0xFBBF24 if replaced else 0x60A5FA, body),
          device)
+        for d in dests
+    ], ref)
+
+
+async def notify_drift(db: AsyncSession, device_id: str, added: int, removed: int, baseline_hash: str,
+                       latest_hash: str, ref: str | None = None) -> dict:
+    """機器が基準の世代からずれたこと（ずれなし → ずれあり）を通知する。差分の中身は載せない"""
+    device = await db.get(Device, device_id)
+    if device is None:
+        return {"sent": 0, "failed": 0}
+    group = await db.get(DeviceGroup, device.group_id) if device.group_id else None
+    dests = await resolve_destinations(db, device.group_id, "drift")
+    facts = [("機器", f"{device.name}（{device.hostname}）"), ("グループ", group.name if group else "未分類"),
+             ("基準からのずれ", f"+{added} 行 / -{removed} 行"),
+             ("基準の世代", baseline_hash[:8]), ("最新の世代", latest_hash[:8]), ("検出", _local(utcnow()))]
+    url = history_url(device.id)
+    return await _deliver(db, "drift", [
+        (d, _message(d.kind, f"基準からのずれ: {device.name}", facts, url, "差分を画面で確認", 0xF87171), device)
         for d in dests
     ], ref)
 

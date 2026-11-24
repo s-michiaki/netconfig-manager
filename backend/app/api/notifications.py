@@ -50,9 +50,10 @@ class NotificationIn(BaseModel):
     on_system: bool = True
     on_inventory: bool = True
     on_ping: bool = True
+    on_drift: bool = False
 
 
-PreviewEvent = Literal["change", "violation", "failure", "inventory", "ping"]
+PreviewEvent = Literal["change", "violation", "failure", "inventory", "ping", "drift"]
 
 
 class NotificationOut(BaseModel):
@@ -71,6 +72,7 @@ class NotificationOut(BaseModel):
     on_system: bool = True
     on_inventory: bool = True
     on_ping: bool = True
+    on_drift: bool = False
     last_sent_at: datetime | None = None
     last_error: str | None = None
 
@@ -129,7 +131,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         device_group_ids=s.group_ids,
         include_ungrouped=s.include_ungrouped,
         on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure, on_system=s.on_system,
-        on_inventory=s.on_inventory, on_ping=s.on_ping,
+        on_inventory=s.on_inventory, on_ping=s.on_ping, on_drift=s.on_drift,
         last_sent_at=s.last_sent_at,
         last_error=s.last_error,
     )
@@ -189,11 +191,12 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     s.include_ungrouped = p.include_ungrouped
     s.on_change, s.on_violation, s.on_failure = p.on_change, p.on_violation, p.on_failure
     s.on_system, s.on_inventory, s.on_ping = p.on_system, p.on_inventory, p.on_ping
+    s.on_drift = p.on_drift
     changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped,
                    on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure, on_system=p.on_system,
-                   on_inventory=p.on_inventory, on_ping=p.on_ping)
+                   on_inventory=p.on_inventory, on_ping=p.on_ping, on_drift=p.on_drift)
     if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system
-                                    or p.on_inventory or p.on_ping):
+                                    or p.on_inventory or p.on_ping or p.on_drift):
         raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
     if p.mode == "custom" and not has_target(s):
         raise HTTPException(status_code=422,

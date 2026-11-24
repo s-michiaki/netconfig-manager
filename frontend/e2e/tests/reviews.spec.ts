@@ -91,3 +91,90 @@ test("オペレーターが変更を確認済みにし、閲覧者は状態を�
   await expect(all).toHaveCount(2);
   await opCtx.close();
 });
+
+// 基準の世代（ベースライン）。SW-3F の最初の世代を基準にすると、最新との差 +1 行がずれになる。同じ DB を使うので、最後に必ず解除する
+test("オペレーターが基準を指定し、ずれがタブ・ダッシュボード・世代管理に出る", async ({ browser }) => {
+  const opCtx = await browser.newContext();
+  const op = await opCtx.newPage();
+  const viewerCtx = await browser.newContext();
+  try {
+    await login(op, USERS.op);
+
+    // 世代管理: 最初の世代を基準にする（メモ付き）。最新の世代にはボタンが残る
+    await op.goto("/history");
+    await op.locator(".page-header select").selectOption({ label: "SW-3F" });
+    const hist = op.locator(".hist-table tr.hist-row");
+    await expect(hist).toHaveCount(2);
+    await expect(op.getByTestId("baseline-banner")).toHaveCount(0);
+    await hist.nth(1).getByRole("button", { name: "基準にする" }).click();
+    await op.getByLabel(/メモ（任意/).fill("2026 年度の見直しで承認");
+    await op.locator(".modal").getByRole("button", { name: "基準にする", exact: true }).click();
+    await expect(op.locator(".modal")).toHaveCount(0);
+    await expect(hist.nth(1).locator(".baseline-badge")).toHaveText("基準");
+    await expect(hist.nth(0).locator(".baseline-badge")).toHaveCount(0);
+    await expect(hist.nth(1).getByRole("button", { name: "基準にする" })).toHaveCount(0);
+    const banner = op.getByTestId("baseline-banner");
+    await expect(banner).toContainText("から +1 -0 行のずれ");
+
+    // 「差分を見る」: 基準 → 最新の差分
+    await banner.getByRole("button", { name: "差分を見る" }).click();
+    await expect(op.locator(".diff-add")).toHaveText(["+snmp-server location rack-12"]);
+
+    // 変更の確認の「基準からのずれ」タブ
+    await op.goto("/reviews");
+    await op.getByRole("tab", { name: "基準からのずれ" }).click();
+    await expect(op).toHaveURL(/tab=drift/);
+    const rows = op.locator("tr.drift-row");
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("SW-3F");
+    await expect(rows.first()).toContainText("+1");
+    await expect(rows.first()).toContainText("2026 年度の見直しで承認");
+    await expect(op.getByTestId("drift-counts")).toContainText("ずれている 1 台");
+    await expect(op.getByTestId("drift-counts")).toContainText("基準が未指定 3 台");
+    await rows.first().getByRole("link", { name: "差分" }).click();
+    await expect(op).toHaveURL(/\/history\?device=.+&drift=1/);
+    await expect(op.locator(".diff-add")).toHaveText(["+snmp-server location rack-12"]);
+
+    // 閲覧者: ずれは見えるが、操作のボタンは無い。ダッシュボードのタイル
+    const viewer = await viewerCtx.newPage();
+    await login(viewer, USERS.viewer);
+    await viewer.goto("/reviews?tab=drift");
+    await expect(viewer.locator("tr.drift-row")).toHaveCount(1);
+    await expect(viewer.getByRole("button", { name: "最新を基準にする" })).toHaveCount(0);
+    await viewer.locator('a[href="/dashboard"]').first().click();
+    const tile = viewer.locator(".dash-tile", { hasText: "基準からずれている機器" });
+    await expect(tile.locator(".dash-tile-value")).toHaveText("1");
+    await tile.click();
+    await expect(viewer).toHaveURL(/\/reviews\?tab=drift/);
+
+    // 最新を基準にする → ずれの一覧から消え、世代管理のバッジが最新に移る
+    await op.goto("/reviews?tab=drift");
+    await rows.first().getByRole("button", { name: "最新を基準にする" }).click();
+    await op.locator(".modal").getByRole("button", { name: "基準にする", exact: true }).click();
+    await expect(rows).toHaveCount(0);
+    await expect(op.getByTestId("drift-counts")).toContainText("基準どおり 1 台");
+    await op.goto("/history");
+    await op.locator(".page-header select").selectOption({ label: "SW-3F" });
+    await expect(hist).toHaveCount(2);
+    await expect(hist.nth(0).locator(".baseline-badge")).toHaveText("基準");
+    await expect(op.getByTestId("baseline-banner")).toContainText("ずれなし");
+
+    // 基準を解除する
+    await op.getByRole("button", { name: "基準を解除" }).click();
+    await op.locator(".modal").getByRole("button", { name: "基準を解除する" }).click();
+    await expect(op.getByTestId("baseline-banner")).toHaveCount(0);
+    await expect(op.locator(".baseline-badge")).toHaveCount(0);
+  } finally {
+    // 途中で失敗しても他のテストに残さない: SW-3F の基準を API で解除する
+    await op.evaluate(async () => {
+      const token = localStorage.getItem("access_token") ?? "";
+      const h = { Authorization: `Bearer ${token}` };
+      const list = await (await fetch("/api/configs/baselines?state=all", { headers: h })).json();
+      for (const i of list.items ?? []) {
+        if (i.baseline) await fetch(`/api/configs/${i.device_id}/baseline`, { method: "DELETE", headers: h });
+      }
+    }).catch(() => undefined);
+    await viewerCtx.close();
+    await opCtx.close();
+  }
+});

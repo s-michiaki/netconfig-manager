@@ -142,6 +142,9 @@ class Device(Base):
     config_reviews: Mapped[list["ConfigReview"]] = relationship(
         "ConfigReview", back_populates="device", cascade="all, delete-orphan"
     )
+    config_baseline: Mapped["ConfigBaseline | None"] = relationship(
+        "ConfigBaseline", back_populates="device", cascade="all, delete-orphan", uselist=False
+    )
     ignore_rules: Mapped[list["ConfigIgnoreRule"]] = relationship(  # noqa: F821 - models/ignore_rule.py
         "ConfigIgnoreRule", back_populates="device", cascade="all, delete-orphan"
     )
@@ -211,6 +214,32 @@ class ConfigReview(Base):
     reviewed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     device: Mapped["Device"] = relationship("Device", back_populates="config_reviews")
+
+
+class ConfigBaseline(Base):
+    """機器ごとの基準の世代（承認済みの状態）と、最新のコンフィグとのずれ。1 機器に 1 件
+
+    drift_added / drift_removed は基準 → 最新の追加・削除の行数。基準を指定したとき・収集で世代が増えたときに計算し、
+    latest_hash に「どの世代と比べたか」を残す（画面は保存した値を読むだけで、Git を読まない）。
+    指定した人は名前で持つ（ユーザーを削除しても残す）
+    """
+
+    __tablename__ = "config_baselines"
+
+    device_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("devices.id", name="fk_config_baselines_device_id", ondelete="CASCADE"), primary_key=True
+    )
+    commit_hash: Mapped[str] = mapped_column(String(40), nullable=False)  # 完全な 40 桁
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    set_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    set_by_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    set_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    drift_added: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None は未計算
+    drift_removed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    device: Mapped["Device"] = relationship("Device", back_populates="config_baseline")
 
 
 class CollectLog(Base):

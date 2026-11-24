@@ -68,6 +68,8 @@ ACTIONS = {
     "config.review": "コンフィグ変更の確認",
     "config.review_delete": "コンフィグ変更の確認を未確認に戻す",
     "config.review_bulk": "コンフィグ変更の確認（まとめて）",
+    "config.baseline_set": "基準の世代の指定",
+    "config.baseline_clear": "基準の世代の解除",
     "ignore_rule.create": "無視する行の追加",
     "ignore_rule.update": "無視する行の変更",
     "ignore_rule.delete": "無視する行の削除",

@@ -23,6 +23,7 @@ interface Dashboard {
   failing: Failing[];
   never: Never[];
   reviews: { days: number; unreviewed: number; unexpected: number } | null; // コンフィグを閲覧できない人には null
+  baselines: { total: number; drift: number; unknown: number } | null; // 基準を指定した機器の数とずれている機器の数（閲覧できない人には null）
   changes: { last_24h: number; last_7d: number; recent: Change[] };
   compliance: { rules: number; by_severity: { high: number; medium: number; low: number }; violations: number; devices: number };
   schedules: { active: number; upcoming: Upcoming[] };
@@ -74,7 +75,7 @@ export default function DashboardPage() {
   }, [load]);
 
   if (!data) return <div className="page"><div className="page-header"><span className="page-title">ダッシュボード</span></div><div className="page-body">{error && <p className="form-error">{error}</p>}</div></div>;
-  const { devices: dv, compliance: cp, changes: ch, reviews: rv } = data;
+  const { devices: dv, compliance: cp, changes: ch, reviews: rv, baselines: bl } = data;
   const sev = cp.by_severity;
   return (
     <div className="page">
@@ -105,6 +106,10 @@ export default function DashboardPage() {
                   to={!rv.unreviewed && rv.unexpected ? "/reviews?state=unexpected&days=0" : `/reviews?days=${rv.days}`}
                   tone={rv.unexpected ? "bad" : rv.unreviewed ? "warn" : "good"}
                   sub={`直近 ${rv.days} 日${rv.unexpected ? `・想定外 ${rv.unexpected} 件` : rv.unreviewed ? "" : "（すべて確認済み）"}`} />
+          )}
+          {bl && bl.total > 0 && (
+            <Tile label="基準からずれている機器" value={bl.drift} to="/reviews?tab=drift" tone={bl.drift ? "warn" : "good"}
+                  sub={`${bl.drift ? `基準を指定した ${bl.total} 台のうち` : bl.unknown ? `基準を指定した ${bl.total} 台` : `基準を指定した ${bl.total} 台はすべて基準どおり`}${bl.unknown ? `（未計算 ${bl.unknown} 台）` : ""}`} />
           )}
           <Tile label="コンプライアンス違反" value={cp.violations} to="/compliance" tone={sev.high ? "bad" : cp.violations ? "warn" : cp.rules ? "good" : undefined}
                 sub={cp.rules === 0 ? "ルールが登録されていません"
