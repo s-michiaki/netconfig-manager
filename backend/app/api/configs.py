@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.safe_regex import PatternUnavailable
 from app.models.device import ConfigBaseline, Device, DeviceGroup
 from app.models.user import User
 from app.services import config_search
@@ -219,6 +220,13 @@ def _run_search(body: SearchRequest, targets: list, context: int, max_lines: int
     return config_search.search(targets, body.query, body.mode, body.case_sensitive, context, max_lines, max_total)
 
 
+async def _threadpool_search(body: SearchRequest, targets: list, context: int, max_lines: int, max_total: int | None):
+    try:
+        return await run_in_threadpool(_run_search, body, targets, context, max_lines, max_total)
+    except PatternUnavailable as e:  # 検証のあとに確かめ直すことになり、それが一時的に失敗した
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
 def _local_str(iso: str) -> str:
     return datetime.fromisoformat(iso).astimezone(ZoneInfo(settings.TIMEZONE)).strftime("%Y/%m/%d %H:%M")
 
@@ -237,9 +245,12 @@ async def _search_targets(db: AsyncSession, body: SearchRequest) -> list[config_
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="検索する文字列を入力してください")
     try:
-        config_search.build_pattern(body.query, body.mode, body.case_sensitive)
+        # compile は重くなり得るので、イベントループを止めないようスレッドで行う
+        await run_in_threadpool(config_search.build_pattern, body.query, body.mode, body.case_sensitive)
     except config_search.SearchPatternError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except PatternUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     q = select(Device).order_by(Device.name)
     if body.group_id == "none":
         q = q.where(Device.group_id.is_(None))
@@ -257,12 +268,12 @@ async def _search_targets(db: AsyncSession, body: SearchRequest) -> list[config_
 async def search_configs(body: SearchRequest, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """全機器（または絞り込んだ機器）の最新コンフィグ（scope=history なら過去の世代も）を横断検索する"""
-    targets = await _search_targets(db, body)
-    if body.scope == "history":
-        _period(body)  # 期間の確認（スレッドへ渡す前にエラーを返す）
+    # 検索語の検証（正規表現の読み込みの重さを子プロセスで測ることがある）も、同時に実行できる数の内側で行う
     with _search_slot(user):
-        res = await run_in_threadpool(_run_search, body, targets, body.context, config_search.MAX_LINES_PER_DEVICE,
-                                      None)
+        targets = await _search_targets(db, body)
+        if body.scope == "history":
+            _period(body)  # 期間の確認（スレッドへ渡す前にエラーを返す）
+        res = await _threadpool_search(body, targets, body.context, config_search.MAX_LINES_PER_DEVICE, None)
     return {
         "scope": body.scope,
         "commits_searched": res.commits_searched,
@@ -287,11 +298,11 @@ async def export_search(body: SearchRequest, db: AsyncSession = Depends(get_db),
     - 調べきれなかった機器の数・上限で打ち切ったかは応答ヘッダーで返す（画面で知らせる）
     - 検索語は URL にも監査ログにも残さない（出力した件数と絞り込み条件だけを残す）
     """
-    targets = await _search_targets(db, body)
-    if body.scope == "history":
-        _period(body)
-    with _search_slot(user):
-        res = await run_in_threadpool(_run_search, body, targets, 0, MAX_EXPORT_ROWS, MAX_EXPORT_ROWS)
+    with _search_slot(user):  # 検索語の検証も同時に実行できる数の内側で行う
+        targets = await _search_targets(db, body)
+        if body.scope == "history":
+            _period(body)
+        res = await _threadpool_search(body, targets, 0, MAX_EXPORT_ROWS, MAX_EXPORT_ROWS)
     if body.scope == "history":
         header = ["機器名", "ホスト / IP", "機種", "グループ", "いまもある", "最初に見つかった世代", "その日時",
                   "最後に見つかった世代", "その日時", "一致した行"]

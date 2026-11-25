@@ -15,6 +15,7 @@ from app.api.deps import require
 from app.api.devices import Platform
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.safe_regex import PatternUnavailable
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
@@ -55,9 +56,9 @@ class RuleIn(BaseModel):
 
     @model_validator(mode="after")
     def _valid(self):
+        # 正規表現の検証（compile）はここではしない。イベントループを止めないよう、route で _check_rule（スレッド）を通す
         if self.scope != "section":
             self.section_pattern = None
-        validate_spec(self.spec())
         return self
 
     def spec(self) -> RuleSpec:
@@ -161,6 +162,16 @@ def _apply(r: ComplianceRule, payload: RuleIn, username: str) -> None:
     r.updated_by = username
 
 
+async def _check_rule(payload: RuleIn) -> None:
+    """ルールの正規表現を検証する（繰り返しの上限の検査 → compile）。compile は重くなり得るのでスレッドで行う"""
+    try:
+        await run_in_threadpool(validate_spec, payload.spec())
+    except PatternUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
 def _rule_detail(payload: RuleIn) -> dict:
     return {k: v for k, v in payload.model_dump().items() if k not in ("name", "description")}
 
@@ -220,6 +231,7 @@ async def create_rule(
     user: User = Depends(require(Perm.COMPLIANCE_WRITE)),
     audit: Audit = Depends(get_audit),
 ):
+    await _check_rule(payload)
     r = ComplianceRule(id=str(uuid.uuid4()))
     _apply(r, payload, user.username)
     db.add(r)
@@ -241,6 +253,7 @@ async def update_rule(
     user: User = Depends(require(Perm.COMPLIANCE_WRITE)),
     audit: Audit = Depends(get_audit),
 ):
+    await _check_rule(payload)
     r = await _get_rule(db, rule_id)
     _apply(r, payload, user.username)
     audit("compliance.rule_update", target_type="compliance_rule", target_id=r.id, target_name=r.name,
@@ -271,6 +284,7 @@ async def delete_rule(
 @router.post("/rules/test", response_model=RuleTestResult, dependencies=[Depends(require(Perm.COMPLIANCE_WRITE))])
 async def test_rule(payload: RuleTest, db: AsyncSession = Depends(get_db)):
     """保存せずに、指定した機器の現在のコンフィグでルールを試す"""
+    await _check_rule(payload.rule)
     d = await db.get(Device, payload.device_id)
     if d is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -297,10 +311,9 @@ class ExceptionIn(BaseModel):
 
     @model_validator(mode="after")
     def _valid(self):
+        # 除外する箇所の正規表現の検証（compile）は route でスレッドで行う（イベントループを止めないため）
         self.ignore_pattern = self.ignore_pattern or None
-        if self.ignore_pattern:
-            validate_ignore_pattern(self.ignore_pattern)
-        elif not self.device_id:
+        if not self.ignore_pattern and not self.device_id:
             raise ValueError(
                 "全機器を対象にする場合は、除外する箇所（正規表現）を指定してください（ルールを無効にするのと同じになるため）"
             )
@@ -361,6 +374,13 @@ async def create_exception(
     user: User = Depends(require(Perm.COMPLIANCE_WRITE)),
     audit: Audit = Depends(get_audit),
 ):
+    if payload.ignore_pattern:
+        try:
+            await run_in_threadpool(validate_ignore_pattern, payload.ignore_pattern)
+        except PatternUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
     rule = await _get_rule(db, payload.rule_id)
     device = None
     if payload.device_id:

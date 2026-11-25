@@ -19,6 +19,7 @@ import git
 import regex
 
 from app.core.config import settings
+from app.core.safe_regex import PatternTooHeavy, safe_compile
 from app.services.config_service import CONFIG_FILENAME, repo_path
 
 MAX_LINES_PER_DEVICE = 50  # 機器ごとに返す一致行の上限（件数は全部数える）
@@ -62,9 +63,18 @@ class SearchResult:
 
 
 def build_pattern(query: str, mode: str, case_sensitive: bool) -> regex.Pattern:
+    """検索語をコンパイルする（SearchPatternError）。同期処理なので API からはスレッドで呼ぶ
+
+    正規表現は compile の前に重さを確かめる（compile は時間切れで打ち切れないため。app.core.safe_regex）。
+    文字列の検索はエスケープした文字の並びなので、確かめずに compile する
+    """
     flags = 0 if case_sensitive else regex.IGNORECASE
     try:
-        return regex.compile(query if mode == "regex" else regex.escape(query), flags)
+        if mode == "regex":
+            return safe_compile(query, flags)
+        return regex.compile(regex.escape(query), flags, cache_pattern=False)
+    except PatternTooHeavy as e:
+        raise SearchPatternError(str(e)) from e
     except regex.error as e:
         raise SearchPatternError(f"正規表現が正しくありません: {e}") from e
 

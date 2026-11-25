@@ -2,6 +2,7 @@
 import uuid
 
 import pytest
+import regex_cases
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -245,6 +246,148 @@ def test_regex_timeout_does_not_block_api(ctx, monkeypatch):
     assert out["r"]["status"] == "error", out
 
 
+# ---------------------------------------------------------------- 重い正規表現（読み込みの重さを別のプロセスで測る）
+# 重いものはテストのプロセスでは compile せず、子プロセスの中で止まることだけを確かめる
+HEAVY = regex_cases.HEAVY
+NORMAL = regex_cases.NORMAL
+
+
+@pytest.mark.parametrize("pattern", HEAVY)
+def test_heavy_pattern_evaluate_error(pattern):
+    """DB に入っている重いルール・見出しは「エラー」にする（検査全体は止めない）"""
+    for spec in (RuleSpec("regex", "absent", pattern),
+                 RuleSpec("contains", "present", "x", "section", section_pattern=pattern)):
+        ev = evaluate(spec, IOS)
+        assert ev.status == "error" and "重すぎます" in ev.details[0], ev
+
+
+def test_templates_and_normal_patterns_pass():
+    """テンプレートの正規表現と、IP アドレス・MAC アドレスなどを含む普通のルールは通る（以前の文字列の検査の誤検出）"""
+    from app.services.compliance import TEMPLATES, validate_spec
+    specs = [RuleSpec(t["match_type"], t["expect"], t["pattern"], t.get("scope", "config"), t.get("section_pattern"))
+             for t in TEMPLATES]
+    specs += [RuleSpec("regex", "absent", p) for p in NORMAL]
+    specs += [RuleSpec("regex", "present", r"^\s+description ", "section", p) for p in NORMAL]
+    assert len(TEMPLATES) >= 15
+    for spec in specs:
+        validate_spec(spec)
+
+
+def test_heavy_pattern_rejected_by_api(ctx):
+    """ルール・セクションの見出し・ルールの試し・例外の正規表現で、重いパターンは 422（日本語の理由）。500 にしない"""
+    import time
+    c, op, devs = ctx["c"], ctx["op"], ctx["devs"]
+    r1 = devs["cmp-r1"]["id"]
+    base = {"name": f"heavy-{uuid.uuid4().hex[:4]}", "match_type": "regex", "expect": "absent", "pattern": "^x"}
+    ok = c.post("/api/compliance/rules", json=base, headers=op)
+    assert ok.status_code == 201, ok.text
+    try:
+        for p in HEAVY:
+            t0 = time.monotonic()
+            for r in (
+                c.post("/api/compliance/rules", json={**base, "name": "heavy-x", "pattern": p}, headers=op),
+                c.post("/api/compliance/rules", json={**base, "name": "heavy-y", "scope": "section",
+                                                      "section_pattern": p}, headers=op),
+                c.put(f"/api/compliance/rules/{ok.json()['id']}", json={**base, "pattern": p}, headers=op),
+                c.post("/api/compliance/rules/test", json={"rule": {**base, "pattern": p}, "device_id": r1}, headers=op),
+                c.post("/api/compliance/exceptions", json={"rule_id": ok.json()["id"], "device_id": r1,
+                                                           "ignore_pattern": p, "reason": "x"}, headers=op),
+            ):
+                assert r.status_code == 422, r.text
+                assert "重すぎます" in r.json()["detail"], r.text
+            assert time.monotonic() - t0 < 5, p
+        # 括弧の入れ子が深すぎる（compile が RecursionError）ものも 422。速い経路（{ なし）と遅い経路（{ あり）の両方
+        for p in ("(" * 400 + "a" + ")" * 400, "(" * 400 + "a{2}" + ")" * 400):
+            r = c.post("/api/compliance/rules", json={**base, "name": "deep", "pattern": p}, headers=op)
+            assert r.status_code == 422 and "入れ子が深すぎます" in r.json()["detail"], r.text
+        # 普通のパターンは通る
+        for p in NORMAL:
+            r = c.post("/api/compliance/rules/test", json={"rule": {**base, "pattern": p}, "device_id": r1}, headers=op)
+            assert r.status_code == 200 and r.json()["status"] in ("pass", "fail"), r.text
+            r = c.post("/api/compliance/exceptions", json={"rule_id": ok.json()["id"], "device_id": r1,
+                                                           "ignore_pattern": p, "reason": "x"}, headers=op)
+            assert r.status_code == 201, r.text
+            assert c.delete(f"/api/compliance/exceptions/{r.json()['id']}", headers=op).status_code == 204
+        r = c.post("/api/compliance/rules", json={**base, "name": base["name"] + "-s", "scope": "section",
+                                                  "pattern": NORMAL[0], "section_pattern": NORMAL[3]}, headers=op)
+        assert r.status_code == 201, r.text
+        c.delete(f"/api/compliance/rules/{r.json()['id']}", headers=op)
+    finally:
+        c.delete(f"/api/compliance/rules/{ok.json()['id']}", headers=op)
+
+
+def test_heavy_rule_in_db_does_not_stop_checks(ctx, caplog):
+    """API を通さずに DB に入った重いルール・除外があっても、worker の検査は止まらない。ルールはエラー、除外は使わない"""
+    import asyncio
+    import logging
+
+    from app.core.database import AsyncSessionLocal
+    from app.models.compliance import ComplianceException, ComplianceRule
+    from app.worker import _check_compliance, _run_async
+    c, op, view, devs = ctx["c"], ctx["op"], ctx["view"], ctx["devs"]
+    r1 = devs["cmp-r1"]["id"]
+    tag = uuid.uuid4().hex[:4]
+    # r1 には ntp server の行があるので違反になる
+    good = c.post("/api/compliance/rules", json={"name": f"good-{tag}", "match_type": "regex", "expect": "absent",
+                                                 "pattern": NORMAL[0], "platforms": ["cisco_ios"]}, headers=op).json()
+
+    async def insert():
+        async with AsyncSessionLocal() as db:
+            heavy = ComplianceRule(name=f"heavy-db-{tag}", match_type="regex", expect="absent", pattern=HEAVY[0],
+                                   platforms='["cisco_ios"]')
+            db.add(heavy)
+            await db.flush()
+            db.add(ComplianceException(rule_id=good["id"], device_id=r1, ignore_pattern=HEAVY[1], reason="x"))
+            await db.commit()
+            return heavy.id
+    heavy_id = asyncio.run(insert())
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.services.compliance"):
+            _run_async(_check_compliance(r1))
+        res = {x["rule_id"]: x for x in c.get("/api/compliance/results", params={"device_id": r1}, headers=view).json()}
+        assert res[heavy_id]["status"] == "error" and "重すぎます" in res[heavy_id]["details"][0]
+        # 読み込めない除外は使わない（除外にならず違反のまま）。飛ばしたことはログに残す
+        assert res[good["id"]]["status"] == "fail"
+        assert any("読み込めない除外" in r.getMessage() and HEAVY[1][:80] in r.getMessage() for r in caplog.records)
+    finally:
+        c.delete(f"/api/compliance/rules/{heavy_id}", headers=op)
+        c.delete(f"/api/compliance/rules/{good['id']}", headers=op)
+
+
+def test_regex_validation_does_not_block_api(ctx, monkeypatch):
+    """ルール・例外の正規表現の検証（compile）はスレッドで行い、その間もほかのリクエストに応答する"""
+    import threading
+    import time
+
+    import app.api.compliance as api
+    c, op, devs = ctx["c"], ctx["op"], ctx["devs"]
+    orig_spec, orig_ignore = api.validate_spec, api.validate_ignore_pattern
+
+    def slow(orig):
+        def f(*a):
+            time.sleep(1.5)  # compile に時間がかかる場合の代わり
+            return orig(*a)
+        return f
+    monkeypatch.setattr(api, "validate_spec", slow(orig_spec))
+    monkeypatch.setattr(api, "validate_ignore_pattern", slow(orig_ignore))
+    rule = {"name": "slow", "match_type": "regex", "expect": "absent", "pattern": r"^(?!x)"}
+    calls = [
+        lambda: c.post("/api/compliance/rules/test", json={"rule": rule, "device_id": devs["cmp-r1"]["id"]}, headers=op),
+        lambda: c.post("/api/compliance/exceptions", json={"rule_id": "nope", "device_id": devs["cmp-r1"]["id"],
+                                                           "ignore_pattern": "x", "reason": "x"}, headers=op),
+    ]
+    for call in calls:
+        out = {}
+        th = threading.Thread(target=lambda out=out, call=call: out.setdefault("r", call()))
+        th.start()
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        assert c.get("/api/health").status_code == 200
+        assert time.monotonic() - t0 < 1.0  # 検証の途中でも応答する
+        th.join(10)
+        assert "r" in out and out["r"].status_code in (200, 404), out
+
+
 # ---------------------------------------------------------------- 例外
 def test_evaluate_with_exceptions():
     from app.services.compliance import ExceptionSpec, evaluate_with_exceptions
@@ -357,3 +500,29 @@ def test_exception_api(ctx):
     c.delete(f"/api/compliance/rules/{rule['id']}", headers=op)
     c.delete(f"/api/compliance/rules/{cleanup['id']}", headers=op)
     assert [x for x in c.get("/api/compliance/exceptions", headers=view).json() if x["rule_id"] == rule["id"]] == []
+
+
+def test_probe_unavailable(ctx, monkeypatch):
+    """重さを確かめられない（子プロセスを起動できない）ときは、API は 503、検査はその回だけ「エラー」。覚えないので次は通る"""
+    from app.core import safe_regex as sr
+    from app.services.compliance import ExceptionSpec, evaluate_with_exceptions
+    c, op, devs = ctx["c"], ctx["op"], ctx["devs"]
+    tag = uuid.uuid4().hex
+    pattern = rf"^ntp server \d{{1,3}}(?:{tag})?"
+
+    def broken(*a, **kw):
+        raise OSError("起動できない")
+    monkeypatch.setattr(sr.subprocess, "run", broken)
+    rule = {"name": f"unavail-{tag[:6]}", "match_type": "regex", "expect": "absent", "pattern": pattern}
+    r = c.post("/api/compliance/rules", json=rule, headers=op)
+    assert r.status_code == 503 and "確かめられませんでした" in r.json()["detail"], r.text
+    r = c.post("/api/compliance/exceptions", json={"rule_id": "nope", "device_id": devs["cmp-r1"]["id"],
+                                                   "ignore_pattern": pattern, "reason": "x"}, headers=op)
+    assert r.status_code == 503, r.text
+    ev = evaluate(RuleSpec("regex", "absent", pattern), IOS)
+    assert ev.status == "error" and "次の検査でもう一度" in ev.details[0]
+    # 確かめられない除外を飛ばすと違反に変わって偽の通知になるので、その回はエラーにする
+    ev = evaluate_with_exceptions(RuleSpec("regex", "absent", "^ntp server"), IOS, [ExceptionSpec("x", pattern)])
+    assert ev.status == "error"
+    monkeypatch.undo()
+    assert evaluate(RuleSpec("regex", "absent", pattern), IOS).status == "fail"

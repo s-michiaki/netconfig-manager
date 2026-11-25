@@ -23,6 +23,7 @@ from app.api.devices import Platform
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.safe_regex import PatternUnavailable
 from app.models.device import Device
 from app.models.ignore_rule import ConfigIgnoreRule
 from app.models.user import User
@@ -113,6 +114,8 @@ async def _check_pattern(body: Target) -> None:
     """正規表現の検証（422）。コンパイル・照合はスレッドで行う"""
     try:
         await run_in_threadpool(validate_pattern, body.pattern)
+    except PatternUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
@@ -123,7 +126,10 @@ async def _run_preview(db: AsyncSession, body: Target) -> list[dict]:
     end = time.monotonic() + settings.IGNORE_TOTAL_TIMEOUT
     items = []
     for d in devices:
-        res = await run_in_threadpool(preview_device, d.id, body.pattern, end)
+        try:
+            res = await run_in_threadpool(preview_device, d.id, body.pattern, end)
+        except PatternUnavailable as e:  # 検証のあとに確かめ直すことになり、それが一時的に失敗した
+            raise HTTPException(status_code=503, detail=str(e)) from e
         items.append({"device_id": d.id, "device_name": d.name, **res})
     return items
 

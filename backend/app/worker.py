@@ -47,7 +47,7 @@ from app.services.config_service import (
     head_commit_hash,
 )
 from app.services.connection import load_connection_info
-from app.services.ignore_rules import SKIP_TIMEOUT, SKIP_TOO_HEAVY, WARN_RATIO
+from app.services.ignore_rules import SKIP_TIMEOUT, SKIP_TOO_HEAVY, SKIP_UNAVAILABLE, WARN_RATIO
 from app.services.ignore_rules import load_patterns as load_ignore_patterns
 from app.services.notify import (
     notify_change,
@@ -231,13 +231,17 @@ async def _save_result(
         elif settings.ACTIVITY_LOG_UNCHANGED:
             record(db, "collect.unchanged", "変更はありませんでした", detail={"seconds": seconds}, **kw)
         for sk in result.ignore_skipped:
-            # 時間切れと、そもそも使えない正規表現（不正・繰り返しの上限超え）は分けて記録する
+            # 時間切れと、そもそも使えない正規表現（不正・読み込みが重すぎる）は分けて記録する
             detail = {"pattern": sk.pattern[:500], "reason": sk.reason}
             if sk.reason == SKIP_TIMEOUT:
                 record(db, "ignore.timeout", "「無視する行」の正規表現の照合が時間切れになったため、"
                        "コンフィグを保存しませんでした", level="warning", detail=detail, **kw)
+            elif sk.reason == SKIP_UNAVAILABLE:
+                # 重さを測る子プロセスの起動の失敗など一時的なもの。正規表現そのものの問題とは分けて残す
+                record(db, "ignore.unavailable", "「無視する行」の正規表現の重さを確かめられなかったため、"
+                       "コンフィグを保存しませんでした（再試行します）", level="warning", detail=detail, **kw)
             else:
-                why = "繰り返しの回数が上限を超えています" if sk.reason == SKIP_TOO_HEAVY else "正規表現が正しくありません"
+                why = "読み込みが重すぎます" if sk.reason == SKIP_TOO_HEAVY else "正規表現が正しくありません"
                 record(db, "ignore.skipped", "「無視する行」の正規表現を使えなかったため、"
                        f"コンフィグを保存しませんでした（{why}）", level="warning", detail=detail, **kw)
         if result.success and result.ignore_dropped:

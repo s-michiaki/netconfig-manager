@@ -8,6 +8,8 @@ from unittest import mock
 import fake_sshd
 import fakeredis
 import pytest
+import regex
+import regex_cases
 from conftest import TMP
 from fastapi.testclient import TestClient
 
@@ -100,24 +102,43 @@ def test_normalize_total_timeout(monkeypatch):
 
 
 # ---------------------------------------------------------------- 重い正規表現（コンパイル前の検査）
-HEAVY = [r"(((a{100}){100}){100}){10}", r"((a{1000}){1000}){10}", r"a{101}", r"x{,200}", r"(?:a{100}){101,}",
-         r"(a{50}){50}b{5}"]
-NORMAL = [r"^ntp clock-period \d+$", r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", r"^! Last configuration change at .*$",
-          r"\{1000\}", r"[{1000}]x", r"[]{1000}]x", r"[^]{999}]", r"a{0}b{100}c{100}", r"(a{100}){100}", r"\p{L}x"]
+HEAVY = regex_cases.HEAVY
+NORMAL = [r"^ntp clock-period \d+$", r"^! Last configuration change at .*$", r"\{1000\}", r"[{1000}]x", r"[]{1000}]x",
+          r"[^]{999}]", r"\p{L}x", r"a{101}", r"x{1,200}", r"(a{100}){100}"] + [
+          p for p in regex_cases.NORMAL if not regex.search(p, "")]  # 空の行に一致するものは無視する行では使えない
 
 
-def test_check_repeats():
+def test_heavy_patterns():
+    """読み込みが重い正規表現は、別のプロセスで測って弾く（このプロセスでは compile しない）。普通のものは通る"""
     for p in HEAVY:
         t0 = time.monotonic()
         with pytest.raises(ir.PatternTooHeavy):
             ir.validate_pattern(p)
-        assert time.monotonic() - t0 < 0.1, p  # コンパイルせずに即座に弾く
+        assert time.monotonic() - t0 < 3, p  # 子プロセスのメモリ・時間の上限で止まる
     for p in NORMAL:
-        ir.validate_pattern(p)  # エスケープ・文字クラスの中の {n} は数えない
+        ir.validate_pattern(p)  # 回数指定の繰り返しの数値が大きくても、軽いものは通る
+
+
+def test_drop_lines_unavailable(monkeypatch):
+    """重さを確かめられないルールは「重すぎる」と分けて積み（再試行）、API は 503"""
+    from app.core import safe_regex as sr
+
+    def broken(*a, **kw):
+        raise OSError("起動できない")
+    monkeypatch.setattr(sr.subprocess, "run", broken)
+    p = rf"^x{{2}}(?:{uuid.uuid4().hex})?"
+    skipped: list = []
+    assert ir.drop_lines(["xx", "y"], [p], skipped) == ["xx", "y"]
+    assert [x.reason for x in skipped] == [ir.SKIP_UNAVAILABLE]
+    assert "確かめられませんでした（再試行します）" in ir.skipped_message(skipped)
+    with TestClient(app) as c:
+        admin = _login(c, "admin", "initial-pass-123")
+        r = c.post("/api/ignore-rules/", json={"scope": "platform", "platform": "cisco_ios", "pattern": p}, headers=admin)
+        assert r.status_code == 503, r.text
 
 
 def test_drop_lines_reasons(monkeypatch):
-    """飛ばした理由（時間切れ／不正／繰り返しの上限超え）を分けて積む。DB から読んだものもコンパイル前に検査する"""
+    """飛ばした理由（時間切れ／不正／読み込みが重すぎる）を分けて積む。DB から読んだものもコンパイル前に確かめる"""
     monkeypatch.setattr(settings, "IGNORE_RULE_TIMEOUT", 0.3)
     skipped: list = []
     t0 = time.monotonic()
@@ -125,7 +146,7 @@ def test_drop_lines_reasons(monkeypatch):
     assert time.monotonic() - t0 < 3
     assert [x.reason for x in skipped] == ["too_heavy", "invalid", "timeout"] and out == ["x", EVIL_LINE]
     msg = ir.skipped_message(skipped)
-    assert "時間切れになりました（ルール: " + EVIL in msg and "上限を超えています" in msg and "保存していません" in msg
+    assert "時間切れになりました（ルール: " + EVIL in msg and "読み込みが重すぎます" in msg and "保存していません" in msg
 
 
 def test_validate_empty_timeout(monkeypatch):
@@ -178,17 +199,17 @@ def test_crud_and_validation(client, env):
     for b in bad:
         res = client.post("/api/ignore-rules/", json={"scope": "platform", "platform": "cisco_ios", **b}, headers=env["admin"])
         assert res.status_code == 422, (b, res.text)
-    # 重い正規表現は、コンパイルせずに即座に 422（理由は日本語）
-    for p in HEAVY[:2]:
+    # 重い正規表現は、このプロセスで compile せずに 422（理由は日本語）
+    for p in HEAVY:
         t0 = time.monotonic()
         res = client.post("/api/ignore-rules/", json={"scope": "platform", "platform": "cisco_ios", "pattern": p},
                           headers=env["admin"])
-        assert res.status_code == 422 and "繰り返しの回数" in res.json()["detail"], res.text
-        assert time.monotonic() - t0 < 1
+        assert res.status_code == 422 and "重すぎます" in res.json()["detail"], res.text
+        assert time.monotonic() - t0 < 3
         res = client.post("/api/ignore-rules/preview", json={"scope": "platform", "platform": "cisco_ios", "pattern": p},
                           headers=env["admin"])
         assert res.status_code == 422
-    for p in NORMAL[:3]:
+    for p in NORMAL:
         res = client.post("/api/ignore-rules/", json={"scope": "device", "device_id": d["id"], "pattern": p},
                           headers=env["admin"])
         assert res.status_code == 201, res.text
@@ -393,6 +414,34 @@ def test_worker_timeout_does_not_save(client, env, redis_, monkeypatch):
     assert det["pattern"] == EVIL and det["reason"] == "timeout"
     assert EVIL_LINE not in rows[0][1] + rows[0][2].replace(EVIL, "")  # 機器の出力（行の中身）は記録しない
     assert _activity("collect.failed", d["id"])
+    _clear(client, env)
+    client.delete(f"/api/devices/{d['id']}", headers=env["admin"])
+
+
+def test_worker_probe_unavailable_does_not_save(client, env, redis_, monkeypatch):
+    """収集の時に重さを確かめられない（子プロセスを起動できない）ルールがあれば、その回は保存せず再試行できる失敗にする。
+    アクティビティは「重すぎる」「不正」（ignore.skipped）と分けて ignore.unavailable に残す"""
+    from app.core import safe_regex as sr
+    _clear(client, env)
+    monkeypatch.setattr(fake_sshd, "CONFIG", "hostname R1\r\ninterface Gi0/1\r\n description x\r\nend")
+    port, _, _ = fake_sshd.start()
+    d = _device(client, env, port=port)
+    assert worker.collect_device_config.apply(args=(d["id"],)).get()["success"]
+    pattern = rf"^ description x{{1,2}}(?:{uuid.uuid4().hex})?"
+    _rule(client, env, pattern)
+    sr.clear_caches()  # 登録時に覚えた判定を消し、収集の時に確かめ直させる
+
+    def broken(*a, **kw):
+        raise OSError("起動できない")
+    monkeypatch.setattr(sr.subprocess, "run", broken)
+    with mock.patch.object(worker.collect_device_config, "max_retries", 0), \
+            mock.patch.object(worker, "queue_failure_notification"), mock.patch.object(worker, "_wants", new=_yes):
+        res = worker.collect_device_config.apply(args=(d["id"],)).get()
+    assert res["success"] is False and "確かめられませんでした（再試行します）" in res["error"]
+    assert _snapshots(d["id"]) == 1
+    rows = _activity("ignore.unavailable", d["id"])
+    assert len(rows) == 1 and json.loads(rows[0][2])["reason"] == "unavailable"
+    assert _activity("ignore.skipped", d["id"]) == []
     _clear(client, env)
     client.delete(f"/api/devices/{d['id']}", headers=env["admin"])
 

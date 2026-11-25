@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.csv_export import MAX_EXPORT_ROWS, content_disposition, csv_response, export_name, safe_filename
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.safe_regex import PatternUnavailable
 from app.models.audit import AuditLog, TerminalSession
 from app.services import config_search
 from app.services.audit import ACTIONS, Audit, get_audit, read_recording, read_text_log, recording_path, text_path
@@ -319,9 +320,12 @@ async def search_texts(body: TextSearchRequest, db: AsyncSession = Depends(get_d
     if not body.query.strip():
         raise HTTPException(status_code=422, detail="検索する文字列を入力してください")
     try:
-        config_search.build_pattern(body.query, body.mode, body.case_sensitive)
+        # compile は重くなり得るので、イベントループを止めないようスレッドで行う
+        await run_in_threadpool(config_search.build_pattern, body.query, body.mode, body.case_sensitive)
     except config_search.SearchPatternError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except PatternUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     cond = _session_conditions(body.username, body.device, body.since, body.until)
     rows = (await db.execute(select(TerminalSession).where(*cond).order_by(TerminalSession.started_at.desc())
                              .limit(SEARCH_MAX_SESSIONS + 1))).scalars().all()
@@ -332,7 +336,10 @@ async def search_texts(body: TextSearchRequest, db: AsyncSession = Depends(get_d
         t = text_path(r)
         if t and t.is_file():
             targets.append((r.id, str(t)))
-    hits, unreadable, timed_out = await run_in_threadpool(_search_texts, targets, body)
+    try:
+        hits, unreadable, timed_out = await run_in_threadpool(_search_texts, targets, body)
+    except PatternUnavailable as e:  # 検証のあとに確かめ直すことになり、それが一時的に失敗した
+        raise HTTPException(status_code=503, detail=str(e)) from e
     # 記録の中身を調べたことを残す。検索語そのものは残さない（探している内容が機密のことがあるため）
     audit("audit.search_recording", detail={"sessions": len(targets), "matched": len(hits),
                                            "username": body.username, "device": body.device})

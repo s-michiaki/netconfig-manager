@@ -28,6 +28,7 @@ EVENTS: dict[str, tuple[str, str]] = {
     "compliance.run": ("コンプライアンスチェックの実行", "info"),
     "ignore.timeout": ("無視する行の照合が時間切れ", "warning"),
     "ignore.skipped": ("無視する行の正規表現が使えない", "warning"),
+    "ignore.unavailable": ("無視する行の正規表現を確かめられない", "warning"),
     "ignore.broad": ("無視する行で多くの行が消えた", "warning"),
     "baseline.drift": ("基準からのずれ", "warning"),
     "baseline.error": ("基準からのずれを計算できない", "warning"),

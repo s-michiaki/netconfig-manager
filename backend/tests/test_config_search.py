@@ -2,6 +2,7 @@
 import time
 import uuid
 
+import regex_cases
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -259,3 +260,84 @@ def test_search_concurrency_limit(monkeypatch):
         assert configs._running == {me: 1}  # 終わった検索の分は戻る（エラーでも戻る）
         assert c.post("/api/configs/search", json={"query": "("  , "mode": "regex"}, headers=h).status_code == 422
         assert configs._running == {me: 1}
+
+
+HEAVY = [p for p in regex_cases.HEAVY if len(p) <= 200]  # 検索語は 200 文字まで
+NORMAL = regex_cases.NORMAL
+
+
+def test_heavy_pattern_rejected():
+    """コンフィグ検索（閲覧者）・ターミナル記録の検索（管理者）で、重い正規表現は（このプロセスでは compile せずに）422"""
+    for p in HEAVY:
+        try:
+            config_search.build_pattern(p, "regex", False)
+            raise AssertionError("弾かれなかった")
+        except config_search.SearchPatternError as e:
+            assert "重すぎます" in str(e)
+    # 文字列の検索はエスケープするので、同じ文字を含んでいても通る
+    assert config_search.build_pattern(HEAVY[0], "contains", False).search("x" + HEAVY[0])
+    assert len(HEAVY) == len(regex_cases.HEAVY)
+    # あいまい一致（{e<=n}）は compile が軽く、照合は時間切れで打ち切れるので受け付ける
+    assert config_search.build_pattern(r"(?:ntp server){e<=1}", "regex", True).search("ntp servr 10.0.0.1")
+    with TestClient(app) as c:
+        admin = login(c, "admin", "initial-pass-123")
+        name = f"srch-heavy-{uuid.uuid4().hex[:4]}"
+        c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"}, headers=admin)
+        view = login(c, name, "password-1234")
+        for p in HEAVY:
+            t0 = time.monotonic()
+            for r in (
+                c.post("/api/configs/search", json={"query": p, "mode": "regex"}, headers=view),
+                c.post("/api/configs/search", json={"query": p, "mode": "regex", "scope": "history"}, headers=view),
+                c.post("/api/configs/search/export", json={"query": p, "mode": "regex"}, headers=view),
+                c.post("/api/audit/terminal-sessions/search", json={"query": p, "mode": "regex"}, headers=admin),
+            ):
+                assert r.status_code == 422 and "重すぎます" in r.json()["detail"], r.text
+            assert time.monotonic() - t0 < 5, p
+        assert c.post("/api/configs/search", json={"query": HEAVY[0]}, headers=view).status_code == 200
+        for p in NORMAL:
+            assert c.post("/api/configs/search", json={"query": p, "mode": "regex"}, headers=view).status_code == 200
+            assert c.post("/api/audit/terminal-sessions/search", json={"query": p, "mode": "regex"},
+                          headers=admin).status_code == 200
+
+
+def test_search_validation_does_not_block_api(monkeypatch):
+    """検索語の検証（compile）はスレッドで行い、その間もほかのリクエストに応答する"""
+    import threading
+
+    orig = config_search.build_pattern
+
+    def slow(*a):
+        time.sleep(1.5)  # compile に時間がかかる場合の代わり
+        return orig(*a)
+    monkeypatch.setattr(config_search, "build_pattern", slow)
+    with TestClient(app) as c:
+        admin = login(c, "admin", "initial-pass-123")
+        for path in ("/api/configs/search", "/api/audit/terminal-sessions/search"):
+            out = {}
+
+            def run(path=path, out=out):
+                out["r"] = c.post(path, json={"query": "(", "mode": "regex"}, headers=admin)
+            th = threading.Thread(target=run)
+            th.start()
+            time.sleep(0.3)
+            t0 = time.monotonic()
+            assert c.get("/api/health").status_code == 200
+            assert time.monotonic() - t0 < 1.0, path  # 検証の途中でも応答する
+            th.join(10)
+            assert "r" in out and out["r"].status_code == 422, out
+
+
+def test_search_probe_unavailable(monkeypatch):
+    """検索語の重さを確かめられないときは 503（422 にしない）"""
+    from app.core import safe_regex as sr
+
+    def broken(*a, **kw):
+        raise OSError("起動できない")
+    monkeypatch.setattr(sr.subprocess, "run", broken)
+    q = rf"^ntp \d{{1,3}}(?:{uuid.uuid4().hex})?"
+    with TestClient(app) as c:
+        admin = login(c, "admin", "initial-pass-123")
+        for path in ("/api/configs/search", "/api/configs/search/export", "/api/audit/terminal-sessions/search"):
+            r = c.post(path, json={"query": q, "mode": "regex"}, headers=admin)
+            assert r.status_code == 503 and "確かめられませんでした" in r.json()["detail"], (path, r.text)

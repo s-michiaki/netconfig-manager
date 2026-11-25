@@ -26,6 +26,8 @@
 - そこで regex パッケージで照合し、1回の評価（ルール × 機器）あたりの合計時間を
   COMPLIANCE_REGEX_TIMEOUT 秒に制限する。超えたら評価を「エラー」にして打ち切る
   （concurrent=True で照合中も GIL を手放すので、ほかのリクエストは止まらない）
+- 照合の時間切れでは compile を打ち切れないため、compile の前に別のプロセスで実際に読み込んで重さを測る
+  （app.core.safe_regex。重いものは保存させず、DB に入っているものは検査の実行時にそのルールだけ「エラー」として扱う）
 """
 import asyncio
 import json
@@ -40,6 +42,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.safe_regex import PatternTooHeavy, PatternUnavailable, safe_compile
 from app.core.timeutil import utcnow
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import Device
@@ -81,8 +84,14 @@ class RegexTimeout(Exception):
 
 
 def compile_pattern(pattern: str) -> regex.Pattern:
-    """利用者が入力した正規表現をコンパイルする（不正なら regex.error）"""
-    return regex.compile(pattern)
+    """利用者が入力した正規表現をコンパイルする
+
+    不正なら regex.error、読み込みが重すぎるなら PatternTooHeavy、重さを確かめられなければ PatternUnavailable（一時的。
+    呼び出し側で別に扱う。API は 503、検査はその回だけエラー）
+
+    compile の前に重さを確かめる（compile は時間切れで打ち切れないため）。同期処理なので API からはスレッドで呼ぶ
+    """
+    return safe_compile(pattern, max_length=MAX_PATTERN_LENGTH)
 
 
 class Deadline:
@@ -110,6 +119,8 @@ def pattern_allowed(spec: RuleSpec) -> bool:
 def validate_ignore_pattern(pattern: str) -> None:
     try:
         compile_pattern(pattern)
+    except PatternTooHeavy as e:
+        raise ValueError(f"除外する箇所: {e}") from e
     except regex.error as e:
         raise ValueError(f"除外する箇所の正規表現が正しくありません: {e}") from e
 
@@ -142,6 +153,8 @@ def make_matcher(spec: RuleSpec, deadline: Deadline | None = None) -> Callable[[
     if spec.match_type == "regex":
         try:
             rx = compile_pattern(spec.pattern)
+        except PatternTooHeavy as e:
+            raise ValueError(str(e)) from e
         except regex.error as e:
             raise ValueError(f"正規表現が正しくありません: {e}") from e
         dl = deadline or Deadline()
@@ -150,12 +163,15 @@ def make_matcher(spec: RuleSpec, deadline: Deadline | None = None) -> Callable[[
 
 
 def validate_spec(spec: RuleSpec) -> None:
+    """保存・試す前の検証（ValueError）。compile するので同期処理。API からは run_in_threadpool で呼ぶ"""
     make_matcher(spec)
     if spec.scope == "section":
         if not spec.section_pattern:
             raise ValueError("セクションごとに検査する場合は、セクションの見出し（正規表現）を指定してください")
         try:
             compile_pattern(spec.section_pattern)
+        except PatternTooHeavy as e:
+            raise ValueError(f"セクションの見出し: {e}") from e
         except regex.error as e:
             raise ValueError(f"セクションの見出しの正規表現が正しくありません: {e}") from e
 
@@ -195,9 +211,14 @@ def evaluate(spec: RuleSpec, config_text: str, ignore: list[regex.Pattern] | Non
         ])
 
 
+UNAVAILABLE_DETAIL = "正規表現の重さを確かめられませんでした（次の検査でもう一度確かめます）"
+
+
 def _evaluate(spec: RuleSpec, config_text: str, ignore: list[regex.Pattern], deadline: Deadline) -> Evaluation:
     try:
         match = make_matcher(spec, deadline)
+    except PatternUnavailable:
+        return Evaluation("error", [UNAVAILABLE_DETAIL])
     except ValueError as e:
         return Evaluation("error", [str(e)])
     lines = config_text.splitlines()
@@ -222,6 +243,10 @@ def _evaluate(spec: RuleSpec, config_text: str, ignore: list[regex.Pattern], dea
 
     try:
         head_rx = compile_pattern(spec.section_pattern or "")
+    except PatternUnavailable:
+        return Evaluation("error", [UNAVAILABLE_DETAIL])
+    except PatternTooHeavy as e:
+        return Evaluation("error", [f"セクションの見出し: {e}"])
     except regex.error as e:
         return Evaluation("error", [f"セクションの見出しの正規表現が正しくありません: {e}"])
     violations: list[str] = []
@@ -255,8 +280,13 @@ def evaluate_with_exceptions(spec: RuleSpec, config_text: str, exceptions: list[
         if e.ignore_pattern:
             try:
                 ignore.append(compile_pattern(e.ignore_pattern))
-            except regex.error:
-                continue  # 登録時に検証しているので通常は起きない
+            except PatternUnavailable:
+                # 一時的に確かめられない除外を飛ばすと、違反に変わって偽の通知になるため、その回はエラーにする
+                return Evaluation("error", [UNAVAILABLE_DETAIL])
+            except (regex.error, PatternTooHeavy) as err:
+                # 登録時に検証しているので通常は起きない（その除外は使わない＝検査は厳しい側になる）
+                logger.warning("読み込めない除外の正規表現を飛ばしました（%s）: %s", err, e.ignore_pattern[:80])
+                continue
     ev = evaluate(spec, config_text, ignore if pattern_allowed(spec) else None)
     reasons = "・".join(dict.fromkeys(e.reason for e in exceptions))
     if ev.status == "pass" and ev.ignored:
