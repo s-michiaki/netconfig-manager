@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readCsp } from "../csp";
-import { login, PAGES } from "./helpers";
+import { login, PAGES, openNav } from "./helpers";
 
 // 本番の nginx と同じ CSP を付けた本番ビルド（playwright.config.ts の csp プロジェクト・4173 番）で、
 // 全画面・書き出し・ダウンロード・WebSocket が CSP に止められないことを確認する
@@ -44,7 +44,7 @@ test("CSP を付けても全画面・書き出し・ダウンロード・WebSock
 
   await login(page);
   for (const path of PAGES) {
-    await page.locator(`a[href="${path}"]`).first().click();
+    await openNav(page, path);
     // 構成図は読み込み後に最後に開いた図（/topology/<id>）へ移るので、移り終わるのを待つ（次の画面への移動と競合しないように）
     await expect(page).toHaveURL(path === "/topology" ? /\/topology\/[\w-]+$/ : new RegExp(`${path}$`));
     await expect(page.locator(".page-title").first()).toBeVisible();

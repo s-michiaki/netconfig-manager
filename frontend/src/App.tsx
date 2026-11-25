@@ -1,4 +1,4 @@
-import { ComponentType, lazy, Suspense, useEffect, useState } from "react";
+import { ComponentType, lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
@@ -47,29 +47,84 @@ const ReviewsPage = lazyPage(() => import("./pages/ReviewsPage"));
 const IgnoreRulesPage = lazyPage(() => import("./pages/IgnoreRulesPage"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
 
-const NAV_ITEMS: { path: string; label: string; icon: string; perm: Perm; feature?: string }[] = [
-  { path: "/dashboard", label: "ダッシュボード", icon: "🏠", perm: PERM.DEVICE_READ },
-  { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
-  { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
-  { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
-  { path: "/credential-profiles", label: "認証情報プロファイル", icon: "🪪", perm: PERM.DEVICE_WRITE },
-  { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
-  { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
-  // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
-  { path: "/monitoring", label: "モニタリング", icon: "📈", perm: PERM.MONITOR_READ, feature: "monitoring" },
-  { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
-  { path: "/reviews", label: "変更の確認", icon: "☑", perm: PERM.CONFIG_READ },
-  { path: "/search", label: "コンフィグ検索", icon: "🔎", perm: PERM.CONFIG_READ },
-  { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
-  { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
-  { path: "/compliance", label: "コンプライアンス", icon: "✔", perm: PERM.COMPLIANCE_READ },
-  { path: "/ignore-rules", label: "無視する行", icon: "🚫", perm: PERM.CONFIG_IGNORE },
-  { path: "/notifications", label: "通知設定", icon: "🔔", perm: PERM.NOTIFY_SELF },
-  { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
-  { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
-  { path: "/users", label: "ユーザー管理", icon: "👥", perm: PERM.USER_ADMIN },
-  { path: "/system", label: "システム状態", icon: "🩺", perm: PERM.SYSTEM_READ },
+type NavItem = { path: string; label: string; icon: string; perm: Perm; feature?: string };
+type NavGroup = { id: string; label: string; items: NavItem[] };
+
+/** 一番上に単独で出すメニュー */
+const NAV_TOP: NavItem = { path: "/dashboard", label: "ダッシュボード", icon: "🏠", perm: PERM.DEVICE_READ };
+
+/** 大項目と小項目（この順番で表示する。権限・機能の条件で小項目が 1 つも無い大項目は出さない） */
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: "devices", label: "機器",
+    items: [
+      { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
+      { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
+      { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
+      { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
+      { path: "/credential-profiles", label: "認証情報プロファイル", icon: "🪪", perm: PERM.DEVICE_WRITE },
+    ],
+  },
+  {
+    id: "config", label: "コンフィグ",
+    items: [
+      { path: "/collect", label: "コンフィグ収集", icon: "↻", perm: PERM.COLLECT },
+      { path: "/schedules", label: "スケジュール", icon: "📅", perm: PERM.SCHEDULE_READ },
+      { path: "/history", label: "世代管理", icon: "🕐", perm: PERM.CONFIG_READ },
+      { path: "/reviews", label: "変更の確認", icon: "☑", perm: PERM.CONFIG_READ },
+      { path: "/search", label: "コンフィグ検索", icon: "🔎", perm: PERM.CONFIG_READ },
+      { path: "/compliance", label: "コンプライアンス", icon: "✔", perm: PERM.COMPLIANCE_READ },
+      { path: "/ignore-rules", label: "無視する行", icon: "🚫", perm: PERM.CONFIG_IGNORE },
+    ],
+  },
+  {
+    id: "monitor", label: "監視",
+    items: [
+      { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
+      // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
+      { path: "/monitoring", label: "モニタリング", icon: "📈", perm: PERM.MONITOR_READ, feature: "monitoring" },
+      { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
+    ],
+  },
+  {
+    id: "admin", label: "管理",
+    items: [
+      { path: "/notifications", label: "通知設定", icon: "🔔", perm: PERM.NOTIFY_SELF },
+      { path: "/users", label: "ユーザー管理", icon: "👥", perm: PERM.USER_ADMIN },
+      { path: "/audit", label: "監査ログ", icon: "🛡", perm: PERM.AUDIT_READ },
+      { path: "/system", label: "システム状態", icon: "🩺", perm: PERM.SYSTEM_READ },
+    ],
+  },
 ];
+
+const isOnPath = (pathname: string, path: string) => pathname.startsWith(path);
+
+/** いまの画面を含む大項目の id（権限・機能の条件に関係なく、定義から引く。モニタリングの有無が決まる前でも変わらない） */
+function groupOfPath(pathname: string): string | undefined {
+  return NAV_GROUPS.find((g) => g.items.some((i) => isOnPath(pathname, i.path)))?.id;
+}
+
+// 大項目の開閉（ブラウザに保存）
+function navOpenKey(username: string | undefined) {
+  return `ncm.nav.open.${username ?? ""}`;
+}
+function readNavOpen(username: string | undefined): string[] | null {
+  try {
+    const raw = localStorage.getItem(navOpenKey(username));
+    if (raw === null) return null;
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : null;
+  } catch {
+    return null;
+  }
+}
+function writeNavOpen(username: string | undefined, ids: string[]) {
+  try {
+    localStorage.setItem(navOpenKey(username), JSON.stringify(ids));
+  } catch {
+    /* 保存できなくても、この画面を開いている間は効く */
+  }
+}
 
 function PasswordModal({ onClose }: { onClose: () => void }) {
   const [current, setCurrent] = useState("");
@@ -147,6 +202,28 @@ function Layout() {
     return () => window.clearInterval(t);
   }, [canSystem, location.pathname === "/system"]);
 
+  // 大項目の開閉。初めての人は、いまの画面を含む大項目だけが開いた状態
+  const username = me?.username;
+  const [navOpen, setNavOpen] = useState<string[]>(() => {
+    // 保存値に、いまの画面の大項目を足す（初回に閉じた状態が一瞬見えないように）
+    const saved = readNavOpen(username) ?? [];
+    const g = groupOfPath(location.pathname);
+    return g && !saved.includes(g) ? [...saved, g] : saved;
+  });
+  const lastGroup = useRef(groupOfPath(location.pathname));
+  useEffect(() => {
+    // 開いている画面を含む大項目は、別の大項目から移ってきたときに自動で開く。
+    // 同じ大項目の中の移動（/terminal → /terminal/5 など）では、手で閉じた状態を開き直さない
+    const g = groupOfPath(location.pathname);
+    if (g && g !== lastGroup.current) setNavOpen((prev) => (prev.includes(g) ? prev : [...prev, g]));
+    lastGroup.current = g;
+  }, [location.pathname]);
+  useEffect(() => {
+    writeNavOpen(username, navOpen);
+  }, [username, navOpen]);
+  const toggleGroup = (id: string) =>
+    setNavOpen((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
   const logout = () => {
     clearToken();
     window.location.href = "/login";
@@ -161,20 +238,57 @@ function Layout() {
           <span className="sidebar-logo">⬡ NetConfig</span>
         </div>
         <nav className="sidebar-nav">
-          {NAV_ITEMS.filter((item) => can(item.perm) && (!item.feature || features[item.feature])).map((item) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={`nav-item ${location.pathname.startsWith(item.path) ? "active" : ""}`}
-            >
-              <span className="nav-icon">{item.icon}</span>
-              {item.label}
-              {item.path === "/system" && systemStatus !== "ok" && (
-                <span className={`nav-alert${systemStatus === "error" ? " error" : ""}`}
-                      title={systemStatus === "error" ? "システムに異常があります" : "確認が必要な項目があります"} />
-              )}
+          {can(NAV_TOP.perm) && (
+            <Link to={NAV_TOP.path}
+              className={`nav-item ${isOnPath(location.pathname, NAV_TOP.path) ? "active" : ""}`}>
+              <span className="nav-icon">{NAV_TOP.icon}</span>
+              {NAV_TOP.label}
             </Link>
-          ))}
+          )}
+          {NAV_GROUPS.map((group) => {
+            const items = group.items.filter((item) => can(item.perm) && (!item.feature || features[item.feature]));
+            if (items.length === 0) return null;
+            const open = navOpen.includes(group.id);
+            const hasCurrent = group.items.some((i) => isOnPath(location.pathname, i.path));
+            const showAlert = !open && systemStatus !== "ok" && items.some((i) => i.path === "/system");
+            return (
+              <div key={group.id} className="nav-group">
+                <button
+                  type="button"
+                  className={`nav-group-head${!open && hasCurrent ? " active" : ""}`}
+                  aria-expanded={open}
+                  aria-controls={open ? `nav-sub-${group.id}` : undefined}
+                  onClick={() => toggleGroup(group.id)}
+                >
+                  <span className="nav-caret" aria-hidden="true">{open ? "▾" : "▸"}</span>
+                  {group.label}
+                  {showAlert && (
+                    <span className={`nav-alert${systemStatus === "error" ? " error" : ""}`}
+                          title={systemStatus === "error" ? "システムに異常があります" : "確認が必要な項目があります"} />
+                  )}
+                </button>
+                {open && (
+                  <div id={`nav-sub-${group.id}`} className="nav-sub">
+                    {items.map((item) => (
+                      <Link
+                        key={item.path}
+                        to={item.path}
+                        title={item.label}
+                        className={`nav-item nav-sub-item ${isOnPath(location.pathname, item.path) ? "active" : ""}`}
+                      >
+                        <span className="nav-icon">{item.icon}</span>
+                        <span className="nav-label">{item.label}</span>
+                        {item.path === "/system" && systemStatus !== "ok" && (
+                          <span className={`nav-alert${systemStatus === "error" ? " error" : ""}`}
+                                title={systemStatus === "error" ? "システムに異常があります" : "確認が必要な項目があります"} />
+                        )}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </nav>
         <div className="sidebar-footer">
           {me && (

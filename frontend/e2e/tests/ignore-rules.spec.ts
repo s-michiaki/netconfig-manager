@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { USERS, login } from "./helpers";
+import { USERS, login, openNav, expandNav } from "./helpers";
 
 async function authHeaders(page: Page) {
   const token = await page.evaluate(() => localStorage.getItem("access_token"));
@@ -22,7 +22,7 @@ test("管理者が無視する行を追加し、試して、保存・一覧・�
   const page = await adminCtx.newPage();
   await login(page, USERS.admin);
   try {
-    await page.locator('a[href="/ignore-rules"]').first().click();
+    await openNav(page, "/ignore-rules");
     await expect(page).toHaveURL(/\/ignore-rules/);
     await expect(page.getByText("ルールはまだありません")).toBeVisible();
     await expect(page.getByText("追加後の最初の収集では、該当の行が消える変更が 1 回記録されます").first()).toBeVisible();
@@ -88,7 +88,8 @@ test("管理者が無視する行を追加し、試して、保存・一覧・�
     const opCtx = await browser.newContext();
     const op = await opCtx.newPage();
     await login(op, USERS.op);
-    await expect(op.locator('a[href="/ignore-rules"]')).toHaveCount(0);
+    await expandNav(op);
+    await expect(op.locator('.sidebar-nav a[href="/ignore-rules"]')).toHaveCount(0);
     await opCtx.close();
 
     // 削除

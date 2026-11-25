@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { USERS, login } from "./helpers";
+import { USERS, expandNav, login } from "./helpers";
 
 test("ログインに失敗するとメッセージを表示する", async ({ page }) => {
   await page.goto("/login");
@@ -17,6 +17,7 @@ test("ログインしていなければログイン画面へ戻す", async ({ pa
 
 test("管理者はすべてのメニューを使え、バージョンを表示する", async ({ page }) => {
   await login(page);
+  await expandNav(page);
   for (const label of ["デバイス管理", "構成図", "コンプライアンス", "監査ログ", "ユーザー管理"]) {
     await expect(page.getByRole("link", { name: label })).toBeVisible();
   }
@@ -25,6 +26,7 @@ test("管理者はすべてのメニューを使え、バージョンを表示�
 
 test("閲覧者は管理用のメニューと編集ボタンが表示されない", async ({ page }) => {
   await login(page, USERS.viewer);
+  await expandNav(page);
   await expect(page.getByRole("link", { name: "デバイス管理" })).toBeVisible();
   for (const label of ["監査ログ", "ユーザー管理", "踏み台サーバ", "コンフィグ収集", "ターミナル"]) {
     await expect(page.getByRole("link", { name: label })).toHaveCount(0);

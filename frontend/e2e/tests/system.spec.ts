@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { login } from "./helpers";
+import { login, openNav } from "./helpers";
 
 test("システム状態: 項目メニューで状態を確認し、画面に表示する項目を ＋/− で選ぶ", async ({ page }) => {
   await login(page);
   await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("ncm.system.hidden.")).forEach((k) => localStorage.removeItem(k)));
-  await page.locator('a[href="/system"]').first().click();
+  await openNav(page, "/system");
   const cards = page.locator(".sys-grid .sys-card");
   await expect(cards.filter({ hasText: "ディスクの空き" })).toHaveCount(1);
   const total = await cards.count();
@@ -39,7 +39,7 @@ test("システム状態: 項目メニューで状態を確認し、画面に表
 
 test("システム状態: 要確認の項目を外すと、画面の上に知らせる", async ({ page }) => {
   await login(page);
-  await page.locator('a[href="/system"]').first().click();
+  await openNav(page, "/system");
   await expect(page.locator(".sys-grid .sys-card").first()).toBeVisible();
   // e2e の環境では Redis に接続できないため「Redis」は異常
   await page.getByRole("button", { name: /^項目/ }).click();

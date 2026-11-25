@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { login } from "./helpers";
+import { login, openNav } from "./helpers";
 
 async function authHeaders(page: Page) {
   const token = await page.evaluate(() => localStorage.getItem("access_token"));
@@ -17,7 +17,7 @@ test("メールサーバーを設定し、自分の通知にメールの宛先�
   await login(page);
   await cleanup(page);
   try {
-    await page.locator('a[href="/notifications"]').first().click();
+    await openNav(page, "/notifications");
     await expect(page.locator(".page-title")).toHaveText("通知設定");
 
     // 宛先を登録しようとしても、メールサーバーが無効なら保存できない

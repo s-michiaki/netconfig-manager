@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { USERS, login } from "./helpers";
+import { USERS, login, openNav, expandNav } from "./helpers";
 
 const PROFILE = "E2E-共通アカウント";
 const DEVICE = "SW-3F";
@@ -32,7 +32,7 @@ test("認証情報プロファイルを作って機器に割り当て、カー�
   await cleanup(page); // 前回の失敗で残っていても同じ結果になるように
   try {
     // プロファイルの作成
-    await page.locator('a[href="/credential-profiles"]').first().click();
+    await openNav(page, "/credential-profiles");
     await expect(page.locator(".page-title")).toHaveText("認証情報プロファイル");
     await page.getByRole("button", { name: "＋ 追加" }).click();
     const modal = page.locator(".modal");
@@ -47,7 +47,7 @@ test("認証情報プロファイルを作って機器に割り当て、カー�
     await expect(page.locator(".page-body")).not.toContainText("e2e-secret-pw");
 
     // 機器の編集で「プロファイルを使う」に切り替える
-    await page.locator('a[href="/devices"]').first().click();
+    await openNav(page, "/devices");
     const card = page.locator(".device-card", { hasText: DEVICE });
     await card.getByRole("button", { name: "編集" }).click();
     const dm = page.locator(".modal");
@@ -70,7 +70,7 @@ test("認証情報プロファイルを作って機器に割り当て、カー�
     await dm.getByRole("button", { name: "キャンセル" }).click();
 
     // 使用中のプロファイルは削除できない
-    await page.locator('a[href="/credential-profiles"]').first().click();
+    await openNav(page, "/credential-profiles");
     await expect(row).toContainText("1台");
     page.once("dialog", (d) => d.accept());
     await row.getByRole("button", { name: "削除" }).click();
@@ -78,7 +78,7 @@ test("認証情報プロファイルを作って機器に割り当て、カー�
   } finally {
     await cleanup(page);
   }
-  await page.locator('a[href="/devices"]').first().click();
+  await openNav(page, "/devices");
   await expect(page.locator(".device-card", { hasText: DEVICE })).toBeVisible();
   await expect(page.locator(".device-card-profile")).toHaveCount(0);
 });
@@ -90,8 +90,9 @@ test("認証情報プロファイルのメニューは管理者だけに表示�
     try {
       const page = await context.newPage();
       await login(page, user);
+      await expandNav(page);
       await expect(page.locator('a[href="/devices"]').first()).toBeVisible();
-      await expect(page.locator('a[href="/credential-profiles"]')).toHaveCount(0);
+      await expect(page.locator('.sidebar-nav a[href="/credential-profiles"]')).toHaveCount(0);
     } finally {
       await context.close();
     }
@@ -125,7 +126,7 @@ test("ほかの管理者のプロファイルは編集・割り当てできず�
     expect((await page.request.post("/api/users/", {
       headers: admin, data: { username: OTHER.name, password: OTHER.password, role: "admin" },
     })).status()).toBe(201);
-    await page.locator('a[href="/credential-profiles"]').first().click();
+    await openNav(page, "/credential-profiles");
     const row = page.locator("tr", { hasText: NAME });
     await expect(row).toContainText("所有者のみ");
     await expect(row.getByRole("button", { name: "編集" })).toBeVisible();
@@ -137,11 +138,11 @@ test("ほかの管理者のプロファイルは編集・割り当てできず�
       const page2 = await otherContext.newPage();
       await login(page2, OTHER);
       const row2 = page2.locator("tr", { hasText: NAME });
-      await page2.locator('a[href="/credential-profiles"]').first().click();
+      await openNav(page2, "/credential-profiles");
       await expect(row2).toContainText("admin");
       await expect(row2).toContainText("操作できません");
       await expect(row2.getByRole("button", { name: "編集" })).toHaveCount(0);
-      await page2.locator('a[href="/devices"]').first().click();
+      await openNav(page2, "/devices");
       await page2.locator(".device-card", { hasText: "SW-3F" }).getByRole("button", { name: "編集" }).click();
       const dm = page2.locator(".modal");
       await dm.getByRole("tab", { name: "プロファイルを使う" }).click();
@@ -151,7 +152,7 @@ test("ほかの管理者のプロファイルは編集・割り当てできず�
       await dm.getByRole("button", { name: "キャンセル" }).click();
 
       // 引き継ぐと所有者になり、編集できる
-      await page2.locator('a[href="/credential-profiles"]').first().click();
+      await openNav(page2, "/credential-profiles");
       page2.once("dialog", (d) => { expect(d.message()).toContain("監査ログに残り"); void d.accept(); });
       await row2.getByRole("button", { name: "引き継ぐ" }).click();
       await expect(row2.getByRole("button", { name: "編集" })).toBeVisible();

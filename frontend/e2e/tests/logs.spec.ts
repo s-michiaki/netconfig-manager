@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { login } from "./helpers";
+import { login, openNav } from "./helpers";
 
 test("監査ログに操作が残り、CSV で出力できる", async ({ page }) => {
   await login(page);
@@ -21,7 +21,7 @@ test("アクティビティに違反の発生が残る", async ({ page }) => {
 
 test("ターミナルの記録をテキストで読み、保存し、記録の中を検索できる", async ({ page }) => {
   await login(page);
-  await page.locator('a[href="/audit"]').first().click();
+  await openNav(page, "/audit");
   await page.getByRole("tab", { name: "ターミナルの記録" }).click();
   const row = page.locator("tr", { hasText: "Core-SW01" }).first();
   await row.getByRole("button", { name: "テキスト" }).click();

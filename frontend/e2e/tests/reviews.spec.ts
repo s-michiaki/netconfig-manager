@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { USERS, login } from "./helpers";
+import { USERS, login, openNav } from "./helpers";
 
 // 変更の確認。SW-3F は 2 世代（初回の収集と、その後の変更）、Core-SW01 も 2 世代（初回の収集の行は無いが、最初の世代は Git で判定する
 // ので 2 世代目は一覧に出る）。同じ DB を使うので、最後に未確認へ戻す
@@ -10,7 +10,7 @@ test("オペレーターが変更を確認済みにし、閲覧者は状態を�
   await login(op, USERS.op);
 
   // 未確認の一覧: 最初の世代だけの機器・初回の収集は出ない。Core-SW01 と SW-3F の変更がある
-  await op.locator('a[href="/reviews"]').first().click();
+  await openNav(op, "/reviews");
   await expect(op).toHaveURL(/\/reviews/);
   const all = op.locator("tr.review-row");
   const rows = all.filter({ hasText: "SW-3F" });

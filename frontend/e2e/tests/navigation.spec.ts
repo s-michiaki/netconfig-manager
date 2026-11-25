@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { login, PAGES } from "./helpers";
+import { login, PAGES, openNav, expandNav } from "./helpers";
 
 // 全画面を開いて、画面の読み込みや描画でエラーが出ないことを確認する（ルーター・遅延読み込みの更新時の確認用）
 
@@ -8,7 +8,7 @@ test("すべての画面をエラーなく開ける", async ({ page }) => {
   page.on("pageerror", (e) => errors.push(e.message));
   await login(page);
   for (const path of PAGES) {
-    await page.locator(`a[href="${path}"]`).first().click();
+    await openNav(page, path);
     await expect(page).toHaveURL(new RegExp(`${path}$`));
     await expect(page.locator(".page-title").first()).toBeVisible();
   }
@@ -26,8 +26,11 @@ test("すべての画面をエラーなく開ける", async ({ page }) => {
 test("試験導入中のモニタリングは既定では表示されない", async ({ page }) => {
   // MONITORING_ENABLED=false（既定）ではメニューに出ず、API も 404 を返す
   await login(page);
+  await expandNav(page);
+  // /health の応答（features）が届いてから確かめる（届く前は空なので、出ないのは当たり前になってしまう）
+  await expect(page.locator(".version-tag")).toHaveText(/^v/);
   await expect(page.locator('a[href="/devices"]').first()).toBeVisible();
-  await expect(page.locator('a[href="/monitoring"]')).toHaveCount(0);
+  await expect(page.locator('.sidebar-nav a[href="/monitoring"]')).toHaveCount(0);
   const res = await page.request.get("/api/health");
   expect((await res.json()).features?.monitoring).toBe(false);
 });
