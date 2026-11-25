@@ -364,17 +364,85 @@ def test_admin_safeguards(client, users):
     assert client.delete(f"/api/users/{r.json()['id']}", headers=admin).status_code == 204
 
 
+# 権限（require）を持たなくてよいルート。理由つきで明示する（ここに無いルートは require(Perm.xxx) が必須）
+PERMISSION_EXEMPT = {
+    # ログイン前・本人確認の途中で呼ぶ（認証が要らない、または 2 段階認証の途中の印で認証する）
+    "POST /api/auth/token",
+    "POST /api/auth/mfa/verify",
+    # 自分自身のアカウントの操作（ログイン済みであれば誰でも行える。権限ではなく本人であることで守る）
+    "POST /api/auth/mfa/setup",
+    "POST /api/auth/mfa/enable",
+    "POST /api/auth/mfa/recovery-codes",
+    "POST /api/auth/mfa/disable",
+    "GET /api/auth/me",
+    "POST /api/auth/change-password",
+    # 自分の API トークンの一覧・発行・失効（本人のものだけを扱う）
+    "GET /api/auth/tokens",
+    "POST /api/auth/tokens",
+    "DELETE /api/auth/tokens/{token_id}",
+    # 死活確認（認証なし）
+    "GET /api/health",
+}
+# 空振り（ルートを 1 件も列挙できていない）を防ぐための最低件数。いまは 150 件ほど
+MIN_CHECKED_ROUTES = 100
+
+
+def _required_perms(dependant) -> set:
+    """依存関係を入れ子までたどり、require() が返す checker の perm を集める"""
+    out = set()
+    for d in dependant.dependencies:
+        perm = getattr(d.call, "perm", None)
+        if perm is not None:
+            out.add(perm)
+        out |= _required_perms(d)
+    return out
+
+
+def _routes_without_permission(app_):
+    """（検査した HTTP ルートの件数, 権限を宣言していない「メソッド パス」の一覧）。include_router したルートも含めて全部たどる"""
+    from fastapi.routing import iter_route_contexts
+
+    checked = 0
+    missing = []
+    for rc in iter_route_contexts(app_.routes):
+        # WebSocket（methods が None）は認証の仕組みが別なので test_api_tokens.py が見る
+        if not rc.path.startswith("/api/") or not rc.methods or not hasattr(rc, "dependant"):
+            continue
+        for m in sorted(rc.methods):
+            key = f"{m} {rc.path}"
+            if key in PERMISSION_EXEMPT:
+                continue
+            checked += 1
+            if not _required_perms(rc.dependant):
+                missing.append(key)
+    return checked, missing
+
+
 def test_every_protected_route_declares_a_permission():
     """ログイン必須のAPIはすべて require(Perm.xxx) を持つこと（付け忘れ防止）"""
-    from fastapi.routing import APIRoute
-
-    missing = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute) or not route.path.startswith("/api/"):
-            continue
-        if route.path.startswith(("/api/auth/", "/api/health")):
-            continue
-        names = {getattr(d.call, "__qualname__", "") for d in route.dependant.dependencies}
-        if not any(n.startswith("require.") for n in names):
-            missing.append(f"{sorted(route.methods)} {route.path}")
+    checked, missing = _routes_without_permission(app)
+    # include_router したルートが列挙できず 1 件も検査しないまま通る、という空振りを防ぐ
+    assert checked >= MIN_CHECKED_ROUTES, f"検査したルートが少なすぎます: {checked}"
     assert not missing, missing
+
+
+def test_permission_check_detects_missing_permission():
+    """検査の仕組み自体の確認: 作り物のアプリで、include_router 経由でも付け忘れ・router 単位の指定を正しく見分ける"""
+    from fastapi import APIRouter, Depends, FastAPI
+
+    from app.api.deps import require
+    from app.core.permissions import Perm
+
+    ok = APIRouter()
+    ok.get("/ok", dependencies=[Depends(require(Perm.DEVICE_READ))])(lambda: None)
+    forgot = APIRouter()
+    forgot.get("/forgot")(lambda: None)
+    by_router = APIRouter(dependencies=[Depends(require(Perm.DEVICE_READ))])
+    by_router.get("/by-router")(lambda: None)
+    fake = FastAPI()
+    fake.include_router(ok, prefix="/api/ok")
+    fake.include_router(forgot, prefix="/api/forgot")
+    fake.include_router(by_router, prefix="/api/router")
+    checked, missing = _routes_without_permission(fake)
+    assert checked == 3
+    assert missing == ["GET /api/forgot/forgot"]

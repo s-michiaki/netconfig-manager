@@ -510,16 +510,22 @@ def test_me_lists_only_permissions_usable_with_token(client, ctx, admin_full_tok
     assert "user:admin" in client.get("/api/auth/me", headers=ctx["admin"]).json()["permissions"]
 
 
+# 認証を通ったあとの処理で、テスト環境に無い Celery / Redis に届かず 500 になるのが分かっているルート（これだけ 500 を許す）。
+# POST /api/devices/collect/all などの収集の起動は、client フィクスチャが Celery をモックしているので 500 にならない
+EXPECTED_500 = {"GET /api/tasks/{task_id}"}
+
+
 @pytest.mark.parametrize("key", sorted(k for k, v in ROUTES.items() if v == T))
 def test_every_token_route_is_not_rejected_as_session_only(client, ctx, key, admin_full_token):
     """表で「トークン可」のルートは、管理者の full のトークンで「トークンでは行えません」の 403 にならない（404・422 などは可）"""
     method, path = key.split(" ", 1)
-    try:
-        r = client.request(method, _fill(path), headers=bearer(admin_full_token))
-    except Exception:  # noqa: BLE001 - 認証を通って処理まで進んだ（テスト環境に無い Redis・Celery に届かないなど）
-        return
+    # 例外を送出させず 500 として受け取る（例外を無条件に合格にしない）
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.request(method, _fill(path), headers=bearer(admin_full_token))
     assert r.status_code != 401, (key, r.text)
     assert not (r.status_code == 403 and r.json().get("detail") == SESSION_REQUIRED), (key, r.text)
+    if key not in EXPECTED_500:
+        assert r.status_code != 500, (key, r.text)
 
 
 # ---------------------------------------------------------------- 失効・期限切れ
