@@ -3,7 +3,8 @@ Celeryワーカー定義
 - collect_device_config: 単一デバイスのコンフィグ収集タスク
 - collect_all_devices: 全デバイスの一括収集タスク
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
-- purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録を削除する
+- purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録・コマンド実行の結果を削除する
+- run_command_device: コマンド実行（表示コマンドの一括実行）の機器 1 台ぶん。実行前にもう一度コマンドを検証する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
@@ -26,15 +27,17 @@ from zoneinfo import ZoneInfo
 import redis
 from celery import Celery
 from croniter import croniter
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.core.timeutil import utcnow
-from app.models import CollectLog, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models import CollectLog, CommandResult, CommandRun, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
+from app.models.command_run import STATUS_FAILED, STATUS_OK, STATUS_QUEUED, STATUS_RUNNING, STATUS_SKIPPED
 from app.services import baseline as baseline_svc
-from app.services import collect_state, failure_batch, fw_hits, git_export, inventory, monitoring, system
+from app.services import collect_state, config_service, failure_batch, fw_hits, git_export, inventory, monitoring, system
+from app.services import command_run as command_run_svc
 from app.services import ping_monitor as ping_monitor_svc
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
@@ -44,6 +47,7 @@ from app.services.config_service import (
     CollectResult,
     DeviceConnectionInfo,
     collect_config_sync,
+    describe_failure,
     head_commit_hash,
 )
 from app.services.connection import load_connection_info
@@ -114,6 +118,11 @@ celery_app.conf.update(
         "git-export-sync": {
             "task": "app.worker.git_export_sync",
             "schedule": 3600.0,
+        },
+        # コマンド実行: worker の停止などで終わらなくなった機器を失敗にする
+        "fail-stale-command-runs": {
+            "task": "app.worker.fail_stale_command_runs",
+            "schedule": 300.0,
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -810,6 +819,7 @@ async def _purge() -> dict:
     async with _sessionmaker()() as db:
         result = await purge_old(db)
         result["ping_results"] = await ping_monitor_svc.purge(db)
+        result["command_runs"] = await command_run_svc.purge_old_runs(db)
         await db.commit()
         return result
 
@@ -821,6 +831,174 @@ def purge_audit_logs():
     if any(result.values()):
         logger.info("古いログを削除しました: %s", result)
     return result
+
+
+# ---------------------------------------------------------------- コマンド実行（表示コマンドの一括実行）
+
+
+def _pending_key(run_id: str) -> str:
+    return f"netconfig:cmdrun:{run_id}:pending"
+
+
+def enqueue_command_run(run_id: str, result_ids: list[str]) -> None:
+    """実行の各機器のタスクを投入する。同時に走らせるのは COMMAND_RUN_CONCURRENCY 台までで、
+    残りは Redis の待ち行列に置き、機器のタスクが終わるたびに次の 1 台を投入する"""
+    n = settings.COMMAND_RUN_CONCURRENCY
+    first, rest = result_ids[:n], result_ids[n:]
+    if rest:
+        r = _redis()
+        r.rpush(_pending_key(run_id), *rest)
+        r.expire(_pending_key(run_id), 24 * 3600)
+    for rid in first:
+        run_command_device.delay(rid)
+
+
+def _dispatch_next_command(run_id: str) -> None:
+    raw = _redis().lpop(_pending_key(run_id))
+    if raw:
+        run_command_device.delay(raw.decode() if isinstance(raw, bytes) else raw)
+
+
+async def _claim_command_result(result_id: str) -> dict | None:
+    """結果を「実行中」にして、実行の ID とコマンドを返す。結果が無ければ None。
+    すでに着手済み（queued 以外）なら claimed=False"""
+    async with _sessionmaker()() as db:
+        res = await db.get(CommandResult, result_id)
+        if res is None:
+            return None
+        run = await db.get(CommandRun, res.run_id)
+        info: dict = {"run_id": res.run_id, "claimed": False, "commands": list(run.commands) if run else []}
+        if res.status != STATUS_QUEUED or run is None:
+            return info
+        res.status = STATUS_RUNNING
+        res.started_at = utcnow()
+        await db.commit()
+        info["claimed"] = True
+        return info
+
+
+async def _load_command_device(result_id: str) -> tuple[DeviceConnectionInfo | None, bool]:
+    """結果の機器の接続情報と、有効かどうか"""
+    async with _sessionmaker()() as db:
+        res = await db.get(CommandResult, result_id)
+        dev = await db.get(Device, res.device_id) if res is not None and res.device_id else None
+        if dev is None:
+            return None, False
+        return await load_connection_info(db, dev.id), bool(dev.is_active)
+
+
+async def _save_command_result(result_id: str, run_id: str, commands: list[str], status: str,
+                               raw: list[str] | None = None, error: str | None = None) -> None:
+    """結果を保存する（出力は 1 コマンドと実行全体の上限で切り、暗号化して保存）。"""
+    async with _sessionmaker()() as db:
+        res = await db.get(CommandResult, result_id)
+        if res is None:
+            return
+        res.status = status
+        res.error = error
+        res.finished_at = utcnow()
+        if raw is not None:
+            used_by_others = (await db.execute(
+                select(func.coalesce(func.sum(CommandResult.output_chars), 0))
+                .where(CommandResult.run_id == run_id, CommandResult.id != result_id)
+            )).scalar_one()
+            budget = max(settings.COMMAND_RUN_MAX_RUN_OUTPUT - int(used_by_others), 0)
+            items, used = command_run_svc.build_outputs(commands, raw, budget)
+            res.outputs = command_run_svc.dumps_outputs(items)
+            res.output_chars = used
+        await db.commit()
+
+
+async def _finish_command_run(run_id: str) -> None:
+    """全台が終わっていれば実行を終わらせる。自分の結果を確定してから数える（同時に終わった別の機器と、
+    どちらかが必ず「全部終わった」と判定する）。保存（成功など）とは別の処理で、失敗しても結果は変えない"""
+    async with _sessionmaker()() as db:
+        await command_run_svc.mark_finished_if_done(db, run_id)
+        await db.commit()
+
+
+@celery_app.task
+def run_command_device(result_id: str):
+    """コマンド実行の 1 台ぶん。機器へ接続する直前に、コマンドをもう一度検証する（キューの値を信用しない）。
+    失敗しても再試行はしない（同じコマンドを何度も機器へ送らない）。
+    「実行中」にしたあとは、何があっても（例外でも）その機器を失敗にし、必ず次の機器を投入する"""
+    info = _run_async(_claim_command_result(result_id))
+    if info is None:
+        return {"error": "not found"}
+    run_id, commands = info["run_id"], info["commands"]
+    try:
+        if not info["claimed"]:
+            return {"skipped": True}
+
+        def save(status, raw=None, error=None):
+            _run_async(_save_command_result(result_id, run_id, commands, status, raw, error))
+            try:  # 保存が済んだあとの後処理の失敗で、保存した結果を失敗に上書きしない（残りは fail_stale が終わらせる）
+                _run_async(_finish_command_run(run_id))
+            except Exception:  # noqa: BLE001
+                logger.exception("コマンド実行の終了判定に失敗しました run=%s", run_id)
+
+        try:
+            device, active = _run_async(_load_command_device(result_id))
+            if not settings.COMMAND_RUN_ENABLED:
+                save(STATUS_SKIPPED, error="コマンド実行が無効になっているため、実行しませんでした")
+                return {"status": STATUS_SKIPPED}
+            if device is None:
+                save(STATUS_SKIPPED, error="機器が削除されているため、実行しませんでした")
+                return {"status": STATUS_SKIPPED}
+            if not active:
+                save(STATUS_SKIPPED, error="無効な機器のため、実行しませんでした")
+                return {"status": STATUS_SKIPPED}
+            try:
+                # 機器の今の機種で検証し直す（作成後に機種を変えられていても、送れるものだけ送る）
+                commands = command_run_svc.validate_for_platform(device.platform, commands)
+            except command_run_svc.CommandError as e:
+                save(STATUS_SKIPPED, error=f"送れないコマンドのため、実行しませんでした（{e}）")
+                return {"status": STATUS_SKIPPED}
+            ssh = _ssh_lock(device.id)
+            if not ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
+                save(STATUS_FAILED, error="同じ機器への別の SSH 処理（収集など）が終わらないため、実行できませんでした")
+                return {"status": STATUS_FAILED}
+            try:
+                raw = config_service.run_commands(device, commands)
+            except Exception as e:  # noqa: BLE001 - 失敗の理由を日本語にして結果に残す（再試行しない）
+                msg, _ = describe_failure(e, device)
+                save(STATUS_FAILED, error=msg)
+                return {"status": STATUS_FAILED}
+            finally:
+                try:
+                    ssh.release()
+                except redis.exceptions.LockError:
+                    pass
+            save(STATUS_OK, raw=raw)
+            return {"status": STATUS_OK}
+        except Exception as e:  # noqa: BLE001 - 想定外の失敗でも、この機器を「実行中」のままにしない（出力は入れない）
+            logger.exception("コマンド実行に失敗しました result=%s", result_id)
+            try:
+                save(STATUS_FAILED, error=f"内部エラーのため実行できませんでした（{type(e).__name__}）")
+            except Exception:  # noqa: BLE001 - 保存もできないときは、古い結果の整理（fail_stale）が失敗にする
+                logger.exception("コマンド実行の結果を保存できませんでした result=%s", result_id)
+            return {"status": STATUS_FAILED}
+    finally:
+        try:
+            _dispatch_next_command(run_id)
+        except Exception:  # noqa: BLE001 - 次の投入の失敗で、この機器の結果を変えない（残りは fail_stale が失敗にする）
+            logger.exception("コマンド実行の次の機器を投入できませんでした run=%s", run_id)
+
+
+async def _fail_stale_runs() -> int:
+    async with _sessionmaker()() as db:
+        n = await command_run_svc.fail_stale(db)
+        await db.commit()
+        return n
+
+
+@celery_app.task
+def fail_stale_command_runs() -> int:
+    """worker の停止などで終わらなくなったコマンド実行の機器を失敗にする（5 分ごと）"""
+    n = _run_async(_fail_stale_runs())
+    if n:
+        logger.warning("止まっていたコマンド実行の機器 %d 台を失敗にしました", n)
+    return n
 
 
 async def _active_device_ids(group_id: str | None = None) -> list[str]:

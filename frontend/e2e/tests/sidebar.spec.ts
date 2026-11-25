@@ -91,7 +91,7 @@ test("同じ大項目の中の移動では、手で閉じた大項目を開き�
   await expect(head(page, "機器")).toHaveAttribute("aria-expanded", "false");
   // 機器カードから /terminal/<id>（同じ「機器」の中）へ移る
   await page.getByText("クリックでターミナルを開く").first().click();
-  await expect(page).toHaveURL(/\/terminal\/\d+/);
+  await expect(page).toHaveURL(/\/terminal\/[\w-]+/); // 機器の ID は UUID（先頭が数字とは限らない）
   await expect(head(page, "機器")).toHaveAttribute("aria-expanded", "false");
   await expect(head(page, "機器")).toHaveClass(/active/);
 });

@@ -625,7 +625,7 @@ Add-MailboxPermission -Identity "notify@example.com" -User <サービスプリ�
 | 大項目 | 小項目（この順） |
 |---|---|
 | ダッシュボード | （単独。一番上） |
-| 機器 | デバイス管理 / 構成図 / ターミナル / 踏み台サーバ / 認証情報プロファイル |
+| 機器 | デバイス管理 / 構成図 / ターミナル / コマンド実行 / 踏み台サーバ / 認証情報プロファイル |
 | コンフィグ | コンフィグ収集 / スケジュール / 世代管理 / 変更の確認 / コンフィグ検索 / コンプライアンス / 無視する行 |
 | 監視 | Ping監視 / モニタリング（有効時のみ）/ アクティビティ |
 | 管理 | 通知設定 / ユーザー管理 / 監査ログ / システム状態 |
@@ -704,6 +704,43 @@ running-config を変えても startup-config に保存（`write memory` / `copy
 - **既知の制限**: 機種・OS のバージョンによっては、証明書などが running では 16 進の全文、startup では `nvram:xxx.cer` の参照になり、保存済みでも「未保存」と出ることがあります（対処していません）。誤って「未保存」と出続けるときは、画面の「無視する行」でその行を除いてください（running と startup の両方に適用されます）
 - 対象の機種は `PlatformSpec.startup_command` で決めます（PAN-OS の候補設定と実行中・FortiGate・Junos は概念が違うため対象外）。対象外の機種・無効のときはコマンドを送らず、状態は空のままです（以前の値があれば消します）
 - 機器に追加のコマンドを送りたくない場合は `.env` に `STARTUP_CHECK_ENABLED=false`（変更後は `setup.sh`）。無効・対象外の機種では、画面・API（`startup_*`）にも以前の結果を出しません
+
+## コマンド実行（表示コマンドの一括実行）
+
+メニュー「機器」の「コマンド実行」で、選んだ複数の機器へ **表示コマンド（show / display など、設定を変えないもの）** を一括で送り、機器ごとの出力を見られます。設定を変えるコマンドは送れません。
+
+- **使い方**: 対象の機器（グループを選ぶと、そのグループの有効な機器が選ばれます）を選び、コマンドを 1 行に 1 つ入力して「実行」。進み具合は自動で更新され、終わると結果を「機器ごと」（折りたたみ・コピー）と「同じ出力ごと」（同じ出力の機器をまとめる。比較は行末の空白と末尾の空行を除いた完全一致）で切り替えて見られます。「テキスト保存」「CSV 保存」と、過去の実行（新しい順に 50 件。ほかのユーザーの実行も見えます）の開き直しができます
+- **権限**: `command:run`（オペレーター・管理者）。結果の閲覧も同じ権限です（出力に設定の中身が含まれるため、閲覧者には付けません。`CONFIG_READ` を持つロールにだけ付ける決まりで、テストが確かめています）
+- **送れるコマンド**（`backend/app/services/command_run.py`。許可リスト方式で、迷うものは拒否します）
+  - 1 回に 5 個まで、1 個 200 文字まで。半角の英数字と記号だけ（制御文字・タブ・改行・全角文字は不可）。`?`（ヘルプ）・`;`・`&`・バッククォート・`$`・`~`・`>`・`<`・`\` は不可。`* { } " '` は、シェルを経由する機種（VyOS・EdgeRouter・Check Point Gaia）と、パイプの後ろで本物の grep が動く機種（Arista EOS・NX-OS・Fortinet・NetScaler・Yamaha など）で不可
+  - 先頭の語が、その機種で許された読み取りの語であること。**省略形（`sh`・`sho`・`dis` など）を認めるのは、CLI が省略形を解釈すると確かな機種だけ**（Cisco IOS / IOS-XE / IOS-XR / NX-OS / ASA、Arista EOS、Huawei VRP・VRP V8、HPE Comware）です。それ以外の機種は完全一致（`show` など）のみで、省略形は通りません。`conf`・`reload`・`write`・`copy`・`delete`・`clear`・`debug`・`set`・`request` などは先頭の語が違うため通りません
+  - シェルに届く機種（VyOS・Ubiquiti EdgeRouter・Check Point Gaia）は、英数字と `_ . : / @ % + = , ^ | -` だけを許し、`-` で始まる語（`sh -c reboot` のようなオプション）は拒否します。`show -c x`・`show file /path` のような形は通りません
+  - 機種ごとの違い: Huawei・HPE Comware は `display`（`dis` などの省略形は可）、Fortinet は `get` / `show`、Juniper ScreenOS は `get`、Nokia SR OS は `show` のみ（`admin display-config` などの `admin` 系は不可）。**MikroTik RouterOS は対象外**（メニューや引数の形が多く、許可リストで安全に絞れないため。登録しても実行は「対象外」になり、API は 422）。`tech-support`（`tech`・`techsupport` などの省略形を含む。省略形を認める機種では `tec` 以上の前方一致も）は、出力が巨大で機器への負荷が高いため全機種で不可です。`diagnostic-information`（`diag` 以上の省略形を含む。Huawei・Comware ではファイル名を付けると機器内へ書き出せる）も全機種で不可です
+  - パイプ（`|`）の後ろは、その機種で使える絞り込みだけで、引数の形も決まっています（引数はちょうど 1 個。`-` で始まる・`/` や `:` を含むものは不可。`count`・`no-more` など引数なしの語には付けられず、`last`・`head`・`tail` は数字 1 個）。`redirect`・`tee`・`append`・`save`・`file`・`copy`・`tftp` などは拒否します。`|` はすべて区切りとして扱うため、正規表現の `a|b` は使えません（コマンドを分けてください）。絞り込み語の短縮（`i`・`in` → `include`、`e`・`ex` → `exclude`、`b`・`be` → `begin`、`sec` → `section`）は、Cisco IOS / IOS-XE / IOS-XR / ASA、Huawei VRP・VRP V8、HPE Comware だけです（NX-OS・Arista EOS は完全一致のみ）
+
+    | 機種 | 使える絞り込み（引数） |
+    |---|---|
+    | Cisco IOS / IOS-XE / IOS-XR / ASA、Huawei、HPE Comware | `include` / `exclude` / `begin` / `section`（1 個）、`count`（なし）など機種の語 |
+    | Cisco NX-OS | 上記 + `grep` / `egrep`（1 個）、`last` / `head` / `tail`（数字）、`no-more` / `json` / `json-pretty` / `xml` / `wc`（なし） |
+    | Arista EOS | Cisco 系 + `grep` / `egrep`（1 個）、`json` / `no-more`（なし） |
+    | Juniper Junos | `match` / `except` / `find`（1 個）、`count` / `no-more`（なし）、`last` / `trim`（数字）、`display`（`set` / `xml` / `json` / `detail` / `inheritance` / `omit` / `changed` から 1 個） |
+    | Palo Alto PAN-OS | `match` / `except`（1 個）、`last`（数字） |
+    | Fortinet / NetScaler | `grep`（1 個） |
+    | Yamaha | `grep` / `include` / `exclude`（1 個） |
+    | VyOS・Ubiquiti EdgeRouter | `match`（1 個）、`no-more` / `count`（なし） |
+    | Check Point Gaia | パイプは使えません |
+
+    通らない例: `show x | include Gi|Te`（コマンドを分ける）、`show x | grep x /etc/shadow`（引数は 1 個）、`show x | grep --file=bootflash:a x`、`show x | match -f /config/config.boot`（`-` で始まる・`/` や `:` を含む）、`admin display-config`（Nokia）、`show tech-support`、MikroTik の `/ip address print`
+  - enable・設定モードに入るコマンドは送りません。接続時の特権モードへの移行は、収集と同じ既存の仕組み（Enable パスワードを設定した機器だけ）のままです
+  - 検証は、実行を作る前（API。入力中は `GET /api/commands/check` で理由を表示）と、worker が機器へ接続する直前（もう一度。キューの値も信用せず、機器の今の機種で検証し直す）の 2 回です。理由は日本語で返し、API は 422 です
+  - 機種が違う機器をまとめて選んだときは機器ごとに検証し、送れない機器は「対象外」として結果に残します（すべての機器に送れないときは 422）。無効な機器・実行までに削除された機器も「対象外」です
+- **出力の扱い**: 機器ごとの出力は `DEVICE_ENCRYPTION_KEY` で暗号化して DB に保存し（`command_results.outputs`）、`COMMAND_RUN_RETENTION_DAYS`（既定 30 日）を過ぎた実行は毎日の掃除（`purge_audit_logs`）で出力ごと削除します。`DEVICE_ENCRYPTION_KEY` を変えると過去の出力は読めなくなります。1 コマンドの出力は `COMMAND_RUN_MAX_OUTPUT`（既定 20 万文字）、1 回の実行の合計は `COMMAND_RUN_MAX_RUN_OUTPUT`（既定 2,000 万文字）で切り捨て、切ったことを画面に出します。止まった機器（worker の停止など）は、5 分ごとの定期タスク（`fail_stale_command_runs`）が失敗にして実行を終わらせます。判断は実行の作成時刻ではなく機器ごとの時刻で行い、実行中のまま 2 時間たった機器、または実行中の機器が無く 60 分以上動きのない実行の待機中の機器が対象です（収集などでキューが詰まると、待機中のまま 60 分たった機器は失敗になります）。実行中・待機中の機器が 1 台も無いのに終了時刻が空の実行も、同じタスクが終わらせます（実行数の上限の枠を占め続けないため）
+- **実行の仕組み**: 機器 1 台ごとに worker のタスク（`run_command_device`）を投入し、収集と同じ機器ごとの SSH ロックを使います（収集・FW ヒット数の取得と重なったときは最大 5 分待ちます）。1 回の実行の中で同時に接続するのは `COMMAND_RUN_CONCURRENCY`（既定 10）台までで、残りは待ち行列（Redis）に置き、終わるたびに次を投入します。失敗しても再試行しません（同じコマンドを何度も機器へ送らないため）。ページャー（`--More--`）の検出・応答待ちの時間切れは収集と同じです。worker の処理中に想定外の例外が起きても、その機器を「内部エラー」の失敗にして（出力は残さない）、必ず次の機器を投入します
+- **上限・設定**（`.env`。変更後は `setup.sh`）: `COMMAND_RUN_ENABLED`（`false` で新しい実行を受け付けない。過去の結果は見られます）、`COMMAND_RUN_MAX_DEVICES`（1 回の対象の機器数。既定 100）、`COMMAND_RUN_CONCURRENCY`、`COMMAND_RUN_MAX_ACTIVE_PER_USER`（1 人が動かせる未完了の実行の数。既定 2）、`COMMAND_RUN_MAX_ACTIVE`（全体の未完了の実行の数。既定 5。超えると 429 で、動いている件数を日本語で返します）、`COMMAND_RUN_MAX_OUTPUT`、`COMMAND_RUN_MAX_RUN_OUTPUT`、`COMMAND_RUN_RETENTION_DAYS`
+- **API**（すべて `command:run`）: `GET /api/commands/limits`（上限・機種ごとの先頭の語）、`GET /api/commands/check`（入力中の検証）、`POST /api/commands/runs`（`device_ids` か `group_id` と `commands`）、`GET /api/commands/runs`、`GET /api/commands/runs/{id}`（機器ごとの状態と出力・`groups`＝コマンドごとの同じ出力のまとめ。出力の本文は繰り返さず、代表の結果の `result_id` で `results` を参照します。`outputs=false` で出力を省く）、`GET /api/commands/runs/{id}/export?format=txt|csv`
+- **監査ログ**: 実行（`command.run`: 誰が・どの機器に（20 台まで）・どのコマンドを・台数・対象外の数）と書き出し（`command.export`）を残します。**出力は監査ログに入れません**
+- **対象の機器**: 閲覧できる権限（`device:read`）があれば全機器が対象です（機器やグループ単位の権限の仕組みは、まだありません）
+- 範囲外（今後の拡張ポイント）: スケジュール実行、設定の投入、時刻などの毎回変わる部分を除いたまとめ、踏み台の先の機器の特別扱い（既存の接続の仕組みで届くものは届きます）
 
 ## コンフィグ検索
 
@@ -904,7 +941,7 @@ bash /opt/netconfig-manager/scripts/collect_logs.sh
 
 管理者は「監査ログ」画面で、誰が・いつ・何をしたかを確認できます。
 
-- **操作履歴**: ログイン（失敗を含む）、パスワード変更、ユーザーの強制ログアウト、ユーザー・機器（CSV 一括登録を含む）・踏み台・認証情報プロファイル・スケジュール・構成図・コンプライアンスのルールと例外・Ping監視の対象の変更、収集の実行、コンフィグのダウンロード、変更へのコメントの追加・変更・削除、変更の確認（確認済み・想定外・未確認に戻す・まとめて）、基準の世代の指定・解除、ターミナルの接続・切断、ターミナル記録の閲覧・検索、監査ログ・アクティビティログ・コンフィグ検索結果の CSV 出力。パスワードや秘密鍵の値は残さず「変更した」ことだけを記録します
+- **操作履歴**: ログイン（失敗を含む）、パスワード変更、ユーザーの強制ログアウト、ユーザー・機器（CSV 一括登録を含む）・踏み台・認証情報プロファイル・スケジュール・構成図・コンプライアンスのルールと例外・Ping監視の対象の変更、収集の実行、コンフィグのダウンロード、変更へのコメントの追加・変更・削除、変更の確認（確認済み・想定外・未確認に戻す・まとめて）、基準の世代の指定・解除、ターミナルの接続・切断、ターミナル記録の閲覧・検索、コマンド実行（誰が・どの機器に・どのコマンドを。出力は残さない）と結果の書き出し、監査ログ・アクティビティログ・コンフィグ検索結果の CSV 出力。パスワードや秘密鍵の値は残さず「変更した」ことだけを記録します
 - **ターミナルの記録**: SSH ターミナルの画面出力をセッションごとに記録し、画面上で再生できます（asciicast v2 形式。`.cast` としてダウンロードして asciinema でも再生可）
   - キー入力そのものは記録しません（enable のパスワードなど画面に表示されない入力が含まれるため）。入力したコマンドは機器のエコーとして画面出力に残ります
   - 記録は `terminal_logs` ボリューム（`/data/terminal-logs`）に保存。1セッションの上限は 20MB（`TERMINAL_LOG_MAX_BYTES`）
@@ -941,6 +978,7 @@ bash /opt/netconfig-manager/scripts/collect_logs.sh
 | アクティビティ（収集の結果・違反の発生など）の閲覧 | ✓ | ✓ | ✓ |
 | 収集の実行（モニタリングの「今すぐ取得」を含む） | | ✓ | ✓ |
 | SSHターミナル | | ✓ | ✓ |
+| コマンド実行（表示コマンドの一括実行と、結果の閲覧・書き出し。出力に設定の中身が含まれるため閲覧者には付けない） | | ✓ | ✓ |
 | 構成図の作成・編集・削除 | | ✓ | ✓ |
 | コンプライアンスのルール編集・試す・例外の登録・再検査 | | ✓ | ✓ |
 | Ping監視の対象 IP の追加・編集・削除 | | ✓ | ✓ |
@@ -991,6 +1029,7 @@ bash /opt/netconfig-manager/scripts/collect_logs.sh
   - `strict`: known_hosts に事前登録したホストにのみ接続
 - **収集したコンフィグ**: パスワードハッシュや SNMP コミュニティ等が含まれるため、`config_repo` ボリュームのアクセス権・バックアップ先の扱いに注意してください
 - **ターミナルの記録**: 機器の画面出力（show running-config の結果など）がそのまま残るため、`terminal_logs` ボリュームも同様に扱ってください。閲覧は管理者のみで、閲覧したこと自体も操作履歴に残ります
+- **コマンド実行**: 設定を変えるコマンドを送らせないことが要です。許可リスト（機種ごとの先頭の語・絞り込み）・危険な文字の拒否・件数と長さの上限を、API と worker の両方で検証します（詳しくは「コマンド実行」）。出力には設定の中身が含まれるため、暗号化して保存し、`command:run`（`config:read` を持つロールだけ）がある人にだけ見せ、`COMMAND_RUN_RETENTION_DAYS` で削除します。監査ログには出力を入れません
 - **ログインの試行回数の制限**: 失敗を Redis で数え、同じユーザー名・同じ接続元から `LOGIN_MAX_FAILURES` 回（既定 5 回）、または同じ接続元から（ユーザー名を問わず）`LOGIN_MAX_FAILURES_PER_IP` 回（既定 20 回）失敗すると、`LOGIN_LOCK_MIN` 分（既定 15 分）その接続元からのログインを止めます（失敗を数える期間は `LOGIN_FAILURE_WINDOW_MIN`、既定 10 分）
   - ユーザー名だけでは止めないため、ほかの端末から管理者を締め出すことはできません。存在しないユーザー名でも同じように止まるので、応答からユーザーの有無は分かりません
   - 止めたときは監査ログに「ログインの一時停止」を記録します。期限を待たずに解除するには `podman exec <redis のコンテナ> redis-cli --scan --pattern 'netconfig:login:lock:*'` で該当のキーを確認し、`redis-cli del <キー>` で削除します
@@ -1163,7 +1202,7 @@ netconfig-manager/
 │   ├── ruff.toml                # リンター（ruff）の設定
 │   └── app/
 │       ├── main.py              # FastAPI エントリーポイント・起動時の移行処理
-│       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック・モニタリングの定期取得）
+│       ├── worker.py            # Celery タスク定義（収集・スケジュール実行・定期コンプライアンスチェック・モニタリングの定期取得・コマンド実行の機器 1 台ぶん）
 │       ├── tools/
 │       │   ├── backup_report.py # バックアップの結果をアプリに記録（backup.sh・setup.sh が podman exec で実行）
 │       │   ├── image_report.py  # コンテナのイメージの作成日時をアプリに記録（setup.sh が podman exec で実行）
@@ -1189,6 +1228,7 @@ netconfig-manager/
 │       │   ├── topology.py      # TopologyMap（構成図）
 │       │   ├── compliance.py    # ComplianceRule / ComplianceResult / ComplianceException
 │       │   ├── ignore_rule.py   # ConfigIgnoreRule（収集時に無視する行の正規表現。機種・機器ごと）
+│       │   ├── command_run.py   # CommandRun / CommandResult（コマンド実行の実行と、機器ごとの結果。出力は暗号化）
 │       │   ├── activity.py      # ActivityLog（システムで起きたこと）
 │       │   ├── audit.py         # AuditLog（操作履歴）/ TerminalSession（ターミナルの記録）
 │       │   ├── mail.py          # MailServer（メール通知の送信設定。SMTP・OAuth 2.0）
@@ -1213,6 +1253,7 @@ netconfig-manager/
 │       │   ├── topology.py      # 構成図 CRUD・機器の収集状態
 │       │   ├── compliance.py    # コンプライアンスのルール・結果・例外・テンプレート
 │       │   ├── ignore_rules.py  # 収集時に無視する行のルール CRUD・保存前に試す（管理者のみ）
+│       │   ├── commands.py      # コマンド実行（表示コマンドの一括実行）の作成・進み具合・結果・書き出し・入力中の検証
 │       │   ├── activity.py      # アクティビティログの閲覧
 │       │   ├── audit.py         # 監査ログの閲覧・CSV 出力（管理者のみ）
 │       │   ├── mail.py          # メールサーバーの設定・テストメール・Google アカウントの同意
@@ -1226,6 +1267,7 @@ netconfig-manager/
 │           ├── config_service.py # 対応プラットフォーム（PLATFORMS）・Netmiko での収集・GitPython
 │           ├── compliance.py    # コンプライアンスの評価エンジン（例外の適用を含む）
 │           ├── ignore_rules.py  # 無視する行の適用（時間切れ付き）・ルールの読み込み・試す
+│           ├── command_run.py   # コマンド実行: 送れるコマンドの検証（機種ごとの許可リスト）・出力の上限・同じ出力のまとめ・保持期間の掃除
 │           ├── baseline.py      # 基準の世代と最新のコンフィグのずれ（追加・削除の行数）の計算
 │           ├── collect_state.py # 収集の進み具合（待ち・収集中・再試行待ち）を Redis に置く
 │           ├── config_search.py # コンフィグの横断検索（最新コンフィグを1行ずつ照合、時間制限つき。CSV 用に全行も返す）
@@ -1276,6 +1318,7 @@ netconfig-manager/
             ├── JumpHostsPage.tsx # 踏み台サーバ
             ├── CredentialProfilesPage.tsx # 認証情報プロファイル
             ├── CollectPage.tsx  # コンフィグ収集
+            ├── CommandsPage.tsx # コマンド実行（機器の選択・コマンド入力と検証・進み具合・機器ごと / 同じ出力ごとの結果・保存・過去の実行）
             ├── HistoryPage.tsx  # 世代管理・差分・別の機器との比較・ダウンロード・変更へのコメント・確認のバッジ・基準の世代
             ├── ReviewsPage.tsx  # 変更の確認（変更の一覧・確認済み / 想定外を付ける / 基準からのずれ。タブで機能を足せる構成）
             ├── TerminalPage.tsx # SSH ターミナル
@@ -1320,5 +1363,6 @@ netconfig-manager/
 - **コンプライアンスの検査の非同期化**: ルールの作成・更新の直後の全機器の検査（照合）が API のイベントループの上で動くため、機器が多いと応答が遅れる。スレッドか worker へ移す
 - **CSV 一括登録の拡張**: 既存の機器の CSV による更新（上書き）、SSH 鍵での一括登録、未登録のグループの自動作成、タブ区切り（TSV）の貼り付け
 - **Ubuntu 24.04 LTS の実機での確認と対応 OS の拡張**: 実機での導入・更新の確認（「Ubuntu 24.04 LTS で使う」の確認項目）、Podman・podman-compose の版の差で出た問題の吸収、Debian 12 の確認、`setup.sh` 全体を偽のコマンドで通すテスト（今は OS ごとの関数だけをテスト）、ユニットそのものが無い環境への `podman-restart.service` の自動配置、RHEL 系の `podman-restart.service` が `unless-stopped` のコンテナを起動するかの本番での確認、Ubuntu の `podman-compose` を新しい版へ上げる手順
+- **コマンド実行の拡張**: MikroTik RouterOS への対応（メニュー名の許可リスト方式で対応する想定）、スケジュール実行（定期的に `show` を取って比べる）、設定の投入（承認・確認の仕組みとセットで）、時刻・カウンタなど毎回変わる部分を除いた「同じ出力」のまとめ、機器グループ単位の権限、実機での機種ごとの許可リストの確認（Yamaha・NetScaler・Nokia などの絞り込み）、出力が大きいときの分割取得（今は 1 回の応答にまとめて返す）、失敗したコマンドまでの出力の保持（今は 1 台の接続が途中で失敗するとその機器の出力は残らない）
 - **コンフィグ検索の拡張**: 世代の多い環境向けに過去の世代の検索を Celery のタスクにして結果を後で受け取る形、登録済みの機器がある機種だけを選択肢にする
 - **CSP の強化**: 違反をブラウザから受け取って記録する仕組み（`report-to`）、`style-src 'unsafe-inline'` の撤廃（ターミナルの xterm.js などがノンスに対応したら）、HSTS の期間の延長（証明書の更新が安定したら）

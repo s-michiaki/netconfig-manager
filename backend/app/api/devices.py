@@ -14,7 +14,7 @@ from pydantic import (
     model_validator,
 )
 from redis.exceptions import RedisError
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from app.core.ssh_keys import (
     load_private_key,
     normalize_private_key,
 )
+from app.models.command_run import CommandResult
 from app.models.compliance import ComplianceException, ComplianceResult
 from app.models.device import (
     CollectLog,
@@ -591,6 +592,8 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
     await db.execute(delete(ConfigComment).where(ConfigComment.device_id == device.id))
     await db.execute(delete(ConfigReview).where(ConfigReview.device_id == device.id))
     await db.execute(delete(ConfigBaseline).where(ConfigBaseline.device_id == device.id))
+    # コマンド実行の結果は機器名を残して、機器との結びつきだけ外す（SQLite では外部キーの SET NULL が効かない）
+    await db.execute(update(CommandResult).where(CommandResult.device_id == device.id).values(device_id=None))
     await db.delete(device)
     audit("device.delete", target_type="device", target_id=device.id, target_name=device.name,
           detail={"hostname": device.hostname})

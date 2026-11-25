@@ -36,6 +36,9 @@ class Perm(str, Enum):
     NOTIFY_SELF = "notify:self"  # 自分の通知設定（コンフィグ変更の通知先・対象）の編集
     SYSTEM_READ = "system:read"  # システムの状態（worker・スケジューラーの稼働など）の閲覧。admin のみ
     MONITOR_READ = "monitor:read"  # モニタリング（FW ルールのヒット数・帯域）の閲覧
+    # 表示コマンド（show / display など。設定を変えないもの）の一括実行と、その結果の閲覧。
+    # 出力に設定の中身（show running-config など）が含まれるため、コンフィグの閲覧（CONFIG_READ）を持つロールだけに付ける
+    COMMAND_RUN = "command:run"
 
 
 _VIEWER = {
@@ -44,7 +47,7 @@ _VIEWER = {
 }
 _OPERATOR = _VIEWER | {
     Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE, Perm.CONFIG_COMMENT,
-    Perm.CONFIG_REVIEW,
+    Perm.CONFIG_REVIEW, Perm.COMMAND_RUN,
 }
 _ADMIN = set(Perm)
 

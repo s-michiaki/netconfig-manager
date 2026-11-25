@@ -11,6 +11,7 @@ export const PERM = {
   CONFIG_IGNORE: "config:ignore",
   COLLECT: "collect:run",
   TERMINAL: "terminal:use",
+  COMMAND_RUN: "command:run",
   SCHEDULE_READ: "schedule:read",
   SCHEDULE_WRITE: "schedule:write",
   USER_ADMIN: "user:admin",

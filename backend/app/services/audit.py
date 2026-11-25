@@ -107,6 +107,8 @@ ACTIONS = {
     "monitor.fw_collect": "FW ヒット数の取得",
     "activity.export": "アクティビティログの CSV 出力",
     "config.search_export": "コンフィグ検索結果の CSV 出力",
+    "command.run": "コマンド実行",
+    "command.export": "コマンド実行結果の出力",
 }
 
 MAX_DETAIL_LENGTH = 4000

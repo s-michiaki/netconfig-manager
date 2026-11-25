@@ -96,6 +96,17 @@ class Settings(BaseSettings):
     # 収集で変更が無かったときも記録するか（False なら変更あり・失敗などだけ記録）
     ACTIVITY_LOG_UNCHANGED: bool = True
 
+    # --- コマンド実行（表示コマンドの一括実行。services/command_run.py） ---
+    COMMAND_RUN_ENABLED: bool = True
+    COMMAND_RUN_MAX_DEVICES: int = Field(default=100, ge=1, le=1000)  # 1 回の実行で対象にできる機器の数
+    COMMAND_RUN_CONCURRENCY: int = Field(default=10, ge=1, le=100)  # 1 回の実行の中で同時に接続する機器の数
+    COMMAND_RUN_MAX_OUTPUT: int = Field(default=200_000, ge=1000, le=5_000_000)  # 1 コマンドの出力の上限（文字数）
+    COMMAND_RUN_MAX_RUN_OUTPUT: int = Field(default=20_000_000, ge=10_000, le=500_000_000)  # 1 回の実行の出力の合計（文字）
+    # 終わっていない実行（待機中・実行中）の数の上限。1 人あたりと全体。超えたら新しい実行を 429 で断る
+    COMMAND_RUN_MAX_ACTIVE_PER_USER: int = Field(default=2, ge=1, le=100)
+    COMMAND_RUN_MAX_ACTIVE: int = Field(default=5, ge=1, le=1000)
+    COMMAND_RUN_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)  # 実行結果（出力）を残す日数
+
     # --- Ping監視 ---
     PING_TIMEOUT: float = Field(default=1.0, gt=0, le=10)  # 1回の PING の応答待ち（秒）
     PING_MAX_TARGETS: int = Field(default=300, ge=1, le=5000)  # 1画面で同時に監視できる数（常時監視の対象の上限も同じ）

@@ -29,6 +29,7 @@ function lazyPage(load: () => Promise<{ default: ComponentType }>) {
 }
 const ActivityPage = lazyPage(() => import("./pages/ActivityPage"));
 const AuditPage = lazyPage(() => import("./pages/AuditPage"));
+const CommandsPage = lazyPage(() => import("./pages/CommandsPage"));
 const CollectPage = lazyPage(() => import("./pages/CollectPage"));
 const CompliancePage = lazyPage(() => import("./pages/CompliancePage"));
 const HistoryPage = lazyPage(() => import("./pages/HistoryPage"));
@@ -61,6 +62,7 @@ const NAV_GROUPS: NavGroup[] = [
       { path: "/devices", label: "デバイス管理", icon: "🖥", perm: PERM.DEVICE_READ },
       { path: "/topology", label: "構成図", icon: "⬢", perm: PERM.TOPOLOGY_READ },
       { path: "/terminal", label: "ターミナル", icon: "⌨", perm: PERM.TERMINAL },
+      { path: "/commands", label: "コマンド実行", icon: "▤", perm: PERM.COMMAND_RUN },
       { path: "/jump-hosts", label: "踏み台サーバ", icon: "↪", perm: PERM.DEVICE_WRITE },
       { path: "/credential-profiles", label: "認証情報プロファイル", icon: "🪪", perm: PERM.DEVICE_WRITE },
     ],
@@ -325,6 +327,7 @@ function Layout() {
           <Route path="/reviews" element={<RequirePerm perm={PERM.CONFIG_READ}><ReviewsPage /></RequirePerm>} />
           <Route path="/search" element={<RequirePerm perm={PERM.CONFIG_READ}><SearchPage /></RequirePerm>} />
           <Route path="/terminal" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
+          <Route path="/commands" element={<RequirePerm perm={PERM.COMMAND_RUN}><CommandsPage /></RequirePerm>} />
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/ping" element={<RequirePerm perm={PERM.PING_USE}><PingPage /></RequirePerm>} />
           <Route path="/monitoring" element={<RequirePerm perm={PERM.MONITOR_READ}><MonitoringPage /></RequirePerm>} />

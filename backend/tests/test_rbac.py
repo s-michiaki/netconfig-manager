@@ -84,6 +84,12 @@ def test_me_returns_permissions(client, users):
         ("get", "/api/schedules/", None, {"viewer": 200, "operator": 200}),
         ("post", "/api/schedules/", {"name": "s", "cron_expression": "0 9 * * *"}, {"viewer": 403, "operator": 403, "admin": 201}),
         ("get", "/api/tasks/abc", None, {"viewer": 403}),
+        # コマンド実行は operator 以上（出力に設定の中身が含まれるため、閲覧者には見せない）。対象が空なので、権限を通ったあと 422
+        ("get", "/api/commands/limits", None, {"viewer": 403, "operator": 200, "admin": 200}),
+        ("get", "/api/commands/runs", None, {"viewer": 403, "operator": 200, "admin": 200}),
+        ("get", "/api/commands/runs/none", None, {"viewer": 403, "operator": 404, "admin": 404}),
+        ("get", "/api/commands/runs/none/export", None, {"viewer": 403, "operator": 404}),
+        ("post", "/api/commands/runs", {"device_ids": [], "commands": ["show clock"]}, {"viewer": 403, "operator": 422}),
         ("get", "/api/users/", None, {"viewer": 403, "operator": 403, "admin": 200}),
         ("get", "/api/users/roles", None, {"operator": 403, "admin": 200}),
     ],

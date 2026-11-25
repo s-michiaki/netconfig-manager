@@ -6,6 +6,9 @@ start(pubkey=..., password=..., mode="cisco"|"panos"|"fortinet"|"awplus"|"generi
   "pager"（--More-- で止まる）/ "empty"（何も出さない）/ "silent"（応答もプロンプトも返さない）/
   "close"（チャネルを閉じる）/ "error"（コンフィグではない短いエラーの文言）
 - パスワード認証・キーボード対話認証・公開鍵認証に対応
+- コマンド実行（表示コマンドの一括実行）用: cisco / generic モードは、start(outputs={"show clock": "..."}) か state["outputs"] に
+  書いたコマンドにその出力で応答する。start(show_any=True) なら、書いていない show / display / get で始まるコマンドにも
+  「<コマンド> の出力」と返す（既定では何も返さない）。受け取ったコマンドは state["commands"] に残る
 """
 import socket
 import threading
@@ -134,12 +137,26 @@ def _startup_output(running: str, mode: str, platform: str = "cisco") -> str | N
     return "\r\n".join([*head, *body])
 
 
+def _extra_output(state, cmd):
+    """コマンド実行用の応答。書いたコマンドはその出力、show_any なら読み取りのコマンドに定型の出力、なければ None"""
+    outputs = state.get("outputs") or {}
+    if cmd in outputs:
+        return outputs[cmd]
+    if state.get("show_any") and cmd.split(" ")[0] in ("show", "sh", "display", "get"):
+        return f"{cmd} の出力\r\nline2"
+    return None
+
+
 def _cisco(ch, pager=None, state=None):
     state = state if state is not None else {}
     ch.send("R1#")
     for line in _lines(ch):
         out = ""
         state.setdefault("commands", []).append(line.strip())
+        extra = _extra_output(state, line.strip())
+        if extra is not None and line.strip() not in ("show running-config", "show version", "show startup-config"):
+            ch.send(line + "\r\n" + (extra + "\r\n" if extra else "") + "R1#")
+            continue
         if line.strip() == "show version" and state.get("inventory_pager"):
             # 台帳用のコマンドでページャーが出て止まる機器
             ch.send(line + "\r\n" + "\r\n".join(CISCO_VERSION.split("\r\n")[:3]) + "\r\n --More-- ")
@@ -347,6 +364,9 @@ def _generic(ch, state, prompt="sw1#", config_commands=()):
             ch.close()
             return
         out = GENERIC_CONFIG if cmd in config_commands else ""
+        extra = _extra_output(state, cmd)
+        if extra is not None and not out:
+            out = extra
         ch.send(line + "\r\n" + (out + "\r\n" if out else "") + prompt)
 
 
@@ -364,6 +384,8 @@ def handle(sock, key, state, cfg=None):
         return
     state["server"] = srv
     state.setdefault("startup", cfg.get("startup", "same"))
+    state.setdefault("outputs", cfg.get("outputs"))
+    state.setdefault("show_any", cfg.get("show_any", False))
     state["auth_method"] = srv.auth_method
     try:
         if cfg["mode"] == "panos":

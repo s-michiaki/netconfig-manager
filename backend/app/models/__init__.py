@@ -3,6 +3,7 @@
 from app.models.activity import ActivityLog
 from app.models.audit import AuditLog, TerminalSession
 from app.models.base import Base
+from app.models.command_run import CommandResult, CommandRun
 from app.models.compliance import ComplianceException, ComplianceResult, ComplianceRule
 from app.models.device import (
     CollectLog,
@@ -29,6 +30,8 @@ __all__ = [
     "AuditLog",
     "Base",
     "CollectLog",
+    "CommandResult",
+    "CommandRun",
     "ComplianceException",
     "ComplianceResult",
     "ComplianceRule",

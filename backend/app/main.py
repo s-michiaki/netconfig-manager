@@ -10,6 +10,7 @@ from app.api import (
     activity,
     audit,
     auth,
+    commands,
     compliance,
     config_baselines,
     config_comments,
@@ -93,7 +94,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.57.0",
+    version="1.58.0",
     lifespan=lifespan,
 )
 
@@ -125,6 +126,7 @@ app.include_router(config_reviews.router, prefix="/api/configs", tags=["configs"
 app.include_router(schedules.router, prefix="/api/schedules", tags=["schedules"], dependencies=protected)
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"], dependencies=protected)
 app.include_router(topology.router, prefix="/api/topology", tags=["topology"], dependencies=protected)
+app.include_router(commands.router, prefix="/api/commands", tags=["commands"], dependencies=protected)
 app.include_router(compliance.router, prefix="/api/compliance", tags=["compliance"], dependencies=protected)
 app.include_router(ignore_rules.router, prefix="/api/ignore-rules", tags=["ignore-rules"], dependencies=protected)
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependencies=protected)

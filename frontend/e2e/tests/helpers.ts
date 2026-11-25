@@ -7,12 +7,12 @@ export const USERS = {
 };
 
 /** サイドメニューから開ける全画面（navigation.spec.ts・csp.spec.ts で使う） */
-export const PAGES = ["/dashboard", "/devices", "/topology", "/jump-hosts", "/credential-profiles", "/collect", "/ping", "/history", "/reviews", "/search", "/terminal", "/schedules",
+export const PAGES = ["/dashboard", "/devices", "/topology", "/jump-hosts", "/credential-profiles", "/commands", "/collect", "/ping", "/history", "/reviews", "/search", "/terminal", "/schedules",
   "/compliance", "/ignore-rules", "/notifications", "/activity", "/audit", "/users", "/system"];
 
 /** サイドメニューの大項目ごとの小項目（App.tsx の NAV_GROUPS と合わせる） */
 const NAV_GROUP_OF: Record<string, string> = {
-  "/devices": "機器", "/topology": "機器", "/terminal": "機器", "/jump-hosts": "機器", "/credential-profiles": "機器",
+  "/devices": "機器", "/topology": "機器", "/terminal": "機器", "/commands": "機器", "/jump-hosts": "機器", "/credential-profiles": "機器",
   "/collect": "コンフィグ", "/schedules": "コンフィグ", "/history": "コンフィグ", "/reviews": "コンフィグ",
   "/search": "コンフィグ", "/compliance": "コンフィグ", "/ignore-rules": "コンフィグ",
   "/ping": "監視", "/monitoring": "監視", "/activity": "監視",

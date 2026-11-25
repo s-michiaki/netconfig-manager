@@ -22,6 +22,7 @@ const PERM_LABELS: Record<string, string> = {
   "config:ignore": "収集時に無視する行の設定",
   "collect:run": "収集の実行",
   "terminal:use": "SSHターミナル",
+  "command:run": "コマンド実行（表示コマンドの一括実行と結果の閲覧）",
   "schedule:read": "スケジュール閲覧",
   "schedule:write": "スケジュール編集",
   "user:admin": "ユーザー管理",

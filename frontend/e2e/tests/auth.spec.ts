@@ -28,7 +28,7 @@ test("閲覧者は管理用のメニューと編集ボタンが表示されな�
   await login(page, USERS.viewer);
   await expandNav(page);
   await expect(page.getByRole("link", { name: "デバイス管理" })).toBeVisible();
-  for (const label of ["監査ログ", "ユーザー管理", "踏み台サーバ", "コンフィグ収集", "ターミナル"]) {
+  for (const label of ["監査ログ", "ユーザー管理", "踏み台サーバ", "コンフィグ収集", "ターミナル", "コマンド実行"]) {
     await expect(page.getByRole("link", { name: label })).toHaveCount(0);
   }
   await expect(page.getByRole("button", { name: "＋ 追加" })).toHaveCount(0);

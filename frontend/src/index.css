@@ -1035,3 +1035,31 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .ign-preview { margin-top: 8px; max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
 .ign-preview-dev { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 6px 10px; }
 .ign-examples { margin: 6px 0 0; padding: 6px 8px; background: var(--color-surface2); border-radius: var(--radius-sm); font-size: 11.5px; white-space: pre-wrap; word-break: break-all; }
+
+/* ---- コマンド実行 ---- */
+.cmd-note { background: var(--color-warning-dim); color: var(--color-text); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 12.5px; margin: 0 0 14px; }
+.cmd-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: start; }
+.cmd-devices { max-height: 300px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.cmd-over { color: var(--color-danger); font-weight: 600; }
+.cmd-input { width: 100%; box-sizing: border-box; resize: vertical; font-size: 13px; line-height: 1.6; }
+.cmd-errors { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.cmd-error { color: var(--color-danger); }
+.cmd-warn { color: var(--color-warning); }
+.cmd-run { margin-bottom: 16px; }
+.cmd-run-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.cmd-count { font-size: 12px; font-weight: 600; }
+.cmd-toolbar { display: flex; align-items: center; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.cmd-device { border: 1px solid var(--color-border); border-radius: var(--radius-sm); margin-bottom: 8px; background: var(--color-surface); }
+.cmd-device > summary { cursor: pointer; padding: 8px 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cmd-device-name { font-weight: 600; font-size: 13px; }
+.cmd-device-error { color: var(--color-danger); font-size: 12px; }
+.cmd-device-body { padding: 4px 12px 12px; }
+.cmd-output-block { margin-top: 8px; }
+.cmd-output-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.cmd-command { font-size: 12px; color: var(--color-accent); }
+.cmd-output { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 10px 12px; margin: 0; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; max-height: 360px; overflow: auto; }
+.cmd-cmd-group { margin-bottom: 14px; }
+.cmd-other { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 12.5px; }
+.cmd-cell-commands { font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-row-active { background: var(--color-surface2); }
+@media (max-width: 1000px) { .cmd-grid { grid-template-columns: 1fr; } }
