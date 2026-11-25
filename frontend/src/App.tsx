@@ -2,6 +2,7 @@ import { ComponentType, lazy, Suspense, useEffect, useRef, useState } from "reac
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api, clearToken, errorMessage, getToken, setToken } from "./api/client";
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
+import ApiTokenModal from "./components/ApiTokenModal";
 import MfaModal from "./components/MfaModal";
 import DevicesPage from "./pages/DevicesPage";
 import LoginPage from "./pages/LoginPage";
@@ -154,6 +155,7 @@ function PasswordModal({ onClose }: { onClose: () => void }) {
           <p style={{ marginBottom: 16 }}>パスワードを変更しました。</p>
         ) : (
           <>
+            <p className="topo-muted topo-small" style={{ marginTop: 0 }}>API トークンは失効しません（漏れた疑いがあるときは「API トークン」から失効させてください）。</p>
             <div className="form-group">
               <label className="form-label">現在のパスワード</label>
               <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} />
@@ -183,6 +185,7 @@ function Layout() {
   const { me, can, reload } = useAuth();
   const [showPassword, setShowPassword] = useState(false);
   const [showMfa, setShowMfa] = useState(false);
+  const [showTokens, setShowTokens] = useState(false);
   const [version, setVersion] = useState("");
   const [features, setFeatures] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -235,6 +238,7 @@ function Layout() {
     <div className="app-layout">
       {showPassword && <PasswordModal onClose={() => setShowPassword(false)} />}
       {showMfa && me && <MfaModal enabled={!!me.mfa_enabled} onClose={() => setShowMfa(false)} onChanged={() => { reload(); }} />}
+      {showTokens && <ApiTokenModal onClose={() => setShowTokens(false)} />}
       <aside className="sidebar">
         <div className="sidebar-header">
           <span className="sidebar-logo">⬡ NetConfig</span>
@@ -302,6 +306,9 @@ function Layout() {
                 <button className="link-btn" onClick={() => setShowPassword(true)}>パスワード変更</button>
                 <button className="link-btn" onClick={() => setShowMfa(true)} title={me.mfa_enabled ? "2 段階認証: 設定済み" : "2 段階認証: 未設定"}>
                   2 段階認証{me.mfa_enabled ? " ✓" : ""}
+                </button>
+                <button className="link-btn" onClick={() => setShowTokens(true)} title="スクリプトなどから API を使うためのトークン">
+                  API トークン
                 </button>
                 <button className="link-btn" onClick={logout}>ログアウト</button>
               </div>

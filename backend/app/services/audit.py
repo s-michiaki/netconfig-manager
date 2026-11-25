@@ -42,6 +42,9 @@ ACTIONS = {
     "user.delete": "ユーザー削除",
     "user.logout": "ユーザーの強制ログアウト",
     "user.mfa_reset": "2 段階認証の解除（管理者）",
+    "api_token.create": "API トークンの発行",
+    "api_token.revoke": "API トークンの失効",
+    "api_token.revoke_all": "API トークンの全失効（管理者）",
     "device.create": "機器登録",
     "device.update": "機器変更",
     "device.export": "機器台帳の CSV 出力",
@@ -138,6 +141,10 @@ def make_log(
     detail: dict | None = None,
     success: bool = True,
 ) -> AuditLog:
+    token = getattr(user, "api_token", None) if user is not None else None
+    if token is not None:
+        # API トークン経由の操作は、だれが（ユーザー名）に加えて、どのトークンかを残す（トークンの値は残さない）
+        detail = {**(detail or {}), "via_token": token.name}
     return AuditLog(
         at=utcnow(),
         user_id=user.id if user else None,

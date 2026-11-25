@@ -12,15 +12,18 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.api_tokens import TokenInfo, list_for
 from app.api.auth import NewPassword, clear_mfa
 from app.api.deps import get_current_user
 from app.api.terminal import close_user_sessions
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Perm, Role
 from app.core.security import hash_password
+from app.models.api_token import ApiToken
 from app.models.device import CredentialProfile
 from app.models.notification import NotificationSetting, UserGroupMember
 from app.models.user import User
+from app.services import api_tokens
 from app.services.audit import Audit, get_audit
 
 logger = logging.getLogger(__name__)
@@ -53,10 +56,15 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime | None
     mfa_enabled: bool = False
+    api_tokens: int = 0  # 有効な API トークンの数
 
 
 class ForceLogoutResponse(BaseModel):
-    closed_terminals: int  # 切断した、接続中のターミナルの数
+    closed_terminals: int  # 切断した、接続中のターミナルの数（失効させた API トークンの数は監査ログに残す）
+
+
+class RevokeTokensResponse(BaseModel):
+    revoked_tokens: int
 
 
 class RoleInfo(BaseModel):
@@ -65,14 +73,14 @@ class RoleInfo(BaseModel):
     permissions: list[str]
 
 
-def _to_response(u: User) -> UserResponse:
+def _to_response(u: User, tokens: int = 0) -> UserResponse:
     try:
         label = ROLE_LABELS[Role(u.role)]
     except ValueError:
         label = u.role
     return UserResponse(
         id=u.id, username=u.username, role=u.role, role_label=label, is_active=u.is_active, created_at=u.created_at,
-        mfa_enabled=bool(u.mfa_enabled),
+        mfa_enabled=bool(u.mfa_enabled), api_tokens=tokens,
     )
 
 
@@ -103,7 +111,8 @@ async def list_roles():
 @router.get("/", response_model=list[UserResponse])
 async def list_users(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).order_by(User.username))
-    return [_to_response(u) for u in result.scalars().all()]
+    counts = await api_tokens.active_counts(db)
+    return [_to_response(u, counts.get(u.id, 0)) for u in result.scalars().all()]
 
 
 @router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -153,11 +162,14 @@ async def update_user(
 
     changes = []
     revoke = ""  # 既存のログイン（トークン・接続中のターミナル）を切る理由
+    revoke_tokens = False  # API トークンも失効させるか（ロールの変更・無効化・管理者によるパスワードのリセット）
     if payload.role is not None and payload.role.value != user.role:
         changes.append(f"role {user.role}->{payload.role.value}")
         lost_terminal = (Perm.TERMINAL in ROLE_PERMISSIONS[Role(user.role)]
                          and Perm.TERMINAL not in ROLE_PERMISSIONS[payload.role])
         user.role = payload.role.value
+        # API トークンは全失効させる（昇格で以前の full のトークンが強くならないように。降格も同じに扱って単純にする）
+        revoke_tokens = True
         if lost_terminal:
             # ログインはそのまま（以降の操作は新しいロールで判定される）。開いているターミナルだけ切る
             revoke = "ロールの変更"
@@ -168,22 +180,29 @@ async def update_user(
             # 無効化の前に発行したトークンが、有効に戻したときに復活しないようにする
             user.token_version = (user.token_version or 0) + 1
             revoke = "ユーザーの無効化"
+            # API トークンも失効させる（有効に戻したときに、以前のトークンが使えるようにならないように）
+            revoke_tokens = True
     if payload.password:
         if is_self:
             raise HTTPException(status_code=400, detail="自分のパスワードは「パスワード変更」から変更してください")
         user.hashed_password = await run_in_threadpool(hash_password, payload.password)
         changes.append("password reset")
         revoke = revoke or "パスワードのリセット"
+        # 管理者によるリセットは、パスワードが漏れたときなどに行うので、API トークンも失効させる
+        # （本人の「パスワード変更」では失効させない。README の「API トークン」）
+        revoke_tokens = True
+    detail: dict = {"changes": changes}
+    if revoke_tokens:
+        detail["revoked_tokens"] = await api_tokens.revoke_all(db, user.id)
     if changes:
-        audit("user.update", target_type="user", target_id=user.id, target_name=user.username,
-              detail={"changes": changes})
+        audit("user.update", target_type="user", target_id=user.id, target_name=user.username, detail=detail)
     await db.commit()
     await db.refresh(user)
     if revoke:
         await close_user_sessions(user.id, revoke)
     if changes:
         logger.info("ユーザー更新 by=%s user=%s %s", me.username, user.username, ", ".join(changes))
-    return _to_response(user)
+    return _to_response(user, await api_tokens.count_active(db, user.id))
 
 
 @router.post("/{user_id}/mfa-reset", response_model=UserResponse)
@@ -202,7 +221,7 @@ async def reset_mfa(
     await db.commit()
     await db.refresh(user)
     logger.info("2 段階認証の解除 by=%s user=%s", me.username, user.username)
-    return _to_response(user)
+    return _to_response(user, await api_tokens.count_active(db, user.id))
 
 
 @router.post("/{user_id}/logout", response_model=ForceLogoutResponse)
@@ -212,20 +231,45 @@ async def force_logout(
     me: User = Depends(get_current_user),
     audit: Audit = Depends(get_audit),
 ):
-    """パスワードを変えずに、そのユーザーの既存のログインを切る（再ログインは可能）"""
+    """パスワードを変えずに、そのユーザーの既存のログインを切る（再ログインは可能）。API トークンもすべて失効させる"""
     user = await _get_or_404(db, user_id)
     if user.id == me.id:
         raise HTTPException(
             status_code=400, detail="自分自身はログアウトさせられません（サイドバーの「ログアウト」を使ってください）"
         )
     user.token_version = (user.token_version or 0) + 1
+    revoked = await api_tokens.revoke_all(db, user.id)
     await db.commit()
     closed = await close_user_sessions(user.id, "管理者による強制ログアウト")
     audit("user.logout", target_type="user", target_id=user.id, target_name=user.username,
-          detail={"closed_terminals": closed})
+          detail={"closed_terminals": closed, "revoked_tokens": revoked})
     await db.commit()
-    logger.info("強制ログアウト by=%s user=%s terminals=%d", me.username, user.username, closed)
+    logger.info("強制ログアウト by=%s user=%s terminals=%d tokens=%d", me.username, user.username, closed, revoked)
     return ForceLogoutResponse(closed_terminals=closed)
+
+
+@router.get("/{user_id}/tokens", response_model=list[TokenInfo])
+async def list_user_tokens(user_id: str, db: AsyncSession = Depends(get_db)):
+    """そのユーザーの API トークンの一覧（値は返さない。失効・期限切れも一定期間は残る）"""
+    user = await _get_or_404(db, user_id)
+    return await list_for(db, user.id)
+
+
+@router.delete("/{user_id}/tokens", response_model=RevokeTokensResponse)
+async def revoke_user_tokens(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    me: User = Depends(get_current_user),
+    audit: Audit = Depends(get_audit),
+):
+    """そのユーザーの有効な API トークンをすべて失効させる（ログインはそのまま）"""
+    user = await _get_or_404(db, user_id)
+    n = await api_tokens.revoke_all(db, user.id)
+    audit("api_token.revoke_all", target_type="user", target_id=user.id, target_name=user.username,
+          detail={"revoked_tokens": n})
+    await db.commit()
+    logger.info("API トークンの全失効 by=%s user=%s tokens=%d", me.username, user.username, n)
+    return RevokeTokensResponse(revoked_tokens=n)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -247,6 +291,8 @@ async def delete_user(
     ))
     # 所有していた認証情報プロファイルは「所有者なし」にする（管理者が引き継ぐ。SQLite では SET NULL が効かないため明示的に）
     await db.execute(update(CredentialProfile).where(CredentialProfile.owner_id == user.id).values(owner_id=None))
+    # API トークンも消す（SQLite では外部キーの CASCADE が効かないため明示的に）
+    await db.execute(delete(ApiToken).where(ApiToken.user_id == user.id))
     await db.delete(user)
     audit("user.delete", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()

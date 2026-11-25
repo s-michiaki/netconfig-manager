@@ -59,6 +59,17 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Perm]] = {
 
 ROLE_LABELS = {Role.ADMIN: "管理者", Role.OPERATOR: "オペレーター", Role.VIEWER: "閲覧者"}
 
+# API トークンの範囲「read」で使える権限（副作用の無い閲覧だけ）。実際に使えるのは、これと発行した人のロールの権限の重なり。
+# COLLECT・COMMAND_RUN・NOTIFY_SELF など、機器への接続や設定の変更を伴うものは入れない
+READ_ONLY_PERMS: frozenset[Perm] = frozenset({
+    Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ,
+    Perm.AUDIT_READ, Perm.PING_USE, Perm.ACTIVITY_READ, Perm.SYSTEM_READ, Perm.MONITOR_READ,
+})
+
+# API トークンの範囲（scope）
+TOKEN_SCOPE_READ = "read"
+TOKEN_SCOPE_FULL = "full"
+
 
 def permissions_for(role: str) -> frozenset[Perm]:
     try:
@@ -69,3 +80,17 @@ def permissions_for(role: str) -> frozenset[Perm]:
 
 def has_permission(role: str, perm: Perm) -> bool:
     return perm in permissions_for(role)
+
+
+def token_permissions(role: str, scope: str | None) -> frozenset[Perm]:
+    """API トークン経由のときに使える権限。scope が None ならログイン（セッション）としてロールの権限そのまま。
+
+    判定のたびにいまのロールから計算する（ロールを下げれば、トークンで使える権限もすぐに下がる）。
+    未知の scope は何もできない
+    """
+    perms = permissions_for(role)
+    if scope is None or scope == TOKEN_SCOPE_FULL:
+        return perms
+    if scope == TOKEN_SCOPE_READ:
+        return perms & READ_ONLY_PERMS
+    return frozenset()

@@ -23,12 +23,13 @@ from pydantic import AfterValidator, BaseModel, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import effective_permissions, get_current_user, require_session
 from app.api.terminal import close_user_sessions
+from app.api.token_policy import token_route_perms
 from app.core import totp
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.permissions import ROLE_LABELS, Role, permissions_for
+from app.core.permissions import ROLE_LABELS, Role
 from app.core.security import (
     DUMMY_HASH,
     MAX_PASSWORD_BYTES,
@@ -72,6 +73,8 @@ class UserInfo(BaseModel):
     role_label: str
     permissions: list[str]
     mfa_enabled: bool = False
+    # API トークンで呼んだときは、その範囲（read / full）。permissions もその範囲で絞ったもの
+    api_token_scope: str | None = None
 
 
 class PasswordChange(BaseModel):
@@ -79,7 +82,8 @@ class PasswordChange(BaseModel):
     new_password: NewPassword
 
 
-def user_info(user: User) -> UserInfo:
+def user_info(user: User, token_perms: frozenset | None = None) -> UserInfo:
+    """token_perms: API トークンのときに、トークンで呼べる API が要求する権限（これと重なるものだけ返す）"""
     try:
         label = ROLE_LABELS[Role(user.role)]
     except ValueError:
@@ -89,8 +93,10 @@ def user_info(user: User) -> UserInfo:
         username=user.username,
         role=user.role,
         role_label=label,
-        permissions=sorted(p.value for p in permissions_for(user.role)),
+        permissions=sorted(p.value for p in effective_permissions(user)
+                           if user.api_token is None or token_perms is None or p in token_perms),
         mfa_enabled=bool(user.mfa_enabled),
+        api_token_scope=user.api_token.scope if user.api_token is not None else None,
     )
 
 
@@ -219,7 +225,7 @@ class RecoveryCodes(BaseModel):
 
 
 @router.post("/mfa/setup", response_model=MfaSetup)
-async def mfa_setup(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def mfa_setup(user: User = Depends(require_session), db: AsyncSession = Depends(get_db)):
     """2 段階認証の設定を始める（新しい秘密鍵を作り、認証アプリで読み取る QR コードを返す。まだ有効にはしない）"""
     if user.mfa_enabled:
         raise HTTPException(status_code=409, detail="2 段階認証は設定済みです（設定し直すときは、いったん解除してください）")
@@ -232,7 +238,7 @@ async def mfa_setup(user: User = Depends(get_current_user), db: AsyncSession = D
 
 @router.post("/mfa/enable", response_model=RecoveryCodes)
 async def mfa_enable(
-    request: Request, payload: MfaCode, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    request: Request, payload: MfaCode, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
 ):
     """認証アプリに表示されたコードで確認して、2 段階認証を有効にする。予備コードを返す（この 1 回だけ表示）"""
     if user.mfa_enabled:
@@ -256,7 +262,7 @@ async def mfa_enable(
 
 @router.post("/mfa/recovery-codes", response_model=RecoveryCodes)
 async def mfa_new_recovery_codes(
-    request: Request, payload: MfaCode, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    request: Request, payload: MfaCode, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
 ):
     """予備コードを作り直す（以前の予備コードは使えなくなる）。いまのワンタイムパスワードで確認する"""
     if not user.mfa_enabled:
@@ -274,7 +280,7 @@ async def mfa_new_recovery_codes(
 
 @router.post("/mfa/disable", status_code=204)
 async def mfa_disable(
-    request: Request, payload: MfaDisable, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    request: Request, payload: MfaDisable, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
 ):
     """本人が 2 段階認証を解除する（パスワードと、ワンタイムパスワードか予備コードで確認する）"""
     if not user.mfa_enabled:
@@ -298,8 +304,13 @@ def clear_mfa(user: User) -> None:
 
 
 @router.get("/me", response_model=UserInfo)
-async def me(user: User = Depends(get_current_user)):
-    """ログイン中のユーザーとその権限（フロントはこれで表示を切り替える）"""
+async def me(request: Request, user: User = Depends(get_current_user)):
+    """ログイン中のユーザーとその権限（フロントはこれで表示を切り替える）。
+
+    API トークンのときは、範囲で絞ったうえで、トークンで呼べる API が要求する権限だけを返す（user:admin などは出さない）
+    """
+    if user.api_token is not None:
+        return user_info(user, token_route_perms(request.app))
     return user_info(user)
 
 
@@ -307,7 +318,7 @@ async def me(user: User = Depends(get_current_user)):
 async def change_password(
     request: Request,
     payload: PasswordChange,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_session),
     db: AsyncSession = Depends(get_db),
 ):
     if not await run_in_threadpool(verify_password, payload.current_password, user.hashed_password):

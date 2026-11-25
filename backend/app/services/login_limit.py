@@ -14,6 +14,11 @@
 - ユーザー名だけでは止めない（他人が管理者を締め出せてしまうため）。接続元 IP は nginx が付ける値を使う
 - 存在しないユーザー名でも同じように数え・止めるので、応答からユーザーの有無は分からない
 - Redis に接続できないときは制限せずにログインを通す（警告をログに出す）。Redis が止まっても管理者が入れるように
+- API トークン（app/api/deps.py）: 照合に失敗したトークン（形式の誤り・存在しない値。掃除で消えたものを含む）は、
+  ログインとは別のカウンタ（token:ip:<接続元>）で数える（token_failure）。LOGIN_MAX_FAILURES_PER_IP 回を超えた接続元は、
+  LOGIN_LOCK_MIN 分、照合に失敗したトークンに 429 を返す。ログインのロックとは互いに影響させない
+  （壊れたスクリプトが同じ接続元の人のログインを止めないように）。正しいトークンは、ロック中でも通す。
+  トークンは照合が軽い（SHA-256）ので、パスワードと違い照合の後に数える
 """
 import hashlib
 import logging
@@ -82,3 +87,28 @@ async def record_success(username: str, ip: str | None, attempts: int = 1) -> No
             await r.delete(f"{PREFIX}:fail:{ip_key}")
     except RedisError as e:
         logger.warning("ログインの試行回数の消去に失敗しました: %s", e)
+
+
+async def token_failure(ip: str | None) -> tuple[int, bool]:
+    """照合に失敗した API トークンを数える。（止める場合の残り秒数（止めないなら 0）, 今回の失敗でロックしたか）
+
+    ログインの回数・ロックとは別のキー。すでにロック中なら数えずに残り秒数を返す
+    """
+    key = f"token:ip:{ip or 'unknown'}"
+    limit = settings.LOGIN_MAX_FAILURES_PER_IP
+    try:
+        r = client()
+        wait = await r.ttl(f"{PREFIX}:lock:{key}")
+        if wait > 0:
+            return wait, False
+        pipe = r.pipeline(transaction=True)
+        pipe.incr(f"{PREFIX}:fail:{key}")
+        pipe.expire(f"{PREFIX}:fail:{key}", settings.LOGIN_FAILURE_WINDOW_MIN * 60, nx=True)
+        n = (await pipe.execute())[0]
+        if limit > 0 and n > limit:
+            newly = bool(await r.set(f"{PREFIX}:lock:{key}", "1", ex=settings.LOGIN_LOCK_MIN * 60, nx=True))
+            return settings.LOGIN_LOCK_MIN * 60, newly
+        return 0, False
+    except RedisError as e:
+        logger.warning("API トークンの失敗の記録に失敗しました（制限せずに続行）: %s", e)
+        return 0, False

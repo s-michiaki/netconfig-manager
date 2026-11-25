@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     LOGIN_MAX_FAILURES_PER_IP: int = 20  # 同じ接続元からの失敗の上限（ユーザー名を問わない）
     LOGIN_FAILURE_WINDOW_MIN: int = 10  # 失敗を数える期間（分）
     LOGIN_LOCK_MIN: int = 15  # 上限に達したときにログインを止める時間（分）
+    # API トークン（app/services/api_tokens.py）。false にすると、発行も、発行済みのトークンでの API の利用もできない
+    API_TOKENS_ENABLED: bool = True
+    API_TOKEN_MAX_DAYS: int = Field(default=365, ge=1, le=365)  # 発行するときに選べる期限の上限（日）
     # コンプライアンスの正規表現の照合にかけられる時間（1回の評価＝ルール × 機器 あたりの合計秒数。ReDoS 対策）
     COMPLIANCE_REGEX_TIMEOUT: float = 2.0
     # 収集時に無視する行（services/ignore_rules.py）の正規表現にかけられる時間（秒）。

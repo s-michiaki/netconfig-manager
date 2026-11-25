@@ -28,3 +28,7 @@ class User(Base):
     mfa_last_step: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 最後に使ったコードの時間枠（再利用の防止）
     mfa_recovery: Mapped[str | None] = mapped_column(Text, nullable=True)  # 予備コードのハッシュ（JSON の配列）
     mfa_enabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # DB には保存しない: このリクエストが API トークン経由なら、そのトークン（app/models/api_token.py の ApiToken）。
+    # app/api/deps.py が設定し、権限の判定（範囲で絞る）と監査ログの via_token に使う。ログインのセッションなら None
+    api_token = None

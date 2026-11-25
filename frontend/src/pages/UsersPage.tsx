@@ -10,6 +10,7 @@ interface User {
   is_active: boolean;
   created_at: string | null;
   mfa_enabled: boolean;
+  api_tokens: number; // 有効な API トークンの数
 }
 interface RoleInfo { role: string; label: string; permissions: string[]; }
 
@@ -89,6 +90,11 @@ function UserModal({
               {selected.permissions.map((p) => PERM_LABELS[p] ?? p).join(" / ")}
             </p>
           )}
+          {isEdit && role !== user.role && user.api_tokens > 0 && (
+            <p style={{ fontSize: 11, color: "var(--color-warning)", marginTop: 4 }}>
+              ロールを変えると、このユーザーの API トークン（{user.api_tokens} 個）はすべて失効します
+            </p>
+          )}
         </div>
         <div className="form-group">
           <label className="form-label">
@@ -97,7 +103,7 @@ function UserModal({
           <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           {isEdit && password && (
             <p style={{ fontSize: 11, color: "var(--color-warning)", marginTop: 4 }}>
-              リセットすると、このユーザーはログアウトされます
+              リセットすると、このユーザーはログアウトされ、API トークンもすべて失効します
             </p>
           )}
         </div>
@@ -137,7 +143,8 @@ export default function UsersPage() {
   const forceLogout = async (u: User) => {
     if (!confirm(
       `ユーザー「${u.username}」をログアウトさせますか？\n` +
-      "ログイン中の画面・API の利用と、開いているターミナルが切れます。パスワードは変わらず、再ログインはできます。",
+      "ログイン中の画面・API の利用と、開いているターミナルが切れます。API トークンもすべて失効します。" +
+      "パスワードは変わらず、再ログインはできます。",
     )) return;
     setError("");
     setNotice("");
@@ -145,6 +152,24 @@ export default function UsersPage() {
       const r = await api.post<{ closed_terminals: number }>(`/users/${u.id}/logout`);
       const n = r.data.closed_terminals;
       setNotice(`「${u.username}」をログアウトさせました${n ? `（開いていたターミナル ${n} 件も切断）` : ""}`);
+      load();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  // その人の API トークンをすべて失効させる（ログインはそのまま）
+  const revokeTokens = async (u: User) => {
+    if (!confirm(
+      `ユーザー「${u.username}」の API トークン（有効なもの ${u.api_tokens} 個）をすべて失効させますか？\n` +
+      "そのトークンを使っているスクリプトは、すぐに使えなくなります。ログインはそのままです。",
+    )) return;
+    setError("");
+    setNotice("");
+    try {
+      const r = await api.delete<{ revoked_tokens: number }>(`/users/${u.id}/tokens`);
+      setNotice(`「${u.username}」の API トークン ${r.data.revoked_tokens} 個を失効させました`);
+      load();
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -198,6 +223,7 @@ export default function UsersPage() {
               <th>ロール</th>
               <th>状態</th>
               <th>2 段階認証</th>
+              <th>API トークン</th>
               <th>作成日</th>
               <th>操作</th>
             </tr>
@@ -222,12 +248,15 @@ export default function UsersPage() {
                       ? <span className="badge badge-success">設定済み</span>
                       : <span style={{ fontSize: 12, color: "var(--color-muted)" }}>未設定</span>}
                   </td>
+                  <td style={{ fontSize: 12 }} data-testid="user-api-tokens">
+                    {u.api_tokens ? `${u.api_tokens} 個` : <span style={{ color: "var(--color-muted)" }}>なし</span>}
+                  </td>
                   <td style={{ fontSize: 12, color: "var(--color-muted)" }}>
                     {u.created_at ? new Date(u.created_at + "Z").toLocaleDateString("ja-JP") : "—"}
                   </td>
                   <td>
                     {isMe ? (
-                      <span style={{ fontSize: 11, color: "var(--color-muted)" }}>サイドバーからパスワード変更・2 段階認証</span>
+                      <span style={{ fontSize: 11, color: "var(--color-muted)" }}>サイドバーからパスワード変更・2 段階認証・API トークン</span>
                     ) : (
                       <div style={{ display: "flex", gap: 6 }}>
                         <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setModal({ user: u })}>
@@ -239,6 +268,12 @@ export default function UsersPage() {
                         >
                           ログアウトさせる
                         </button>
+                        {u.api_tokens > 0 && (
+                          <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => revokeTokens(u)}
+                                  title="この人の API トークンをすべて失効させます（ログインはそのまま）">
+                            トークンを失効
+                          </button>
+                        )}
                         {u.mfa_enabled && (
                           <button className="btn" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => resetMfa(u)}
                                   title="認証アプリを無くしたときなどに、2 段階認証を解除します">

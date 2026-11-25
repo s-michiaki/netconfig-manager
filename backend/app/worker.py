@@ -4,6 +4,7 @@ Celeryワーカー定義
 - collect_all_devices: 全デバイスの一括収集タスク
 - dispatch_due_schedules: beat から毎分起動され、DBのスケジュールに従って収集を投入する
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録・コマンド実行の結果を削除する
+  （失効・期限切れから 30 日を過ぎた API トークンも）
 - run_command_device: コマンド実行（表示コマンドの一括実行）の機器 1 台ぶん。実行前にもう一度コマンドを検証する
 - send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
@@ -35,6 +36,7 @@ from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, CommandResult, CommandRun, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.models.command_run import STATUS_FAILED, STATUS_OK, STATUS_QUEUED, STATUS_RUNNING, STATUS_SKIPPED
+from app.services import api_tokens as api_tokens_svc
 from app.services import baseline as baseline_svc
 from app.services import collect_state, config_service, failure_batch, fw_hits, git_export, inventory, monitoring, system
 from app.services import command_run as command_run_svc
@@ -820,6 +822,7 @@ async def _purge() -> dict:
         result = await purge_old(db)
         result["ping_results"] = await ping_monitor_svc.purge(db)
         result["command_runs"] = await command_run_svc.purge_old_runs(db)
+        result["api_tokens"] = await api_tokens_svc.purge_old(db)  # 失効・期限切れから 30 日を過ぎた API トークン
         await db.commit()
         return result
 

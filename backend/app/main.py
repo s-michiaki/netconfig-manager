@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 
 from app.api import (
     activity,
+    api_tokens,
     audit,
     auth,
     commands,
@@ -33,7 +34,7 @@ from app.api import (
     topology,
     users,
 )
-from app.api.deps import get_current_user, require
+from app.api.deps import get_current_user, require, require_session
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
 from app.core.database import AsyncSessionLocal, engine
@@ -94,7 +95,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.58.0",
+    version="1.59.0",
     lifespan=lifespan,
 )
 
@@ -107,10 +108,14 @@ if settings.cors_origins:
         allow_headers=["Authorization", "Content-Type"],
     )
 
-# ルーター全体でログインを必須にし、各エンドポイントで require(Perm.xxx) により権限を確認する
+# ルーター全体でログインを必須にし、各エンドポイントで require(Perm.xxx) により権限を確認する。
+# API トークン（ncm_…）で呼べるのは app/api/token_policy.py の一覧にあるものだけ（get_current_user で判定）
 protected = [Depends(get_current_user)]
+# ログインのセッションでだけ使えるもの（API トークンでは 403）。一覧で既に不可だが、念のため重ねる
+session_only = [Depends(require_session)]
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(api_tokens.router, prefix="/api/auth/tokens", tags=["auth"])
 app.include_router(devices.router, prefix="/api/devices", tags=["devices"], dependencies=protected)
 app.include_router(
     device_groups.router, prefix="/api/device-groups", tags=["device-groups"], dependencies=protected
@@ -133,13 +138,15 @@ app.include_router(audit.router, prefix="/api/audit", tags=["audit"], dependenci
 app.include_router(activity.router, prefix="/api/activity", tags=["activity"], dependencies=protected)
 app.include_router(ping.router, prefix="/api/ping", tags=["ping"], dependencies=protected)
 app.include_router(system.router, prefix="/api/system", tags=["system"], dependencies=protected)
-app.include_router(mail.router, prefix="/api/mail", tags=["mail"], dependencies=protected)
+app.include_router(mail.router, prefix="/api/mail", tags=["mail"], dependencies=protected + session_only)
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
 app.include_router(monitoring.router, prefix="/api/monitoring", tags=["monitoring"], dependencies=protected)
 app.include_router(
     notifications.router, prefix="/api/notifications", tags=["notifications"], dependencies=protected
 )
-app.include_router(users.router, prefix="/api/users", tags=["users"], dependencies=[Depends(require(Perm.USER_ADMIN))])
+app.include_router(
+    users.router, prefix="/api/users", tags=["users"], dependencies=[Depends(require(Perm.USER_ADMIN)), *session_only]
+)
 # WebSocket は接続後の最初のメッセージでトークンを検証する（terminal.py 参照）
 app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])
 app.include_router(ping.ws_router, prefix="/api/ping", tags=["ping"])
