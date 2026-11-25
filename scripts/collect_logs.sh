@@ -99,6 +99,9 @@ save() {
   return 0
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+# OS の判定（scripts/lib/os.sh）。無くても収集は続ける（OS の行は os-release の名前だけにする）
+# shellcheck source=lib/os.sh
+[ -f "$SCRIPT_DIR/lib/os.sh" ] && . "$SCRIPT_DIR/lib/os.sh"
 # コンテナのコマンド（podman）。root でなければ sudo を付ける。timeout から呼べるよう配列で持つ
 # shellcheck disable=SC2206  # SUDO は空か "sudo" のどちらか
 CC=($SUDO "$CONTAINER_CMD")
@@ -122,7 +125,12 @@ log "ログを集めます（直近 ${DAYS} 日分$([ "$FULL" -eq 1 ] && echo "�
   echo "対象の期間   : 直近 ${DAYS} 日"
   echo "行数の上限   : $([ "$FULL" -eq 1 ] && echo "なし（--full）" || echo "コンテナごとに ${LINES} 行")"
   echo "アプリの版   : $(grep -oE 'version="[0-9.]+"' "$INSTALL_DIR/backend/app/main.py" 2>/dev/null | head -1 | tr -d '"' | cut -d= -f2)"
-  echo "OS           : $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-不明}")"
+  if [ -n "${NCM_OS_FAMILY:-}" ]; then
+    echo "OS           : ${NCM_OS_PRETTY:-不明}（系統: ${NCM_OS_FAMILY}、対応: ${NCM_OS_LEVEL}）"
+    [ -z "${NCM_OS_NOTE:-}" ] || echo "OS の注意    : $NCM_OS_NOTE"
+  else
+    echo "OS           : $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-不明}")"
+  fi
   echo "カーネル     : $(uname -r 2>/dev/null)"
   echo "稼働時間     : $(uptime 2>/dev/null | sed 's/^ *//')"
 } > "$ROOT/summary.txt"
@@ -277,6 +285,9 @@ have free && save system/memory.txt free -m
 have ss && save system/ports.txt $SUDO ss -ltnp
 have getenforce && save system/selinux.txt getenforce
 have firewall-cmd && save system/firewall.txt $SUDO firewall-cmd --list-all
+# Ubuntu: ufw と AppArmor（コンテナが不許可で止まる原因の確認用）
+have ufw && save system/ufw.txt $SUDO env LC_ALL=C ufw status verbose
+have aa-status && save system/apparmor.txt $SUDO aa-status
 if have systemctl; then
   for unit in "container-$PROJECT_NAME" "$PROJECT_NAME" netconfig-manager netconfig-backup.timer netconfig-backup.service podman-restart podman; do
     $SUDO systemctl cat "$unit" >/dev/null 2>&1 || continue
@@ -293,6 +304,10 @@ if have journalctl; then
   { echo "\$ journalctl -k | grep -i 'out of memory\\|oom'"; $SUDO journalctl -k --no-pager --since "${DAYS} days ago" 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -100; } > "$ROOT/system/oom.txt"
   # 優先度が「エラー」以上のもの（全体）
   save system/journal-errors.txt $SUDO journalctl --no-pager --since "${DAYS} days ago" -p err -n "$JLINES"
+fi
+if have journalctl && have aa-status; then
+  # AppArmor に拒否された操作（Ubuntu。SELinux の拒否と同じ使い方）
+  { echo "\$ journalctl -k | grep 'apparmor=\"DENIED\"'"; $SUDO journalctl -k --no-pager --since "${DAYS} days ago" 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -200; } > "$ROOT/system/apparmor-denials.txt"
 fi
 if have ausearch; then
   # SELinux に拒否された操作（ボリュームが読めない・ポートを開けない、などの原因になる）

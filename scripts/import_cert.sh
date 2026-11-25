@@ -102,9 +102,18 @@ if [ -n "${Red_HTTPS_PORT}" ]; then HTTPS_PORT="${Red_HTTPS_PORT}" ; fi
 # 依存チェック
 # =========================
 command -v sudo >/dev/null || { echo "sudo required"; exit 1; }
+# OS ごとの違い（パッケージ・ファイアウォール）は scripts/lib/os.sh にまとめてある
+OS_LIB=""
+# リポジトリの外に置いたスクリプトは、$INSTALL_DIR の lib だけを見る
+if [ -f "$SCRIPT_DIR/../docker-compose.prod.yml" ]; then LIB_CAND="$SCRIPT_DIR/lib/os.sh"; else LIB_CAND="$INSTALL_DIR/scripts/lib/os.sh"; fi
+if [ -f "$LIB_CAND" ]; then OS_LIB="$LIB_CAND"; fi
+[ -n "$OS_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）"; exit 1; }
+# shellcheck source=lib/os.sh
+. "$OS_LIB"
 if ! command -v openssl >/dev/null; then
   echo "[INFO] Installing openssl..."
-  sudo dnf install -y openssl
+  ncm_require_pkg_manager || exit 1
+  ncm_install_packages openssl
 fi
 command -v podman >/dev/null || { echo "podman が見つかりません（先に setup.sh で導入してください）"; exit 1; }
 
@@ -247,20 +256,10 @@ if sudo test -f "$INSTALL_DIR/.env"; then
 fi
 
 # =========================
-# firewalld ポート開放
+# ファイアウォールのポート開放（RHEL 系: firewalld / Ubuntu: ufw が有効なときだけ）
 # =========================
 echo "[INFO] Configuring firewall..."
-if systemctl is-active --quiet firewalld; then
-  if [ "$HTTPS_PORT" = "443" ]; then
-    sudo firewall-cmd --permanent --add-service=https
-  else
-    sudo firewall-cmd --permanent --add-port="${HTTPS_PORT}/tcp"
-  fi
-  sudo firewall-cmd --reload
-  echo "[INFO] Port ${HTTPS_PORT}/tcp opened in firewalld"
-else
-  echo "[INFO] firewalld is not running, skipping"
-fi
+ncm_firewall_open "$HTTPS_PORT"
 
 # =========================
 # nginx（frontend コンテナ）へ反映

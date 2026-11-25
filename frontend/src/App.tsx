@@ -305,7 +305,7 @@ function Layout() {
               </div>
             </div>
           )}
-          <span className="version-tag">{version ? `v${version} · ` : ""}RHEL 10</span>
+          <span className="version-tag">{version ? `v${version}` : ""}</span>
         </div>
       </aside>
 

@@ -42,6 +42,12 @@ info() { printf '         %s\n' "$*"; }
 section() { printf '\n%s== %s ==%s\n' "$C_H" "$*" "$C_0"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# OS ごとの違い（判定・パッケージ名・案内文）は scripts/lib/os.sh にまとめてある
+NCM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/os.sh"
+[ -f "$NCM_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）" >&2; exit 2; }
+# shellcheck source=lib/os.sh
+. "$NCM_LIB"
+
 usage() { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ---------------------------------------------------------------- 引数
@@ -76,16 +82,17 @@ printf '%sNetConfig Manager 導入前チェック%s  (%s / 構成: %s)\n' "$C_H"
 # =============================================================================
 section "1. OS・リソース"
 # =============================================================================
-if [ -r /etc/os-release ]; then
-  . /etc/os-release
-  case "${ID:-}:${VERSION_ID:-}" in
-    rhel:10*|rocky:10*|almalinux:10*|centos:10*) ok "OS: ${PRETTY_NAME}" ;;
-    rhel:*|rocky:*|almalinux:*|centos:*|fedora:*)
-      warn "OS: ${PRETTY_NAME}（README の手順は RHEL 10 前提。コンテナが動けば利用可能）" ;;
-    *) warn "OS: ${PRETTY_NAME:-不明}（RHEL 系以外。dnf/firewalld/SELinux の手順は読み替えが必要）" ;;
+# NCM_OS_RELEASE_FILE で読むファイルを差し替えられる（テスト用）
+if [ -r "$NCM_OS_RELEASE_FILE" ]; then
+  case "$NCM_OS_LEVEL" in
+    ok)
+      ok "OS: ${NCM_OS_PRETTY:-$NCM_OS_ID}"
+      [ -z "$NCM_OS_NOTE" ] || info "$NCM_OS_NOTE" ;;
+    warn) warn "OS: ${NCM_OS_PRETTY:-$NCM_OS_ID}（${NCM_OS_NOTE}）" ;;
+    *) warn "OS: ${NCM_OS_PRETTY:-不明}（対象外の OS です。対応は AlmaLinux / RHEL 10 系と Ubuntu 24.04 LTS。dnf・apt / firewalld・ufw / SELinux・AppArmor の手順は読み替えが必要）" ;;
   esac
 else
-  warn "/etc/os-release が無いため OS を判定できません"
+  warn "$NCM_OS_RELEASE_FILE が無いため OS を判定できません"
 fi
 
 ARCH="$(uname -m)"
@@ -135,7 +142,7 @@ if have docker; then
     info "sudo systemctl enable --now docker / sudo usermod -aG docker \$USER"
   fi
 fi
-[ -n "$RUNTIME" ] || { ng "Podman も Docker も見つかりません"; info "sudo dnf install -y podman podman-compose"; }
+[ -n "$RUNTIME" ] || { ng "Podman も Docker も見つかりません"; info "$(ncm_install_hint podman podman-compose)"; }
 
 COMPOSE=""
 if have docker && docker compose version >/dev/null 2>&1; then
@@ -149,7 +156,7 @@ elif have docker-compose; then
   COMPOSE="docker-compose"
 else
   ng "Compose が見つかりません（podman-compose または docker compose が必要）"
-  info "sudo dnf install -y podman-compose"
+  info "$(ncm_install_hint podman-compose)"
 fi
 
 if [ "$RUNTIME" = "podman" ] && [ "$(id -u)" -ne 0 ]; then
@@ -173,7 +180,7 @@ section "3. Git"
 if have git; then
   ok "Git: $(git --version)"
 else
-  ng "Git が見つかりません"; info "sudo dnf install -y git"
+  ng "Git が見つかりません"; info "$(ncm_install_hint git)"
 fi
 
 # =============================================================================
@@ -225,7 +232,7 @@ if [ "$MODE" = "prod" ] && [ "$RUNTIME" = "podman" ] && [ "$(id -u)" -ne 0 ]; th
 fi
 
 # =============================================================================
-section "6. SELinux / firewalld / 時刻"
+section "6. SELinux・AppArmor / ファイアウォール / 時刻"
 # =============================================================================
 if have getenforce; then
   SE="$(getenforce)"
@@ -236,6 +243,12 @@ if have getenforce; then
   fi
 else
   info "SELinux: getenforce なし（対象外）"
+fi
+
+if have aa-status; then
+  # AppArmor（Ubuntu）。Podman のコンテナは標準のプロファイルで動くので、状態を示すだけ
+  if $SUDO aa-status --enabled >/dev/null 2>&1; then info "AppArmor: 有効（コンテナが不許可で止まったら journalctl -k | grep -i apparmor を確認）"
+  else info "AppArmor: 無効、または root 権限が無いため確認できません"; fi
 fi
 
 if have firewall-cmd && $SUDO firewall-cmd --state >/dev/null 2>&1; then
@@ -252,11 +265,26 @@ elif have firewall-cmd; then
   info "firewalld: 停止中、または root 権限が無いため確認できません（sudo で実行すると確認できます）"
 fi
 
+if have ufw; then
+  UFW_STATE="$($SUDO env LC_ALL=C ufw status 2>/dev/null)"
+  if echo "$UFW_STATE" | grep -q '^Status: active'; then
+    for p in "${PORTS[@]}"; do
+      if echo "$UFW_STATE" | grep -qE "^$p(/tcp)?[[:space:]].*ALLOW"; then
+        ok "ufw: $p/tcp は許可済み"
+      else
+        warn "ufw: $p/tcp が未許可（sudo ufw allow $p/tcp。setup.sh が自動で行います）"
+      fi
+    done
+  else
+    info "ufw: 無効、または root 権限が無いため確認できません（有効な場合のみ setup.sh がポートを開けます）"
+  fi
+fi
+
 if have timedatectl; then
   if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
     ok "時刻同期: 有効（$(timedatectl show -p Timezone --value 2>/dev/null)）"
   else
-    warn "時刻同期: 未同期（スケジュール実行の時刻がずれる可能性。sudo systemctl enable --now chronyd）"
+    warn "時刻同期: 未同期（スケジュール実行の時刻がずれる可能性。$(ncm_timesync_hint)）"
   fi
 fi
 

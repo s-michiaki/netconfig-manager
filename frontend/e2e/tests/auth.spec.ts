@@ -21,7 +21,7 @@ test("管理者はすべてのメニューを使え、バージョンを表示�
   for (const label of ["デバイス管理", "構成図", "コンプライアンス", "監査ログ", "ユーザー管理"]) {
     await expect(page.getByRole("link", { name: label })).toBeVisible();
   }
-  await expect(page.locator(".version-tag")).toHaveText(/^v\d+\.\d+\.\d+ /);
+  await expect(page.locator(".version-tag")).toHaveText(/^v\d+\.\d+\.\d+$/);
 });
 
 test("閲覧者は管理用のメニューと編集ボタンが表示されない", async ({ page }) => {

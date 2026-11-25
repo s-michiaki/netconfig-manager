@@ -1,6 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# NetConfig Manager 自動セットアップ（AlmaLinux / RHEL 10 系・Podman）
+# NetConfig Manager 自動セットアップ（AlmaLinux / RHEL 10 系・Ubuntu 24.04 LTS・Podman）
+#   ※ Ubuntu 24.04 LTS は実機での導入を未確認（OS ごとの違いは scripts/lib/os.sh）
 #
 # 使い方（一般ユーザー + sudo、または root で実行）:
 #   bash setup.sh                 # 初回: 対話形式でセットアップ（[ ] 内は Enter でそのまま採用）
@@ -191,7 +192,53 @@ TS=$(date +%Y%m%d-%H%M%S)
 # 依存チェック
 # =========================
 command -v sudo >/dev/null || { echo "sudo required"; exit 1; }
-command -v dnf  >/dev/null || { echo "dnf required (AlmaLinux / RHEL 10 系で実行してください)"; exit 1; }
+
+# OS ごとの違い（パッケージ・ファイアウォールなど）は scripts/lib/os.sh にまとめてある。
+# setup.sh だけをダウンロードして実行した初回は、まだリポジトリが無く lib も無いので、
+# git だけを先に入れてリポジトリを取得してから読み込む（OS の判定は lib の 1 か所だけにしている）
+OS_LIB=""
+# リポジトリの中の setup.sh（上の階層に docker-compose.prod.yml がある）はすぐ隣の lib を、
+# リポジトリの外に置いた setup.sh は $INSTALL_DIR の lib だけを見る（無関係な場所の lib を読まないため）
+if [ -f "$SCRIPT_DIR/../docker-compose.prod.yml" ]; then LIB_CAND="$SCRIPT_DIR/lib/os.sh"; else LIB_CAND="$INSTALL_DIR/scripts/lib/os.sh"; fi
+if [ -f "$LIB_CAND" ]; then OS_LIB="$LIB_CAND"; fi
+if [ -z "$OS_LIB" ]; then
+  # 初回（lib もリポジトリも無い）: clone の前に、明らかに対象外の OS なら止める
+  # （この時点では lib が読めないので、ID・ID_LIKE を軽く見るだけ。詳しい判定は lib が行う）
+  BOOT_REL="${NCM_OS_RELEASE_FILE:-/etc/os-release}"
+  BOOT_IDS=$( (sed -n -e 's/^ID=//p' -e 's/^ID_LIKE=//p' "$BOOT_REL" 2>/dev/null || true) | tr -d '"\r' | tr '[:upper:]' '[:lower:]' | tr '\n' ' ')
+  case " $BOOT_IDS " in
+    *" rhel "*|*" rocky "*|*" almalinux "*|*" centos "*|*" fedora "*|*" ubuntu "*|*" debian "*) ;;
+    *) echo "対象外の OS です（${BOOT_IDS:-判定できません}）。対応しているのは AlmaLinux / RHEL 10 系と Ubuntu 24.04 LTS です"; exit 1 ;;
+  esac
+  echo "[INFO] OS の共通部品（scripts/lib/os.sh）が無いため、先に git を入れてソースを取得します"
+  if ! command -v git >/dev/null; then
+    if command -v apt-get >/dev/null; then
+      sudo apt-get update
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y git
+    elif command -v dnf >/dev/null; then
+      sudo dnf install -y git
+    else
+      echo "git が見つかりません。git を入れてから再実行してください"; exit 1
+    fi
+  fi
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    pull_source "$INSTALL_DIR"
+  else
+    echo "[INFO] Cloning $REPO_URL ($BRANCH) into $INSTALL_DIR..."
+    echo "       （プライベートリポジトリの場合、Password には GitHub の Personal Access Token を入力）"
+    sudo mkdir -p "$(dirname "$INSTALL_DIR")"
+    sudo git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  fi
+  PULLED_DIR="$INSTALL_DIR"  # 取得済み（後の「ソース取得」では繰り返さない）
+  OS_LIB="$INSTALL_DIR/scripts/lib/os.sh"
+  [ -r "$OS_LIB" ] || sudo test -r "$OS_LIB" || { echo "$OS_LIB が見つかりません"; exit 1; }
+fi
+# shellcheck source=lib/os.sh
+if [ -r "$OS_LIB" ]; then . "$OS_LIB"; else . <(sudo cat "$OS_LIB"); fi
+
+echo "[INFO] OS: ${NCM_OS_PRETTY:-不明}（${NCM_OS_FAMILY}）"
+[ -z "$NCM_OS_NOTE" ] || echo "[WARN] $NCM_OS_NOTE"
+ncm_require_pkg_manager || exit 1
 
 # =========================
 # 必要パッケージのインストール（git / podman / podman-compose）
@@ -202,13 +249,13 @@ command -v git            >/dev/null || PKGS+=(git)
 command -v podman         >/dev/null || PKGS+=(podman)
 command -v podman-compose >/dev/null || PKGS+=(podman-compose)
 command -v curl           >/dev/null || PKGS+=(curl)
+# Ubuntu は、コンテナ同士が名前で引けるようにするためのもの（netavark など）も確かめる
+EXTRA_PKGS=()
+mapfile -t EXTRA_PKGS < <(ncm_extra_packages)
+PKGS+=("${EXTRA_PKGS[@]}")
 if [ ${#PKGS[@]} -gt 0 ]; then
-  if [[ " ${PKGS[*]} " == *" podman-compose "* ]] && ! rpm -q epel-release >/dev/null 2>&1; then
-    echo "[INFO] Installing epel-release (podman-compose is provided by EPEL)..."
-    sudo dnf install -y epel-release
-  fi
   echo "[INFO] Installing ${PKGS[*]}..."
-  sudo dnf install -y "${PKGS[@]}"
+  ncm_install_packages "${PKGS[@]}"
 else
   echo "[INFO] git / podman / podman-compose are already installed"
 fi
@@ -303,25 +350,10 @@ sudo chmod 700 "$ENV_BACKUP_DIR"
 sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
 
 # =========================
-# firewalld ポート開放
+# ファイアウォールのポート開放（RHEL 系: firewalld / Ubuntu: ufw が有効なときだけ）
 # =========================
 echo "[INFO] Configuring firewall..."
-if systemctl is-active --quiet firewalld; then
-  if [ "$HTTP_PORT" = "80" ]; then
-    sudo firewall-cmd --permanent --add-service=http
-  else
-    sudo firewall-cmd --permanent --add-port="${HTTP_PORT}/tcp"
-  fi
-  if [ "$HTTPS_PORT" = "443" ]; then
-    sudo firewall-cmd --permanent --add-service=https
-  else
-    sudo firewall-cmd --permanent --add-port="${HTTPS_PORT}/tcp"
-  fi
-  sudo firewall-cmd --reload
-  echo "[INFO] Port ${HTTP_PORT}/tcp, ${HTTPS_PORT}/tcp opened in firewalld"
-else
-  echo "[INFO] firewalld is not running, skipping"
-fi
+ncm_firewall_open "$HTTP_PORT" "$HTTPS_PORT"
 
 # =========================
 # コンテナのビルド・起動
@@ -376,7 +408,7 @@ sudo podman image prune -f >/dev/null 2>&1 || true
 # 再起動後の自動起動（Podman にはデーモンが無いため）
 # =========================
 echo "[INFO] Enabling auto start on boot..."
-sudo systemctl enable --now podman-restart.service
+ncm_enable_autostart
 
 # =========================
 # 定期バックアップ（DB・コンフィグ履歴・.env など。scripts/backup.sh を systemd タイマーで実行）

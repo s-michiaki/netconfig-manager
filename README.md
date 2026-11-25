@@ -50,13 +50,32 @@ Netmiko のドライバーがあり、コンフィグを取得するコマンド
 
 ---
 
-## セットアップ (RHEL 10)
+## セットアップ
+
+### 対応 OS
+
+| OS | 状態 | 導入・運用の道具 |
+|---|---|---|
+| AlmaLinux 10 | **確認済み** | dnf（podman-compose は EPEL）・firewalld・SELinux |
+| Ubuntu 24.04 LTS | スクリプトは対応済み。**実機での導入は未確認** | apt・ufw・AppArmor |
+| RHEL 10・Rocky Linux 10・CentOS Stream 10 | 同じ手順で動く想定（AlmaLinux 以外は実機で確認していません。判定は ok） | dnf（podman-compose は EPEL）・firewalld・SELinux |
+| Debian 12 以降 | 未確認（Ubuntu と同じ手順で試します。実行時に警告を出します） | apt・ufw・AppArmor |
+| 上記以外 | 対象外 | `setup.sh` は dnf が無ければ止まります。`check_env.sh` は警告を出します |
+
+- `scripts/` のスクリプト（`setup.sh`・`check_env.sh`・`import_cert.sh`・`backup.sh`・`restore.sh`・`collect_logs.sh`）は、同じものを両方の OS で使います。OS の判定と、OS ごとに違う操作（パッケージの導入・ファイアウォール）は `scripts/lib/os.sh` の 1 か所にまとめています（`/etc/os-release` の `ID`・`VERSION_ID`・`ID_LIKE` で判定）
+- AlmaLinux / RHEL 10 系での動きは変えていません（分岐を足しただけです）。ただし `setup.sh` だけをダウンロードして初回に実行したときは、リポジトリが無く OS の共通部品（`lib/os.sh`）を読めないため、先に git を入れてリポジトリを取得してから読み込みます（取得の前に、`/etc/os-release` で明らかに対象外の OS なら止まります）
+- **Ubuntu 24.04 LTS は、偽のコマンドを使ったテスト（`backend/tests/test_os_scripts.py`）で動きを確かめただけで、実機での導入・更新は確認していません**。実機で試すときは、下の「Ubuntu 24.04 LTS で使う」の確認項目を順に見てください
+- 画面の左下には、アプリの版だけを表示します（OS 名は表示しません）
 
 ### 前提条件
 
 ```bash
-# Podman + podman-compose のインストール
+# Podman + podman-compose のインストール（AlmaLinux / RHEL 10）
 sudo dnf install -y podman podman-compose git
+
+# Ubuntu 24.04 LTS の場合
+sudo apt-get update
+sudo apt-get install -y podman podman-compose git netavark aardvark-dns uidmap
 
 # または Docker を使用する場合
 sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
@@ -98,9 +117,9 @@ podman-compose logs backend | grep 初期管理者
 
 ログイン後、サイドバーの「パスワード変更」から管理者パスワードを変更してください。
 
-### 自動セットアップ（AlmaLinux / RHEL 10・おすすめ）
+### 自動セットアップ（AlmaLinux / RHEL 10・Ubuntu 24.04 LTS・おすすめ）
 
-Podman のインストールから `.env` の生成、ビルド・起動、自動起動設定、ファイアウォール開放、起動確認（画面の応答に加えて、収集を実行する worker・スケジューラーが動くかまで）を行います（初回は対話形式）。
+Podman のインストール（RHEL 系は dnf、Ubuntu は apt-get）から `.env` の生成、ビルド・起動、自動起動設定、ファイアウォール開放、起動確認（画面の応答に加えて、収集を実行する worker・スケジューラーが動くかまで）を行います（初回は対話形式）。
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/s-michiaki/netconfig-manager/master/scripts/setup.sh   # またはリポジトリを clone 済みなら scripts/setup.sh
@@ -117,6 +136,63 @@ bash setup.sh
   - ポートや IP アドレスを聞き直したいときは `bash scripts/setup.sh --reconfigure`
   - `git pull` で `setup.sh` 自身が更新されたときは、新しい内容で自動的に最初からやり直します（2 回実行する必要はありません）
 - 導入前の環境確認だけを行う場合は `bash scripts/check_env.sh`
+- OS ごとの違い:
+
+| 項目 | AlmaLinux / RHEL 10 系 | Ubuntu 24.04 LTS（実機未確認） |
+|---|---|---|
+| パッケージ | `dnf install -y git podman podman-compose curl`（podman-compose のときは先に `epel-release`） | `apt-get update` のあと `DEBIAN_FRONTEND=noninteractive apt-get install -y git podman podman-compose curl`。コンテナ同士が名前（`db`・`redis`）で引けるよう、`netavark`・`aardvark-dns`・rootless 用の `uidmap` も未導入なら入れます |
+| ファイアウォール | firewalld が動いているときだけ（80・443 は service、それ以外は port） | ufw が有効（`ufw status` が `active`）のときだけ `ufw allow <ポート>/tcp`。無効なら何もしません |
+| SELinux / AppArmor | SELinux（`getenforce` があるときだけ確認。compose の `:Z` はそのまま） | AppArmor（`aa-status` があれば `collect_logs.sh` に状態と拒否の記録を出します。compose の `:Z` は SELinux が無くても無視されるのでそのまま） |
+| 時刻同期 | chronyd | systemd-timesyncd または chrony（`timedatectl` の同期状態で判定） |
+| 再起動後の自動起動 | `podman-restart.service` を有効にする（失敗したら止まる） | 同じ。ただし Ubuntu 24.04 のユニットは `restart-policy=always` のコンテナしか起動しないため、`unless-stopped` も起動するドロップインを置きます（下記）。ユニットが無い・有効にできないときは**警告して続けます** |
+| gpg の案内（バックアップの暗号化） | `gnupg2` | `gnupg` |
+| 定期バックアップ（systemd タイマー） | `/etc/systemd/system/netconfig-backup.{service,timer}` | 同じ（パスの違いはありません） |
+
+### Ubuntu 24.04 LTS で使う（実機未確認）
+
+自動セットアップと同じ `bash scripts/setup.sh` で導入・更新できるように作っていますが、**実機での導入は確認していません**。前提と、初めて試すときの確認項目です。
+
+- **Podman は 4.9 系、podman-compose は 1.0 系**（Ubuntu 24.04 のパッケージ）です。RHEL 10 の Podman 5 系・EPEL の podman-compose より古く、`podman-compose up -d --force-recreate`・`down -v`・`build` の動きや、コンテナのラベル（`com.docker.compose.service`）の付き方に差が出る可能性があります。うまく動かないときは `collect_logs.sh` の出力を添えて報告してください
+- **ufw**: 有効なときだけ `setup.sh`・`import_cert.sh` が `ufw allow <ポート>/tcp` を実行します。ufw が無効な環境では何もしません（Ubuntu の既定は無効です）。なお `check_env.sh` の ufw の確認は `80/tcp ALLOW` のような個別の規則だけを見るため、複数ポートの規則（`80,443/tcp`）やアプリのプロファイル（`Nginx Full` など）で許可していると「未許可」の警告になることがあります（警告だけで、導入は止まりません。`sudo ufw status` で実際の許可を確かめてください）。有効にするときは、先に SSH を許可（`sudo ufw allow OpenSSH`）してから有効化してください
+- **AppArmor**: Podman のコンテナは標準のプロファイル（`containers-default`）で動きます。コンテナが不許可で止まったときは `sudo journalctl -k | grep -i apparmor` を見てください（`collect_logs.sh` は `system/apparmor.txt`・`system/apparmor-denials.txt` に出します）。SELinux の `:Z` は Podman が無視するので、compose の書き換えは要りません
+- **rootless は使いません**: 本番の構成（`docker-compose.prod.yml`）は 80・443 番を使うため、`setup.sh` は `sudo podman` で動かします（RHEL と同じ）
+- **podman-restart.service**: Ubuntu 24.04 の podman 4.9.3 にはユニットが入っていますが、`ExecStart` が `podman start --all --filter restart-policy=always` だけで、`docker-compose.prod.yml` の `restart: unless-stopped` のコンテナは再起動後に起動しません。`setup.sh` は、ユニットの `ExecStart` に `unless-stopped` が無ければ、ドロップイン `/etc/systemd/system/podman-restart.service.d/10-netconfig-manager.conf` を置いて `daemon-reload` してから有効にします（同じ内容なら書き直しません。失敗は警告して続けます）。手で行う場合は次のとおりです（`/usr/bin/podman` は `systemctl cat podman-restart.service` の `ExecStart` のパスに合わせます）
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/podman start --all --filter restart-policy=always --filter restart-policy=unless-stopped
+```
+
+  ユニットそのものが無い版では、次の内容を `/etc/systemd/system/podman-restart.service` に作ってから `sudo systemctl daemon-reload && sudo systemctl enable --now podman-restart.service` を実行します
+
+```ini
+[Unit]
+Description=Start Podman containers that have restart-policy=always or unless-stopped
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/podman start --all --filter restart-policy=always --filter restart-policy=unless-stopped
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- 手動で導入する場合（`setup.sh` を使わない場合）は、上の「前提条件」の apt-get のあと、`.env` を作って `sudo podman-compose -f docker-compose.prod.yml up -d --build` を実行します
+
+**実機で確認する項目**（Ubuntu でしか確かめられないもの）
+
+1. `bash scripts/check_env.sh` が `OS: Ubuntu 24.04...` を `[ OK ]` にし、NG が無いこと
+2. 初回の `bash scripts/setup.sh`: apt-get で git・podman・podman-compose・netavark・aardvark-dns・uidmap が入り、ビルド・起動・起動確認・動作確認（selfcheck）まで通ること
+3. コンテナ同士が名前で通信できること（`/api/health` が ok・worker が DB・Redis に届く。`sudo podman info --format '{{.Host.NetworkBackend}}'` が `netavark`）
+4. 再起動後に**全コンテナ**（db・redis・backend・worker・beat・frontend）が起動すること（`podman-restart.service`。`unless-stopped` のコンテナはドロップインが無いと起動しないため要注意。`sudo systemctl cat podman-restart.service` にドロップインが出ること）
+5. ufw を有効にした状態で、`setup.sh` が 80・443 を開けること（`sudo ufw status`）
+6. `netconfig-backup.timer` が登録され、`sudo bash scripts/backup.sh` が成功すること（暗号化を使うなら `gnupg` の導入も）
+7. 2 回目の `setup.sh`（更新）が、`.env` を変えずに最後まで通ること
+8. `bash scripts/import_cert.sh` と `bash scripts/collect_logs.sh` が最後まで通ること
 
 ### 起動（本番）
 
@@ -142,7 +218,7 @@ bash /opt/netconfig-manager/scripts/import_cert.sh
   - 秘密鍵: 証明書と同じ名前の `.key`
   - ルート CA: `/etc/step-ca/certs/root_ca.crt`（無ければ `~/.step/certs/root_ca.crt`。`-` で指定なし）
 - 取り込む前に、証明書と秘密鍵の組み合わせ・有効期限（期限切れは中止、30日以内は警告）・SAN にサーバーの IP が含まれるか・ルート CA で検証できるかを確認します
-- `certs/`（Git 管理外）に `server.crt`・`server.key`（600）・`ca.crt` として配置し、`.env` の `HTTPS_PORT` と firewalld を設定して nginx を再起動します。差し替え前の証明書は `/root/netconfig-manager-backup/certs-<日時>/` に退避します
+- `certs/`（Git 管理外）に `server.crt`・`server.key`（600）・`ca.crt` として配置し、`.env` の `HTTPS_PORT` とファイアウォール（firewalld。Ubuntu は ufw が有効なときだけ）を設定して nginx を再起動します。差し替え前の証明書は `/root/netconfig-manager-backup/certs-<日時>/` に退避します
 - HTTPS 対応前の構成で動いている場合は、コンテナを作り直します（`setup.sh` と同じ。DB・コンフィグ履歴は保持）
 - 証明書を再発行したときも、同じスクリプトをもう一度実行してください
 - 証明書が読み込めない状態で起動した場合は、画面に入れなくならないよう HTTP で起動します（nginx のログに理由を出力）
@@ -198,7 +274,7 @@ sudo mkdir -p /mnt/nas-backup && sudo chmod 700 /mnt/nas-backup && sudo mount /m
 # 例2: rsync（SSH 鍵は root の ~/.ssh に用意し、一度手動で接続して known_hosts に登録しておく）
 #   .env: BACKUP_POST_COMMAND=rsync -t "$BACKUP_FILE" backup@nas.example.local:/volume1/netconfig/
 
-# 暗号化（パスフレーズのファイルを作り、.env に書く。gpg は AlmaLinux の gnupg2 パッケージ）
+# 暗号化（パスフレーズのファイルを作り、.env に書く。gpg は AlmaLinux では gnupg2、Ubuntu では gnupg パッケージ）
 sudo sh -c 'umask 077; openssl rand -base64 32 > /root/netconfig-backup.pass'
 #   .env: BACKUP_ENCRYPT_PASSPHRASE_FILE=/root/netconfig-backup.pass
 ```
@@ -732,7 +808,7 @@ bash /opt/netconfig-manager/scripts/collect_logs.sh
 | `--out /tmp` | 保存先（既定 `/var/tmp/netconfig-logs`） |
 | `--keep 5` | 保存先に残す数（既定 5。古いものから消します） |
 
-- **集めるもの**: アプリの版と Git の状態、OS・Podman の版、ディスク・メモリの空き、コンテナの一覧と状態（終了コード・再起動の回数・メモリ不足で止まったか）、コンテナごとのログ、設定（`.env`。秘密の値は伏せます）、起動確認（`/api/health`・自己診断）、DB のマイグレーションの版、アプリが記録した直近の警告・エラー、systemd の状態とログ、ファイアウォール、待ち受けポート、SELinux の拒否、メモリ不足（OOM）の記録、証明書の期限、最後のバックアップの結果
+- **集めるもの**: アプリの版と Git の状態、OS・Podman の版、ディスク・メモリの空き、コンテナの一覧と状態（終了コード・再起動の回数・メモリ不足で止まったか）、コンテナごとのログ、設定（`.env`。秘密の値は伏せます）、起動確認（`/api/health`・自己診断）、DB のマイグレーションの版、アプリが記録した直近の警告・エラー、systemd の状態とログ、ファイアウォール、待ち受けポート、SELinux の拒否（Ubuntu は AppArmor の状態と拒否）、メモリ不足（OOM）の記録、証明書の期限、最後のバックアップの結果
 - **集めないもの**: 機器のコンフィグ、DB の中身、ターミナルの記録、`.env` の秘密の値、証明書の秘密鍵
 - **大きさを抑える工夫**: ログは期間（既定 3 日）と行数（コンテナごとに 5000 行）で絞り、テキストを gzip（最高の圧縮率）でまとめます。通常は数百 KB〜数 MB です。50 MB を超えたときは、絞り込みを案内します
 - **伏せるもの**: `.env` のパスワード・暗号化キー・トークン・Webhook の URL・接続先 URL、ログの中の Webhook の URL・URL に埋め込んだパスワード・`password=` などの値・トークンらしい文字列
@@ -990,7 +1066,7 @@ PYTHON=python3 npm run e2e         # backend の依存パッケージが入っ�
 
 GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
 
-- backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff と pytest（Python 3.12）
+- backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff、導入・運用スクリプトの構文検査（`bash -n scripts/*.sh scripts/lib/*.sh`）、pytest（Python 3.12。`tests/test_os_scripts.py` が、偽の os-release と偽のコマンドで AlmaLinux・Ubuntu の分岐を確かめます）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 22）
 - nginx: `frontend/Dockerfile` と同じ nginx のイメージか、脆弱性の修正版（`NGINX_MIN`、今は 1.30.7）以上かを確かめ、設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
@@ -1024,6 +1100,8 @@ bash scripts/lock_deps.sh --check
 ---
 
 ## RHEL 10 本番設定
+
+（Ubuntu 24.04 LTS の違いは、上の「Ubuntu 24.04 LTS で使う」を参照）
 
 ### SELinux 対応
 
@@ -1065,6 +1143,7 @@ netconfig-manager/
 ├── .env.example
 ├── certs/                       # HTTPS の証明書（import_cert.sh で配置。Git 管理外）
 ├── scripts/
+│   ├── lib/os.sh                # OS の判定と、OS ごとに違う操作（パッケージ・ファイアウォールなど。AlmaLinux / Ubuntu）
 │   ├── setup.sh                 # 自動セットアップ・更新
 │   ├── check_env.sh             # 導入前チェック
 │   ├── import_cert.sh           # HTTPS 化（証明書の取り込み）
@@ -1240,5 +1319,6 @@ netconfig-manager/
 - **モニタリング（試験導入）の本採用**: 既定を有効に切り替え。使用率のしきい値超えの通知、構成図の接続線への使用率の表示、FortiGate の VDOM・PAN-OS の複数 vsys 対応、他機種（Cisco ASA など）のヒット数
 - **コンプライアンスの検査の非同期化**: ルールの作成・更新の直後の全機器の検査（照合）が API のイベントループの上で動くため、機器が多いと応答が遅れる。スレッドか worker へ移す
 - **CSV 一括登録の拡張**: 既存の機器の CSV による更新（上書き）、SSH 鍵での一括登録、未登録のグループの自動作成、タブ区切り（TSV）の貼り付け
+- **Ubuntu 24.04 LTS の実機での確認と対応 OS の拡張**: 実機での導入・更新の確認（「Ubuntu 24.04 LTS で使う」の確認項目）、Podman・podman-compose の版の差で出た問題の吸収、Debian 12 の確認、`setup.sh` 全体を偽のコマンドで通すテスト（今は OS ごとの関数だけをテスト）、ユニットそのものが無い環境への `podman-restart.service` の自動配置、RHEL 系の `podman-restart.service` が `unless-stopped` のコンテナを起動するかの本番での確認、Ubuntu の `podman-compose` を新しい版へ上げる手順
 - **コンフィグ検索の拡張**: 世代の多い環境向けに過去の世代の検索を Celery のタスクにして結果を後で受け取る形、登録済みの機器がある機種だけを選択肢にする
 - **CSP の強化**: 違反をブラウザから受け取って記録する仕組み（`report-to`）、`style-src 'unsafe-inline'` の撤廃（ターミナルの xterm.js などがノンスに対応したら）、HSTS の期間の延長（証明書の更新が安定したら）

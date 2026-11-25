@@ -43,6 +43,14 @@ jobs:
           bash ../scripts/lock_deps.sh --check
       - name: ruff（リンター）
         run: ruff check --output-format=github .
+      - name: 導入・運用スクリプトの構文検査（bash -n）
+        # AlmaLinux / Ubuntu の両方で使うスクリプト。OS ごとの動きのテストは pytest の tests/test_os_scripts.py
+        working-directory: .
+        run: |
+          for f in scripts/*.sh scripts/lib/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
       - name: pytest
         # コンフィグ履歴のテストで git のコミットを作るため、ユーザー名を設定しておく
         run: |

@@ -31,6 +31,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# OS ごとの案内文（パッケージ名など）。lib が無くても動く
+# shellcheck source=lib/os.sh
+[ -f "$SCRIPT_DIR/lib/os.sh" ] && . "$SCRIPT_DIR/lib/os.sh"
+gpg_hint() { if declare -F ncm_install_hint >/dev/null; then ncm_install_hint gpg; else echo "dnf install gnupg2"; fi; }
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$INSTALL_DIR")}"
 CONTAINER_CMD="${CONTAINER_CMD:-podman}"   # 動作確認用に docker も指定できる
 
@@ -148,7 +152,7 @@ DB=$(container_of db)
 STAGE="暗号化の準備"
 if [ "$ENCRYPTED" = "yes" ]; then
   # 鍵が読めないまま暗号化しないで作る、ということはしない（失敗として伝え、設定を直してもらう）
-  command -v gpg >/dev/null || { log "[ERROR] 暗号化に gpg が必要です（dnf install gnupg2）"; exit 1; }
+  command -v gpg >/dev/null || { log "[ERROR] 暗号化に gpg が必要です（$(gpg_hint)）"; exit 1; }
   if [ ! -s "$BACKUP_ENCRYPT_PASSPHRASE_FILE" ]; then
     log "[ERROR] BACKUP_ENCRYPT_PASSPHRASE_FILE（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が無いか空です"
     report failed "暗号化のパスフレーズのファイル（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が無いか空です"

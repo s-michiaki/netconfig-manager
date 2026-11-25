@@ -23,6 +23,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# OS ごとの案内文（パッケージ名など）。lib が無くても動く
+# shellcheck source=lib/os.sh
+[ -f "$SCRIPT_DIR/lib/os.sh" ] && . "$SCRIPT_DIR/lib/os.sh"
+gpg_hint() { if declare -F ncm_install_hint >/dev/null; then ncm_install_hint gpg; else echo "dnf install gnupg2"; fi; }
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$INSTALL_DIR")}"
 CONTAINER_CMD="${CONTAINER_CMD:-podman}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
@@ -51,7 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 if [[ "$FILE" == *.gpg ]]; then
-  command -v gpg >/dev/null || { echo "暗号化したバックアップの復号に gpg が必要です（dnf install gnupg2）"; exit 1; }
+  command -v gpg >/dev/null || { echo "暗号化したバックアップの復号に gpg が必要です（$(gpg_hint)）"; exit 1; }
   PASS_FILE="${BACKUP_ENCRYPT_PASSPHRASE_FILE:-$(env_value "$INSTALL_DIR/.env" BACKUP_ENCRYPT_PASSPHRASE_FILE)}"
   if [ -z "$PASS_FILE" ] || [ ! -s "$PASS_FILE" ]; then
     [ -t 0 ] || { echo "パスフレーズのファイルが見つかりません（BACKUP_ENCRYPT_PASSPHRASE_FILE を指定してください）"; exit 1; }
