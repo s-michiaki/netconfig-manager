@@ -246,6 +246,324 @@ def test_regex_timeout_does_not_block_api(ctx, monkeypatch):
     assert out["r"]["status"] == "error", out
 
 
+def test_recheck_does_not_block_api(ctx, monkeypatch):
+    """全機器の再検査（POST /run）の照合は別スレッドで行い、その間もほかのリクエストに応答する"""
+    import asyncio
+    import threading
+    import time
+
+    import app.services.compliance as svc
+    c, admin = ctx["c"], ctx["admin"]
+    c.post("/api/compliance/rules", json={"name": "slow-run", "match_type": "contains", "expect": "present",
+                                          "pattern": "hostname"}, headers=admin)
+    started, outside_loop = threading.Event(), []
+    orig = svc.evaluate
+
+    def slow(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            outside_loop.append(False)  # イベントループのスレッドで動いている
+        except RuntimeError:
+            outside_loop.append(True)
+        started.set()
+        time.sleep(1.5)  # 照合に時間がかかる場合の代わり（ループ上で動くなら health も止まる）
+        return orig(*a, **kw)
+    monkeypatch.setattr(svc, "evaluate", slow)
+    out = {}
+    th = threading.Thread(target=lambda: out.setdefault("r", c.post("/api/compliance/run", headers=admin)))
+    th.start()
+    assert started.wait(10)
+    t0 = time.monotonic()
+    assert c.get("/api/health").status_code == 200
+    assert time.monotonic() - t0 < 1.0  # 照合の最中でも応答する
+    th.join(30)
+    assert "r" in out and out["r"].status_code == 200, out
+    assert out["r"].json()["checked"] >= 1
+    assert outside_loop and all(outside_loop)  # 照合はループのスレッドの外で動く
+
+
+def test_recheck_concurrency_limit(monkeypatch):
+    """同時に走る照合の数は専用のスレッドの数（COMPLIANCE_CHECK_CONCURRENCY）までで、超えた分は待つ"""
+    import asyncio
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import app.services.compliance as svc
+    monkeypatch.setattr(svc, "_pool", ThreadPoolExecutor(max_workers=2, thread_name_prefix="compliance-test"))
+    lock, state, names = threading.Lock(), {"now": 0, "max": 0}, set()
+
+    def fake(text, jobs):
+        with lock:
+            state["now"] += 1
+            state["max"] = max(state["max"], state["now"])
+            names.add(threading.current_thread().name)
+        time.sleep(0.1)
+        with lock:
+            state["now"] -= 1
+        return [svc.Evaluation("pass") for _ in jobs]
+    monkeypatch.setattr(svc, "_evaluate_jobs", fake)
+
+    async def main():
+        spec = svc.RuleSpec("contains", "present", "x")
+        return await asyncio.gather(*(svc._evaluate_in_thread("x", [(spec, [])]) for _ in range(6)))
+    res = asyncio.run(main())
+    assert len(res) == 6 and all(r[0].status == "pass" for r in res)
+    assert state["max"] == 2
+    assert all(n.startswith("compliance-test") for n in names)
+
+
+def test_concurrent_run_checks_keeps_results_unique(ctx):
+    """同じ機器 × ルールの再検査が同時に走っても、例外にならず、結果は 1 件ずつになる"""
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    import app.services.compliance as svc
+    from app.core.database import AsyncSessionLocal
+    from app.models.compliance import ComplianceResult
+    c, admin, devs = ctx["c"], ctx["admin"], ctx["devs"]
+    rule = c.post("/api/compliance/rules", json={"name": f"conc-{uuid.uuid4().hex[:4]}", "match_type": "contains",
+                                                 "expect": "present", "pattern": "hostname"}, headers=admin).json()
+    dev_id = devs["cmp-r1"]["id"]
+
+    async def one():
+        async with AsyncSessionLocal() as db:
+            r = await svc.run_checks(db, device_ids=[dev_id], rule_ids=[rule["id"]])
+            await db.commit()
+            return r
+
+    async def main():
+        res = await asyncio.gather(*(one() for _ in range(4)))
+        async with AsyncSessionLocal() as db:
+            n = (await db.execute(select(func.count()).select_from(ComplianceResult).where(
+                ComplianceResult.device_id == dev_id, ComplianceResult.rule_id == rule["id"]))).scalar_one()
+        return res, n
+    res, n = asyncio.run(main())
+    assert all(r["checked"] == 1 for r in res)
+    assert n == 1
+
+
+def test_run_checks_failure_keeps_previous_results(ctx, monkeypatch):
+    """照合の途中で例外になっても、以前の結果は消えずに残る"""
+    import asyncio
+
+    from sqlalchemy import select
+
+    import app.services.compliance as svc
+    from app.core.database import AsyncSessionLocal
+    from app.models.compliance import ComplianceResult
+    c, admin, devs = ctx["c"], ctx["admin"], ctx["devs"]
+    rule = c.post("/api/compliance/rules", json={"name": f"keep-{uuid.uuid4().hex[:4]}", "match_type": "contains",
+                                                 "expect": "present", "pattern": "hostname"}, headers=admin).json()
+    dev_id = devs["cmp-r1"]["id"]
+
+    async def rows():
+        async with AsyncSessionLocal() as db:
+            return [(x.id, x.status) for x in (await db.execute(select(ComplianceResult).where(
+                ComplianceResult.device_id == dev_id, ComplianceResult.rule_id == rule["id"]))).scalars()]
+    before = asyncio.run(rows())
+    assert len(before) == 1
+
+    def boom(*a, **kw):
+        raise RuntimeError("照合の失敗")
+    monkeypatch.setattr(svc, "evaluate", boom)
+
+    async def fail():
+        async with AsyncSessionLocal() as db:
+            try:
+                await svc.run_checks(db, device_ids=[dev_id], rule_ids=[rule["id"]])
+                await db.commit()
+            except RuntimeError:
+                await db.rollback()
+                return True
+        return False
+    assert asyncio.run(fail()) is True
+    assert asyncio.run(rows()) == before
+
+
+@pytest.fixture
+def mid_setup(ctx, monkeypatch):
+    """照合中に変更を挟むテストの準備: 新しい機器 2 台とルール 1 件（作成時の検査で結果が 1 件ずつ付く）
+
+    テストの後で機器・ルールを消す（DB はテストのファイル間で共有されるため。残すと、後のテストの
+    「全機器を再検査」で、ほかのルールで初めて検査されたこれらの機器が「新しい違反」として数えられる）
+    """
+    c, admin = ctx["c"], ctx["admin"]
+    made: list[tuple[list[dict], dict]] = []
+
+    def setup():
+        tag = uuid.uuid4().hex[:4]
+        devs = []
+        for i in range(2):
+            d = c.post("/api/devices/", json=dict(name=f"cmp-mid{i}-{tag}", hostname="10.6.0.5", platform="cisco_ios",
+                                                  username="u", password="p"), headers=admin).json()
+            cs.save_config(d["id"], IOS, "test")
+            devs.append(d)
+        rule = {"name": f"mid-{tag}", "match_type": "contains", "expect": "present", "pattern": "hostname",
+                "platforms": ["cisco_ios"]}
+        created = c.post("/api/compliance/rules", json=rule, headers=admin).json()
+        made.append((devs, created))
+        return devs, rule, created
+    yield setup
+    monkeypatch.undo()  # テストで差し替えたもの（方言の判定・照合のフック）を戻してから消す
+    for devs, created in made:  # テストの中で消したものは 404 になるだけ
+        c.delete(f"/api/compliance/rules/{created['id']}", headers=admin)
+        for d in devs:
+            c.delete(f"/api/devices/{d['id']}", headers=admin)
+
+
+def _run_with_mid_change(devs, rule_id, change, monkeypatch):
+    """照合を始めたあと、書き込みの前に change() を実行して run_checks を走らせる。(戻り値, 結果の (機器, ルール) の一覧)"""
+    import asyncio
+
+    from sqlalchemy import select
+
+    import app.services.compliance as svc
+    from app.core.database import AsyncSessionLocal
+    from app.models.compliance import ComplianceResult
+    orig = svc._evaluate_in_thread
+    done = []
+
+    async def hooked(text, jobs):
+        res = await orig(text, jobs)
+        if not done:
+            done.append(1)
+            change()  # TestClient は別スレッドのループで動くので、ここから同期的に呼んでよい
+        return res
+    monkeypatch.setattr(svc, "_evaluate_in_thread", hooked)
+
+    async def main():
+        async with AsyncSessionLocal() as db:
+            r = await svc.run_checks(db, device_ids=[d["id"] for d in devs], rule_ids=[rule_id])
+            await db.commit()
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(select(ComplianceResult.device_id, ComplianceResult.rule_id).where(
+                ComplianceResult.rule_id == rule_id))).all()
+        mine = {d["id"] for d in devs}  # 同じプラットフォームのほかの機器の結果は数えない
+        return r, {(a, b) for a, b in rows if a in mine}
+    return asyncio.run(main())
+
+
+def test_run_checks_skips_device_deleted_during_check(ctx, mid_setup, monkeypatch):
+    """照合中に機器が消されても例外にならず、その機器の結果は書かれない"""
+    c, admin = ctx["c"], ctx["admin"]
+    devs, _, rule = mid_setup()
+    r, rows = _run_with_mid_change(
+        devs, rule["id"], lambda: c.delete(f"/api/devices/{devs[0]['id']}", headers=admin), monkeypatch)
+    assert r["checked"] == 1
+    assert rows == {(devs[1]["id"], rule["id"])}
+
+
+def test_run_checks_skips_rule_deleted_during_check(ctx, mid_setup, monkeypatch):
+    """照合中にルールが消されても例外にならず、結果は書かれない"""
+    c, admin = ctx["c"], ctx["admin"]
+    devs, _, rule = mid_setup()
+    r, rows = _run_with_mid_change(
+        devs, rule["id"], lambda: c.delete(f"/api/compliance/rules/{rule['id']}", headers=admin), monkeypatch)
+    assert r["checked"] == 0 and r["new_violations"] == 0
+    assert rows == set()
+
+
+def test_run_checks_skips_rule_updated_during_check(ctx, mid_setup, monkeypatch):
+    """照合中にルールが更新されたら、その再検査はそのルールの結果を書かない（更新した側の再検査が書く）"""
+    c, admin = ctx["c"], ctx["admin"]
+    devs, body, rule = mid_setup()
+    r, rows = _run_with_mid_change(
+        devs, rule["id"],
+        lambda: c.put(f"/api/compliance/rules/{rule['id']}", json={**body, "pattern": "no-such-line"}, headers=admin),
+        monkeypatch)
+    assert r["checked"] == 0
+    # 更新した側の再検査の結果（新しいパターンでの結果）が残っている
+    assert rows == {(d["id"], rule["id"]) for d in devs}
+    got = c.get("/api/compliance/results", params={"device_id": devs[0]["id"]}, headers=admin).json()
+    assert [x["status"] for x in got if x["rule_id"] == rule["id"]] == ["fail"]
+
+
+def test_result_write_takes_advisory_lock_first(ctx, mid_setup, monkeypatch):
+    """PostgreSQL のとき、結果の書き換え（DELETE）の前に pg_advisory_xact_lock を取る（方言を差し替えて SQL を記録する）"""
+    import asyncio
+
+    import app.services.compliance as svc
+    from app.core.database import AsyncSessionLocal
+    devs, _, rule = mid_setup()
+    monkeypatch.setattr(svc, "_is_postgres", lambda db: True)
+    log: list[str] = []
+
+    async def main():
+        async with AsyncSessionLocal() as db:
+            orig = db.execute
+
+            async def rec(stmt, *a, **kw):
+                sql = str(stmt)
+                log.append(sql)
+                if "pg_advisory_xact_lock" in sql:
+                    return None  # SQLite には無い関数なので実行はしない
+                return await orig(stmt, *a, **kw)
+            db.execute = rec
+            await svc.run_checks(db, device_ids=[devs[0]["id"]], rule_ids=[rule["id"]])
+            await db.commit()
+    asyncio.run(main())
+    lock_at = next(i for i, q in enumerate(log) if "pg_advisory_xact_lock" in q)
+    delete_at = next(i for i, q in enumerate(log) if q.lstrip().upper().startswith("DELETE"))
+    assert lock_at < delete_at
+
+
+def _record_sql_during(monkeypatch, call) -> list[str]:
+    """PostgreSQL に見せかけて call() を実行し、その間に AsyncSession.execute に渡った SQL を記録して返す"""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    import app.services.compliance as svc
+    monkeypatch.setattr(svc, "_is_postgres", lambda db: True)
+    orig = AsyncSession.execute
+    log: list[str] = []
+
+    async def rec(self, stmt, *a, **kw):
+        sql = str(stmt)
+        log.append(sql)
+        if "pg_advisory_xact_lock" in sql:
+            return None  # SQLite には無い関数なので実行はしない
+        return await orig(self, stmt, *a, **kw)
+    monkeypatch.setattr(AsyncSession, "execute", rec)
+    try:
+        call()
+    finally:
+        monkeypatch.undo()
+    return log
+
+
+def _assert_lock_before_result_delete(log: list[str]) -> None:
+    lock_at = next(i for i, q in enumerate(log) if "pg_advisory_xact_lock" in q)
+    delete_at = next(i for i, q in enumerate(log)
+                     if q.lstrip().upper().startswith("DELETE") and "compliance_results" in q)
+    # 削除の中のほかの DELETE（例外・モニタリングなど）もすべてロックのあと
+    first_delete = next(i for i, q in enumerate(log) if q.lstrip().upper().startswith("DELETE"))
+    assert lock_at < delete_at and lock_at < first_delete
+
+
+def test_delete_device_takes_advisory_lock_first(ctx, mid_setup, monkeypatch):
+    """機器の削除は、再検査と同じアドバイザリロックを結果の DELETE より前に取る（ロックの順序を揃えてデッドロックを避ける）"""
+    c, admin = ctx["c"], ctx["admin"]
+    devs, _, _ = mid_setup()
+    res = {}
+    log = _record_sql_during(monkeypatch, lambda: res.setdefault(
+        "r", c.delete(f"/api/devices/{devs[0]['id']}", headers=admin)))
+    assert res["r"].status_code == 204
+    _assert_lock_before_result_delete(log)
+    assert c.get(f"/api/devices/{devs[0]['id']}", headers=admin).status_code == 404
+
+
+def test_delete_rule_takes_advisory_lock_first(ctx, mid_setup, monkeypatch):
+    """ルールの削除も、再検査と同じアドバイザリロックを結果の DELETE より前に取る"""
+    c, admin = ctx["c"], ctx["admin"]
+    _, _, rule = mid_setup()
+    res = {}
+    log = _record_sql_during(monkeypatch, lambda: res.setdefault(
+        "r", c.delete(f"/api/compliance/rules/{rule['id']}", headers=admin)))
+    assert res["r"].status_code == 204
+    _assert_lock_before_result_delete(log)
+
+
 # ---------------------------------------------------------------- 重い正規表現（読み込みの重さを別のプロセスで測る）
 # 重いものはテストのプロセスでは compile せず、子プロセスの中で止まることだけを確かめる
 HEAVY = regex_cases.HEAVY

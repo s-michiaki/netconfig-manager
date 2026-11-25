@@ -29,6 +29,7 @@ from app.services.compliance import (
     evaluate,
     latest_config,
     load_platforms,
+    lock_result_writes,
     pattern_allowed,
     run_checks,
     spec_of,
@@ -273,6 +274,8 @@ async def delete_rule(
     audit: Audit = Depends(get_audit),
 ):
     r = await _get_rule(db, rule_id)
+    # 再検査（run_checks）と同じロックを、ほかの書き込みより前に取る（ロックの順序を揃えてデッドロックを避ける）
+    await lock_result_writes(db)
     await db.execute(delete(ComplianceResult).where(ComplianceResult.rule_id == r.id))
     await db.execute(delete(ComplianceException).where(ComplianceException.rule_id == r.id))
     await db.delete(r)

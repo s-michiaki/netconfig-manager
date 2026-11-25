@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     API_TOKEN_MAX_DAYS: int = Field(default=365, ge=1, le=365)  # 発行するときに選べる期限の上限（日）
     # コンプライアンスの正規表現の照合にかけられる時間（1回の評価＝ルール × 機器 あたりの合計秒数。ReDoS 対策）
     COMPLIANCE_REGEX_TIMEOUT: float = 2.0
+    COMPLIANCE_CHECK_CONCURRENCY: int = Field(default=2, ge=1, le=16)  # 同時に照合するスレッドの数（プロセスごと）
     # 収集時に無視する行（services/ignore_rules.py）の正規表現にかけられる時間（秒）。
     # 1 ルールあたり（全行の合計）と全ルールの合計。超えたらその回は保存せず、収集の失敗（再試行あり）にする
     IGNORE_RULE_TIMEOUT: float = Field(default=1.0, gt=0, le=30)

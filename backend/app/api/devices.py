@@ -45,6 +45,7 @@ from app.models.device import (
 )
 from app.services import collect_state, device_import, inventory, login_limit, profile_access, startup_check
 from app.services.audit import Audit, changed_fields, get_audit
+from app.services.compliance import lock_result_writes
 from app.services.config_service import PLATFORMS
 from app.services.connection import effective_credentials
 from app.services.notify import notify_profile_owner
@@ -586,6 +587,8 @@ async def update_device(
 async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
     """デバイスを削除する（Gitの履歴ディレクトリは監査用に残す）"""
     device = await _get_or_404(db, device_id)
+    # 再検査（run_checks）と同じロックを、ほかの書き込みより前に取る（ロックの順序を揃えてデッドロック・外部キー違反を避ける）
+    await lock_result_writes(db)
     await db.execute(delete(ComplianceResult).where(ComplianceResult.device_id == device.id))
     await db.execute(delete(ComplianceException).where(ComplianceException.device_id == device.id))
     await delete_device_monitoring(db, device.id)

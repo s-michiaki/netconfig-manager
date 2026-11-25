@@ -25,7 +25,8 @@
 - 標準の re は照合中に GIL を手放さず、打ち切る手段も無いため、API・worker 全体が止まる
 - そこで regex パッケージで照合し、1回の評価（ルール × 機器）あたりの合計時間を
   COMPLIANCE_REGEX_TIMEOUT 秒に制限する。超えたら評価を「エラー」にして打ち切る
-  （concurrent=True で照合中も GIL を手放すので、ほかのリクエストは止まらない）
+  （concurrent=True で照合中も GIL を手放す。さらに run_checks は照合を専用のスレッドで行い、同時に走る数を
+  COMPLIANCE_CHECK_CONCURRENCY に制限するので、再検査の最中もイベントループは止まらない）
 - 照合の時間切れでは compile を打ち切れないため、compile の前に別のプロセスで実際に読み込んで重さを測る
   （app.core.safe_regex。重いものは保存させず、DB に入っているものは検査の実行時にそのルールだけ「エラー」として扱う）
 """
@@ -34,11 +35,13 @@ import json
 import logging
 import time
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import git
 import regex
 from sqlalchemy import delete, select
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -339,7 +342,8 @@ async def recheck_expired_exceptions(db: AsyncSession) -> int:
     for rule_id, device_ids in targets.items():
         await run_checks(db, device_ids=list(device_ids) if device_ids is not None else None,
                          rule_ids=[rule_id], actor=SYSTEM_ACTOR)
-    await db.commit()
+        # ルールごとに commit する（結果の書き換えのロックを持ったまま、次のルールの照合をしないように）
+        await db.commit()
     return len(expired)
 
 
@@ -366,6 +370,43 @@ def latest_config(device_id: str) -> tuple[str, str | None] | None:
 
 # ---------------------------------------------------------------- 検査の実行と保存
 
+# 照合専用のスレッド。数が同時に照合できる上限になる（既定のスレッドプールは Git・ターミナルなどと取り合うので使わない）。
+# スレッドは使うときに作られる。ループには結び付かないので、worker のようにタスクごとに asyncio.run していても使える
+_pool = ThreadPoolExecutor(max_workers=settings.COMPLIANCE_CHECK_CONCURRENCY, thread_name_prefix="compliance-check")
+
+# 結果の書き換え（DELETE + INSERT）を直列にする PostgreSQL のアドバイザリロックのキー（固定値 1 つ）
+RESULT_WRITE_LOCK_KEY = 0x636F6D70  # "comp"
+
+
+def _evaluate_jobs(text: str, jobs: list[tuple[RuleSpec, list[ExceptionSpec]]]) -> list[Evaluation]:
+    """1台分のコンフィグを複数のルールで照合する（スレッドで動く。DB・ORM には触れない）"""
+    return [evaluate_with_exceptions(s, text, excs) if excs else evaluate(s, text) for s, excs in jobs]
+
+
+async def _evaluate_in_thread(text: str, jobs: list[tuple[RuleSpec, list[ExceptionSpec]]]) -> list[Evaluation]:
+    """照合をイベントループの外（専用のスレッド）で行う。同時に走る数は COMPLIANCE_CHECK_CONCURRENCY まで（超えた分は待つ）"""
+    return await asyncio.get_running_loop().run_in_executor(_pool, _evaluate_jobs, text, jobs)
+
+
+async def lock_result_writes(db: AsyncSession) -> None:
+    """結果の書き換えを直列にする（PostgreSQL のみ。トランザクションの終わりで自動的に外れる）
+
+    同じ（機器, ルール）の再検査が同時に走ると、READ COMMITTED では互いの DELETE が見えず、
+    2 本目の INSERT が一意制約（uq_compliance_results_device_rule）に当たるため。
+    直列にしても、照合した時点より新しい結果を古い結果で上書きすることはありうるが、次の再検査で直るので許容する。
+    機器・ルールの削除（結果を消してから機器・ルールの行を消す）も、ほかの書き込みより前にこのロックを取る。
+    run_checks は「機器・ルールの行に KEY SHARE → 結果を DELETE / INSERT」の順なので、
+    同じロックで直列にしないと、ロックの順序が逆になってデッドロックや外部キー違反になるため。
+    ロックは commit / rollback まで外れないので、取ったあとに外部への通信や重い処理をしないこと。
+    SQLite（テスト）は書き込みがもともと直列なので何もしない
+    """
+    if _is_postgres(db):
+        await db.execute(sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": RESULT_WRITE_LOCK_KEY})
+
+
+def _is_postgres(db: AsyncSession) -> bool:
+    return db.get_bind().dialect.name == "postgresql"
+
 
 async def run_checks(
     db: AsyncSession,
@@ -378,6 +419,7 @@ async def run_checks(
     """指定した機器（省略時は全機器）× ルール（省略時は全ルール）を検査し、結果を置き換える
 
     無効なルール・対象外のプラットフォームの結果は削除する。commit は呼び出し側で行う。
+    照合を先に全部済ませてから、結果の書き換えを最後に短く行う（途中で例外・キャンセルになっても以前の結果が残る）。
     違反の発生（pass → fail、または初めての fail）と解消（fail → pass）はアクティビティログに記録する
     """
     dq = select(Device)
@@ -393,6 +435,43 @@ async def run_checks(
 
     dev_ids = [d.id for d in devices]
     rule_id_list = [r.id for r in rules]
+    specs = {r.id: spec_of(r) for r in rules if r.enabled}
+    now = utcnow()
+    started_versions = {r.id: r.updated_at for r in rules}  # 照合を始めた時点のルールの版（途中の変更の検知用）
+    # 有効な例外: (rule_id, device_id or None) → [ExceptionSpec]
+    exceptions: dict[tuple[str, str | None], list[ExceptionSpec]] = {}
+    for e in (await db.execute(select(ComplianceException).where(
+            ComplianceException.rule_id.in_(rule_id_list)))).scalars():
+        if active_exception(e, now):
+            exceptions.setdefault((e.rule_id, e.device_id), []).append(ExceptionSpec(e.reason, e.ignore_pattern))
+    # 1. コンフィグの読み込みと照合（この間は DB に書かない。以前の結果もそのまま残る）
+    new_rows: list[tuple[Device, str, Evaluation, str | None]] = []
+    for d in devices:
+        targets = [(rid, s) for rid, s in specs.items() if applies_to(s, d.platform)]
+        if not targets:
+            continue
+        loaded = await asyncio.to_thread(load_config, d.id)  # Git の読み込みはスレッドで
+        if loaded is None:
+            continue  # 未収集の機器は結果を持たない
+        text_, commit = loaded
+        # 照合（正規表現の compile と全文への照合）は CPU を使うので、専用のスレッドで行う。渡すのは素の値だけ
+        jobs = [(s, exceptions.get((rid, None), []) + exceptions.get((rid, d.id), [])) for rid, s in targets]
+        evals = await _evaluate_in_thread(text_, jobs)
+        new_rows.extend((d, rid, ev, commit) for (rid, _), ev in zip(targets, evals, strict=True))
+    # 2. 書き込みは最後にまとめて短く行う（直列化 → 以前の結果を読む → DELETE → INSERT）
+    await lock_result_writes(db)
+    # 照合の間に消された機器・ルール、変更されたルールの分は書かない（外部キー違反と、古い内容での上書きを避ける）。
+    # PostgreSQL では FOR KEY SHARE で行をロックし、このあと commit までの間に消されないようにする。
+    # 例外（ComplianceException）の変更は検知しない。その変更を保存した側の再検査が、新しい内容で書き直す
+    dev_q = select(Device.id).where(Device.id.in_(dev_ids))
+    rule_q = select(ComplianceRule.id, ComplianceRule.updated_at).where(ComplianceRule.id.in_(rule_id_list))
+    if _is_postgres(db):
+        dev_q, rule_q = dev_q.with_for_update(key_share=True), rule_q.with_for_update(key_share=True)
+    live_devs = set((await db.execute(dev_q)).scalars())
+    live_rules = {rid for rid, ver in (await db.execute(rule_q)).all() if ver == started_versions.get(rid)}
+    dev_ids = [i for i in dev_ids if i in live_devs]
+    rule_id_list = [i for i in rule_id_list if i in live_rules]
+    new_rows = [x for x in new_rows if x[0].id in live_devs and x[1] in live_rules]
     previous = {
         (r.device_id, r.rule_id): r.status
         for r in (await db.execute(select(ComplianceResult).where(
@@ -404,41 +483,23 @@ async def run_checks(
             ComplianceResult.device_id.in_(dev_ids), ComplianceResult.rule_id.in_(rule_id_list)
         )
     )
-    specs = {r.id: spec_of(r) for r in rules if r.enabled}
-    now = utcnow()
-    # 有効な例外: (rule_id, device_id or None) → [ExceptionSpec]
-    exceptions: dict[tuple[str, str | None], list[ExceptionSpec]] = {}
-    for e in (await db.execute(select(ComplianceException).where(
-            ComplianceException.rule_id.in_(rule_id_list)))).scalars():
-        if active_exception(e, now):
-            exceptions.setdefault((e.rule_id, e.device_id), []).append(ExceptionSpec(e.reason, e.ignore_pattern))
     checked = 0
     transitions: list[tuple] = []
-    for d in devices:
-        targets = [(rid, s) for rid, s in specs.items() if applies_to(s, d.platform)]
-        if not targets:
-            continue
-        loaded = await asyncio.to_thread(load_config, d.id)  # Git の読み込みはスレッドで
-        if loaded is None:
-            continue  # 未収集の機器は結果を持たない
-        text, commit = loaded
-        for rid, s in targets:
-            excs = exceptions.get((rid, None), []) + exceptions.get((rid, d.id), [])
-            ev = evaluate_with_exceptions(s, text, excs) if excs else evaluate(s, text)
-            before = previous.get((d.id, rid))
-            if ev.status == "fail" and before != "fail":
-                transitions.append(("violation", d, rid, ev.details))
-            elif ev.status == "pass" and before == "fail":
-                transitions.append(("resolved", d, rid, None))
-            elif ev.status == "exempt" and before == "fail":
-                transitions.append(("exempted", d, rid, None))
-            db.add(ComplianceResult(
-                device_id=d.id, rule_id=rid, status=ev.status,
-                detail=json.dumps(ev.details, ensure_ascii=False) if ev.details else None,
-                commit_hash=commit, checked_at=now,
-            ))
-            checked += 1
-    rule_map = {r.id: r for r in rules}
+    for d, rid, ev, commit in new_rows:
+        before = previous.get((d.id, rid))
+        if ev.status == "fail" and before != "fail":
+            transitions.append(("violation", d, rid, ev.details))
+        elif ev.status == "pass" and before == "fail":
+            transitions.append(("resolved", d, rid, None))
+        elif ev.status == "exempt" and before == "fail":
+            transitions.append(("exempted", d, rid, None))
+        db.add(ComplianceResult(
+            device_id=d.id, rule_id=rid, status=ev.status,
+            detail=json.dumps(ev.details, ensure_ascii=False) if ev.details else None,
+            commit_hash=commit, checked_at=now,
+        ))
+        checked += 1
+    rule_map = {r.id: r for r in rules if r.id in live_rules}
     _record_transitions(db, transitions, rule_map, actor, ref)
     await _enqueue_violation_notice(db, transitions, rule_map, ref)
     return {"devices": len(devices), "rules": len(rules), "checked": checked,
