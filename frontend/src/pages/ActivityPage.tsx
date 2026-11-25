@@ -27,7 +27,7 @@ interface DeviceItem { id: string; name: string; }
 
 const PAGE_SIZE = 100;
 const SEVERITY_LABEL: Record<string, string> = { high: "高", medium: "中", low: "低" };
-const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack" };
+const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack", teams: "Teams" };
 const SCHEDULE_KIND_LABEL: Record<string, string> = { collect: "コンフィグ収集", compliance: "コンプライアンスチェック" };
 const LEVEL_LABEL: Record<string, string> = { info: "情報", warning: "警告", error: "エラー" };
 const LEVEL_BADGE: Record<string, string> = { info: "badge-neutral", warning: "badge-warning", error: "badge-danger" };

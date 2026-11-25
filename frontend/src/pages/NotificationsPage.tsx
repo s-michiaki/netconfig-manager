@@ -4,7 +4,7 @@ import { PERM, useAuth } from "../auth";
 import MailServerTab from "../components/MailServerTab";
 
 /**
- * 通知（Discord / Slack / メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
+ * 通知（Discord / Slack / Teams / メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
  * - 自分の通知: 所属グループの設定を使う / 個別に設定する / 通知しない
  * - ユーザーグループ（管理者）: メンバーとグループの通知先・対象
  * - メールサーバー（管理者）: メールの送信の設定（SMTP Auth・OAuth 2.0）
@@ -15,8 +15,10 @@ interface Notification {
   mode: Mode;
   discord_webhook: string | null;
   slack_webhook: string | null;
+  teams_webhook: string | null;
   has_discord: boolean;
   has_slack: boolean;
+  has_teams: boolean;
   email_to: string[];
   all_devices: boolean;
   device_group_ids: string[];
@@ -40,9 +42,9 @@ interface UserGroup { id: string; name: string; description: string | null; memb
 interface UserItem { id: string; username: string; role_label?: string; is_active: boolean; }
 interface PreviewItem { kind: string; webhook: string; via: string[]; }
 
-const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack", email: "メール" };
+const KIND_LABEL: Record<string, string> = { discord: "Discord", slack: "Slack", teams: "Teams", email: "メール" };
 
-const hasTarget = (n: Notification) => n.has_discord || n.has_slack || (n.email_to?.length ?? 0) > 0;
+const hasTarget = (n: Notification) => n.has_discord || n.has_slack || n.has_teams || (n.email_to?.length ?? 0) > 0;
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -75,7 +77,7 @@ function eventsText(n: Notification): string {
 }
 
 function channelText(n: Notification): string {
-  const c = [n.has_discord && "Discord", n.has_slack && "Slack", n.email_to?.length && `メール（${n.email_to.length} 件）`].filter(Boolean);
+  const c = [n.has_discord && "Discord", n.has_slack && "Slack", n.has_teams && "Teams", n.email_to?.length && `メール（${n.email_to.length} 件）`].filter(Boolean);
   return c.length ? c.join("・") : "（未登録）";
 }
 
@@ -84,6 +86,7 @@ function channelText(n: Notification): string {
 interface FormState {
   discord: string; clearDiscord: boolean;
   slack: string; clearSlack: boolean;
+  teams: string; clearTeams: boolean;
   email: string; // 1 行に 1 件
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
   on_change: boolean; on_violation: boolean; on_failure: boolean; on_system: boolean;
@@ -92,7 +95,7 @@ interface FormState {
 
 function initForm(n: Notification | null): FormState {
   return {
-    discord: "", clearDiscord: false, slack: "", clearSlack: false, email: (n?.email_to ?? []).join("\n"),
+    discord: "", clearDiscord: false, slack: "", clearSlack: false, teams: "", clearTeams: false, email: (n?.email_to ?? []).join("\n"),
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
     on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false, on_system: n?.on_system ?? true,
     on_inventory: n?.on_inventory ?? true, on_ping: n?.on_ping ?? true, on_drift: n?.on_drift ?? false, on_unsaved: n?.on_unsaved ?? false,
@@ -105,6 +108,7 @@ function toPayload(mode: Mode, f: FormState) {
     // 空欄は変更なし（null）、削除にチェックがあれば空文字で削除
     discord_webhook: f.clearDiscord ? "" : f.discord.trim() || null,
     slack_webhook: f.clearSlack ? "" : f.slack.trim() || null,
+    teams_webhook: f.clearTeams ? "" : f.teams.trim() || null,
     email_to: f.email.trim(), // 空なら削除
     all_devices: f.all_devices,
     device_group_ids: f.all_devices ? [] : f.device_group_ids,
@@ -124,9 +128,9 @@ function TargetForm({
     set("device_group_ids", on ? [...form.device_group_ids, id] : form.device_group_ids.filter((x) => x !== id));
   return (
     <>
-      {(["discord", "slack"] as const).map((kind) => {
-        const masked = kind === "discord" ? current?.discord_webhook : current?.slack_webhook;
-        const clearKey = kind === "discord" ? "clearDiscord" : "clearSlack";
+      {(["discord", "slack", "teams"] as const).map((kind) => {
+        const masked = current?.[`${kind}_webhook`];
+        const clearKey = kind === "discord" ? "clearDiscord" : kind === "slack" ? "clearSlack" : "clearTeams";
         return (
           <div className="form-group" key={kind}>
             <label className="form-label" htmlFor={`${idPrefix}-${kind}`}>
@@ -135,8 +139,13 @@ function TargetForm({
             <input
               id={`${idPrefix}-${kind}`} value={form[kind]} disabled={form[clearKey]}
               onChange={(e) => set(kind, e.target.value)}
-              placeholder={masked ? "変更する場合のみ入力" : kind === "discord" ? "https://discord.com/api/webhooks/…" : "https://hooks.slack.com/services/…"}
+              placeholder={masked ? "変更する場合のみ入力" : kind === "discord" ? "https://discord.com/api/webhooks/…" : kind === "slack" ? "https://hooks.slack.com/services/…" : "https://xxxx.environment.api.powerplatform.com/powerautomate/automations/direct/…"}
             />
+            {kind === "teams" && (
+              <p className="ntf-muted" style={{ marginTop: 4 }}>
+                Teams の「ワークフロー」で「Webhook 要求を受信したとき」のフローを作り、表示された URL を貼ります（旧形式の logic.azure.com の URL は使えません）。ワークフローのトリガーを実行できるユーザーは「誰でも」にします（組織内のユーザーに限ると、このアプリからは送れません。設定の名前は Teams の版で変わることがあります）
+              </p>
+            )}
             {masked && (
               <label className="form-check" style={{ marginTop: 4 }}>
                 <input type="checkbox" checked={form[clearKey]} onChange={(e) => set(clearKey, e.target.checked)} />
@@ -256,7 +265,7 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const activeGroups = data.groups.filter((g) => g.notification.mode === "custom");
   return (
     <div className="card ntf-card">
-      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なし・基準からのずれ・保存し忘れを、Discord / Slack・メールに要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
+      <p className="ntf-lead">機器のコンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化・Ping監視の応答なし・基準からのずれ・保存し忘れを、Discord / Slack / Teams・メールに要約と画面へのリンクで送ります（差分やコンフィグの中身は送りません）。送る内容は通知設定ごとに選べます。</p>
       <div className="ntf-modes" role="radiogroup">
         {([
           ["inherit", "所属グループの設定を使う", "管理者が設定したユーザーグループの通知先・対象で通知します"],
@@ -484,8 +493,8 @@ function GroupsTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
             <table className="data-table" style={{ marginTop: 8 }}>
               <thead><tr><th>通知先</th><th>Webhook・宛先</th><th>理由</th></tr></thead>
               <tbody>
-                {preview.map((p) => (
-                  <tr key={p.kind + p.webhook}><td>{KIND_LABEL[p.kind]}</td><td className="mono">{p.webhook}</td><td>{p.via.join("、")}</td></tr>
+                {preview.map((p, i) => (
+                  <tr key={`${p.kind}-${i}-${p.webhook}`}><td>{KIND_LABEL[p.kind]}</td><td className="mono">{p.webhook}</td><td>{p.via.join("、")}</td></tr>
                 ))}
               </tbody>
             </table>

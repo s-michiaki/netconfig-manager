@@ -15,6 +15,14 @@ SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "collect_logs.sh"
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash が必要")
 
 WEBHOOK = "https://hooks.slack.com/services/T000/B000/abcdefSECRETxyz"
+_TEAMS_PATH = "/powerautomate/automations/direct/workflows/WFIDEXAMPLE{n}/triggers/manual/paths/invoke?api-version=1&sig=SIGEXAMPLE{n}"
+# 実際の URL は :443 が付く形。付かない形・大文字のホストも伏せる
+TEAMS_WEBHOOKS = [
+    "https://xxxx.environment.api.powerplatform.com:443" + _TEAMS_PATH.format(n=1),
+    "https://xxxx.environment.api.powerplatform.com" + _TEAMS_PATH.format(n=2),
+    "HTTPS://XXXX.Environment.Api.PowerPlatform.com:443" + _TEAMS_PATH.format(n=3),
+]
+TEAMS_WEBHOOK = " ".join(TEAMS_WEBHOOKS)
 FAKE = r"""#!/bin/bash
 # 偽の podman。呼ばれた引数を記録し、それらしい出力を返す
 printf '%s\n' "$*" >> "$FAKE_LOG"
@@ -39,7 +47,7 @@ case "$1" in
     fi ;;
   logs)
     echo "2026-11-16T10:00:00Z INFO 起動しました"
-    echo "2026-11-16T10:00:01Z ERROR 通知に失敗 url=$FAKE_WEBHOOK"
+    echo "2026-11-16T10:00:01Z ERROR 通知に失敗 url=$FAKE_WEBHOOK teams=$FAKE_TEAMS"
     echo "2026-11-16T10:00:02Z DEBUG connect postgresql+asyncpg://netconfig:Pg-Secret-99@db:5432/netconfig"
     echo "2026-11-16T10:00:03Z WARN password=Hunter2-plain token: abcDEF123"
     echo "2026-11-16T10:00:04Z INFO Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2lnbmF0dXJlLXZhbHVl" ;;
@@ -73,7 +81,8 @@ def env(tmp_path):
     fake.chmod(0o755)
     e = {**os.environ, "INSTALL_DIR": str(install), "PROJECT_NAME": "ncm", "CONTAINER_CMD": str(fake), "SUDO": "",
          "COLLECT_OUT_DIR": str(tmp_path / "out"), "FAKE_LOG": str(tmp_path / "calls.log"),
-         "FAKE_SQL": str(tmp_path / "sql.txt"), "FAKE_DOWN": "", "FAKE_WEBHOOK": WEBHOOK}
+         "FAKE_SQL": str(tmp_path / "sql.txt"), "FAKE_DOWN": "", "FAKE_WEBHOOK": WEBHOOK,
+         "FAKE_TEAMS": TEAMS_WEBHOOK}
     return tmp_path, e
 
 
@@ -109,9 +118,11 @@ def test_collects_and_redacts(env):
     assert "起動しました" in log and "containers/ncm_worker_1.log" in f
     # 秘密の値は伏せる（Webhook の URL・URL に埋め込んだパスワード・パスワード・トークン）
     whole = "\n".join(f.values())
-    for secret in ("abcdefSECRETxyz", "Pg-Secret-99", "Hunter2-plain", "abcDEF123", "enc-key-value", "jwt-secret-value",
-                   "c2lnbmF0dXJlLXZhbHVl", "/root/.ssh/id"):
+    teams_secrets = [f"{k}EXAMPLE{n}" for n in (1, 2, 3) for k in ("SIG", "WFID")]
+    for secret in ("abcdefSECRETxyz", "Pg-Secret-99", "Hunter2-plain", "abcDEF123", *teams_secrets, "enc-key-value",
+                   "jwt-secret-value", "c2lnbmF0dXJlLXZhbHVl", "/root/.ssh/id"):
         assert secret not in whole, secret
+    assert log.lower().count("powerplatform.com/***") == 3  # :443 付き・なし・大文字のホスト
     assert "hooks.slack.com/services/***" in log and "netconfig:***@db:5432" in log and "password=***" in log
     # .env: 秘密は伏せ、それ以外は読める。空の値は空と分かる。コメントは入れない
     env_txt = f["app/env.txt"]

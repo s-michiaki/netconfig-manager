@@ -72,8 +72,8 @@ const FIELD_LABELS: Record<string, string> = {
   copy_from: "複製元", version: "版", name: "名前", severity: "重要度", pattern: "パターン", platforms: "対象機種",
   match_type: "一致方法", expect: "期待", scope: "範囲", section_pattern: "セクション", enabled: "有効",
   devices: "機器数", commands: "コマンド", device_names: "機器名", skipped: "対象外の数", format: "形式", rules: "ルール数", checked: "検査件数", address: "アドレス",
-  mode: "方式", discord_webhook: "Discord", slack_webhook: "Slack", all_devices: "全機器", device_groups: "機器グループ数",
-  include_ungrouped: "未分類を含む", members: "メンバー数", discord: "Discord", slack: "Slack",
+  mode: "方式", discord_webhook: "Discord", slack_webhook: "Slack", teams_webhook: "Teams", all_devices: "全機器", device_groups: "機器グループ数",
+  include_ungrouped: "未分類を含む", members: "メンバー数", discord: "Discord", slack: "Slack", teams: "Teams",
   credential_profile_id: "認証情報プロファイル(ID)", credential_profile: "認証情報プロファイル",
   group_id: "グループ", group: "グループ", color: "色", old_name: "変更前の名前", moved_to_ungrouped: "未分類に戻した台数",
 };

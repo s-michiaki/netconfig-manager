@@ -1,4 +1,6 @@
-"""通知（Discord / Slack の Webhook、メール）: コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準のずれ・保存し忘れ
+"""通知（Discord / Slack / Teams の Webhook、メール）
+
+コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準のずれ・保存し忘れ
 
 通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping / on_drift /
 on_unsaved）。
@@ -22,6 +24,7 @@ import logging
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,15 +43,15 @@ from app.services.activity import record as record_activity
 
 logger = logging.getLogger(__name__)
 
-KINDS = ("discord", "slack")  # Webhook の種類
-KIND_LABELS = {"discord": "Discord", "slack": "Slack", "email": "メール"}
+KINDS = ("discord", "slack", "teams")  # Webhook の種類
+KIND_LABELS = {"discord": "Discord", "slack": "Slack", "teams": "Teams", "email": "メール"}
 # 宛先を公式の Webhook に限る（任意の URL にサーバーからリクエストを送らせないため）
 WEBHOOK_RE = {
     "discord": re.compile(
         r"^https://(?:(?:ptb|canary)\.)?(?:discord\.com|discordapp\.com)/api/webhooks/\d+/[A-Za-z0-9_-]+$"
     ),
     "slack": re.compile(r"^https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9_/-]+$"),
-}
+}  # Teams は URL を分解して検査する（teams_url_error）
 TIMEOUT_SEC = 10
 MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
@@ -66,7 +69,69 @@ SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
 
+# ---- Teams（ワークフローの「Webhook 要求を受信したとき」）の宛先の検査
+TEAMS_HOST_SUFFIX = ".environment.api.powerplatform.com"
+TEAMS_PATH_HEAD = "/powerautomate/automations/direct/"
+TEAMS_PATH_TAIL = "/triggers/manual/paths/invoke"
+TEAMS_MAX_URL = 1024
+_TEAMS_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$")
+_TEAMS_PATH_RE = re.compile(r"^[A-Za-z0-9._~/-]+$")
+_TEAMS_QUERY_RE = re.compile(r"^[A-Za-z0-9._~%&=+/-]+$")
+_TEAMS_FORMAT_HELP = (f"https://xxxx{TEAMS_HOST_SUFFIX}{TEAMS_PATH_HEAD}…{TEAMS_PATH_TAIL}?…&sig=… "
+                      "の形式の URL を指定してください")
+_TEAMS_OLD_HELP = ("旧形式（logic.azure.com）の URL は使えません。Teams の「ワークフロー」の画面で"
+                   "「Webhook 要求を受信したとき」の Webhook のリンクをコピーし直してください")
+
+
+def teams_url_error(url: str) -> str | None:
+    """Teams の Webhook URL の検査。正しければ None、誤りなら理由（URL の中身は含めない）。
+
+    任意の URL へサーバーから送らせないため、正規表現だけに頼らず urllib.parse で分解して調べる
+    """
+    if not url or len(url) > TEAMS_MAX_URL:
+        return f"URL が長すぎます（{TEAMS_MAX_URL} 文字まで）" if url else "URL が空です"
+    if not all(0x21 <= ord(ch) <= 0x7E for ch in url) or "\\" in url:
+        return "URL に空白・制御文字・バックスラッシュ・全角文字は使えません"
+    if "#" in url:
+        return "URL に # 以降（フラグメント）は付けられません"
+    try:
+        sp = urllib.parse.urlsplit(url)
+        port = sp.port
+    except ValueError:
+        return "URL を解釈できません"
+    host = (sp.hostname or "").lower()
+    if host == "logic.azure.com" or host.endswith(".logic.azure.com"):
+        return _TEAMS_OLD_HELP
+    if sp.scheme != "https":
+        return "https:// で始まる URL を指定してください"
+    if "@" in sp.netloc:
+        return "URL にユーザー情報（@）は付けられません"
+    if port not in (None, 443) or (port is None and ":" in sp.netloc):
+        return "ポート番号は指定できません（443 のみ）"
+    if (not host.endswith(TEAMS_HOST_SUFFIX) or len(host) <= len(TEAMS_HOST_SUFFIX)
+            or not _TEAMS_HOST_RE.match(host) or any(lb.startswith("xn--") for lb in host.split("."))):
+        return f"ホストは {TEAMS_HOST_SUFFIX} で終わる必要があります（Teams のワークフローの Webhook の URL を指定してください）"
+    path = sp.path
+    if (not path.startswith(TEAMS_PATH_HEAD) or not path.endswith(TEAMS_PATH_TAIL) or not _TEAMS_PATH_RE.match(path)
+            or ".." in path or "//" in path):
+        return _TEAMS_FORMAT_HELP
+    if not sp.query or not _TEAMS_QUERY_RE.match(sp.query):
+        return _TEAMS_FORMAT_HELP
+    sig = [v for k, v in urllib.parse.parse_qsl(sp.query, keep_blank_values=True) if k == "sig"]
+    if len(sig) != 1 or not sig[0]:
+        return "URL に sig= のパラメーターがありません。ワークフローの Webhook のリンクを最後までコピーしてください"
+    return None
+
+
+def normalize_teams_url(url: str) -> str:
+    """保存用: スキームとホストを小文字にそろえる（パスとクエリは大文字小文字を区別するのでそのまま）。検査に通った URL に使う"""
+    m = re.match(r"^([A-Za-z]+)://([^/?#]*)(.*)$", url, re.S)
+    return f"{m.group(1).lower()}://{m.group(2).lower()}{m.group(3)}" if m else url
+
+
 def valid_webhook(kind: str, url: str) -> bool:
+    if kind == "teams":
+        return teams_url_error(url) is None
     return bool(WEBHOOK_RE[kind].match(url))
 
 
@@ -74,6 +139,10 @@ def mask_webhook(url: str | None) -> str | None:
     """画面表示用（トークン部分を隠す）"""
     if not url:
         return None
+    if url[:8].lower() == "https://" and TEAMS_HOST_SUFFIX in url.split("/", 3)[2].lower():
+        # Teams: sig・ワークフローの ID を出さない。ホストの先頭 4 文字だけ（大文字小文字は区別しない）
+        host = url.split("/", 3)[2].split(":")[0].lower()
+        return f"https://{host[:4]}…{TEAMS_HOST_SUFFIX}/…"
     m = re.match(r"^(https://[^/]+/[^/]+/[^/]+/)", url)
     head = m.group(1) if m else url[:24]
     return f"{head}…{url[-4:]}"
@@ -89,7 +158,7 @@ def setting_targets(s: NotificationSetting) -> list[tuple[str, str]]:
 
 
 def has_target(s: NotificationSetting | None) -> bool:
-    return bool(s and (s.discord_webhook or s.slack_webhook or s.emails))
+    return bool(s and (s.discord_webhook or s.slack_webhook or s.teams_webhook or s.emails))
 
 
 # ---------------------------------------------------------------- 通知先の決定
@@ -182,7 +251,7 @@ def build_payload(kind: str, ev: ChangeEvent) -> dict:
         ("世代", ev.commit_hash[:8]),
     ]
     url = history_url(ev.device_id)
-    if kind == "email":
+    if kind in ("email", "teams"):
         return _message(kind, title, facts, url, "差分を画面で確認", 0x4F8EF7)
     if kind == "discord":
         embed = {
@@ -208,10 +277,44 @@ def build_test_payload(kind: str, owner_label: str) -> dict:
                 "link_text": "通知設定を画面で確認"}
     if kind == "discord":
         return {"username": "NetConfig Manager", "content": text}
+    if kind == "teams":
+        return _teams_card("テスト通知", text, [], None, "", None)
     return {"text": text}
 
 
 # ---------------------------------------------------------------- 送信
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """リダイレクトをたどらない（Teams の宛先は公式のホストに限るので、別のホストへ転送されないようにする）"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_no_redirect(req: urllib.request.Request, timeout: float):
+    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)
+
+
+def _scrub(kind: str, url: str, text: str) -> str:
+    """エラーの文言から Webhook の URL・ワークフローの ID・sig・ホストを取り除く（Teams）。
+
+    相手の応答や接続エラーの文言に URL が含まれても、last_error・ログ・アクティビティに秘密を残さない
+    """
+    if kind != "teams":
+        return text
+    sp = urllib.parse.urlsplit(url)
+    secrets = {url, sp.hostname or "", sp.path, sp.query}
+    secrets |= {seg for seg in sp.path.split("/") if len(seg) >= 6}  # ワークフローの ID など
+    secrets |= {v for _, v in urllib.parse.parse_qsl(sp.query) if len(v) >= 4}
+    for sec in sorted(secrets, key=len, reverse=True):
+        if sec:
+            text = re.sub(re.escape(sec), "***", text, flags=re.I)
+    text = re.sub(r"https?://\S*", "***", text)  # 途中で切れた URL も含め、URL らしいものは全部伏せる
+    return re.sub(r"sig=[^&\s\"']*", "sig=***", text)
 
 
 def send_webhook(kind: str, url: str, payload: dict) -> str | None:
@@ -219,12 +322,13 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
     if not valid_webhook(kind, url):
         return "Webhook URL の形式が正しくありません"
     body = json.dumps(payload, ensure_ascii=False).encode()
+    opener = _open_no_redirect if kind == "teams" else urllib.request.urlopen
     for attempt in range(2):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Content-Type": "application/json", "User-Agent": "NetConfig-Manager",
         })
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as r:  # noqa: S310 - URL は WEBHOOK_RE で検証済み
+            with opener(req, timeout=TIMEOUT_SEC) as r:  # noqa: S310 - URL は valid_webhook で検証済み
                 r.read()
             return None
         except urllib.error.HTTPError as e:
@@ -233,12 +337,21 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
                 time.sleep(min(wait, MAX_RETRY_WAIT_SEC))
                 continue
             detail = e.read()[:200].decode(errors="replace")
+            if kind == "teams":
+                # 相手の応答の本文は載せない（URL などの秘密が入りうるため）。コードと案内だけ
+                if 300 <= e.code < 400:
+                    return f"リダイレクトされました（HTTP {e.code}）。Webhook の URL を確認してください"
+                if e.code in (400, 401, 403, 404):
+                    return (f"Webhook が無効です（HTTP {e.code}。ワークフローが削除・オフになっていないか、"
+                            "URL が再発行されていないか確認してください）")
             if e.code in (401, 403, 404):
                 return f"Webhook が無効です（HTTP {e.code}。削除・再発行されていないか確認してください）"
+            if kind == "teams":
+                return f"HTTP {e.code}（Teams・Power Automate 側のエラーです。ワークフローの実行の履歴を確認してください）"
             return f"HTTP {e.code} {detail}".strip()
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             reason = getattr(e, "reason", e)
-            return f"送信できません（{reason}）"
+            return _scrub(kind, url, f"送信できません（{reason}）")
     return "レート制限のため送信できませんでした"
 
 
@@ -308,9 +421,11 @@ async def notify_change(db: AsyncSession, device_id: str, commit_hash: str, adde
 
 def _message(kind: str, title: str, facts: list[tuple[str, str]], url: str | None, link_text: str,
              color: int, body: str | None = None) -> dict:
-    """Discord（埋め込み）/ Slack（テキスト）/ メール（件名・本文の材料。組み立ては mail.build_message）の通知"""
+    """Discord（埋め込み）/ Slack（テキスト）/ Teams（Adaptive Card）/ メール（材料のみ。組み立ては mail.build_message）"""
     if kind == "email":
         return {"title": title, "facts": facts, "url": url, "link_text": link_text, "body": body}
+    if kind == "teams":
+        return _teams_card(title, body, facts, url, link_text, color)
     if kind == "discord":
         embed: dict = {
             "title": title, "color": color,
@@ -328,6 +443,71 @@ def _message(kind: str, title: str, facts: list[tuple[str, str]], url: str | Non
     if url:
         lines.append(f"<{url}|{link_text}>")
     return {"text": "\n".join(lines)}
+
+
+_TEAMS_COLORS = {0xEF4444: "Attention", 0xF87171: "Attention", 0xFB923C: "Warning", 0xFBBF24: "Warning",
+                 0xF59E0B: "Warning", 0x34D399: "Good"}
+
+
+def _teams_text(s: str) -> str:
+    """Teams のカードへ入れる文字列の整形。
+
+    - TextBlock は 1 つの改行を詰めてしまうので、改行は段落（2 つ）にする
+    - 機器名・ルール名・エラー文などは利用者・機器が決められる。Markdown のリンク・画像 `[x](url)` を
+      カードの中で偽のリンクとして出せないよう、`](` の間にゼロ幅スペースを入れて構文を壊す
+      （正当なリンクは Action.OpenUrl だけ）
+    """
+    s = s.replace("\r\n", "\n").replace("\n", "\n\n")
+    while "](" in s:  # 1 回の置換で `](` が残らないようにする（連続・入れ子でも）
+        s = s.replace("](", "]\u200b(")
+    return s
+
+
+TEAMS_MAX_BYTES = 24_000  # カードの大きさの上限（Teams のメッセージは 28KB 程度まで。余裕を見る）
+
+
+def _teams_size(payload: dict) -> int:
+    return len(json.dumps(payload, ensure_ascii=False).encode())
+
+
+def _teams_shrink(payload: dict) -> dict:
+    """大きすぎるカードを送れなくならないよう、本文・項目の値を切り詰める（保険）"""
+    blocks = payload["attachments"][0]["content"]["body"]
+    for limit in (2000, 1000, 500, 250, 100, 40):
+        if _teams_size(payload) <= TEAMS_MAX_BYTES:
+            break
+        for b in blocks:
+            if b["type"] == "TextBlock" and b is not blocks[0] and len(b["text"]) > limit:
+                b["text"] = b["text"][:limit] + "…"
+            if b["type"] == "FactSet":
+                for f in b["facts"]:
+                    if len(f["value"]) > limit:
+                        f["value"] = f["value"][:limit] + "…"
+    facts = next((b["facts"] for b in blocks if b["type"] == "FactSet"), None)
+    while facts and len(facts) > 1 and _teams_size(payload) > TEAMS_MAX_BYTES:
+        facts.pop()
+    return payload
+
+
+def _teams_card(title: str | None, body: str | None, facts: list[tuple[str, str]], url: str | None,
+                link_text: str, color: int | None) -> dict:
+    """Teams（ワークフローの Webhook）へ送る Adaptive Card。題・項目（FactSet）・本文・リンクのボタン"""
+    blocks: list[dict] = []
+    if title:
+        head: dict = {"type": "TextBlock", "text": _teams_text(title[:300]), "weight": "Bolder", "size": "Medium", "wrap": True}
+        if color in _TEAMS_COLORS:
+            head["color"] = _TEAMS_COLORS[color]
+        blocks.append(head)
+    if facts:
+        blocks.append({"type": "FactSet", "facts": [{"title": _teams_text(k), "value": _teams_text(v[:1000])} for k, v in facts]})
+    if body:
+        blocks.append({"type": "TextBlock", "text": _teams_text(body[:4000]), "wrap": True})
+    card: dict = {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard",
+                  "version": "1.4", "body": blocks}
+    if url:
+        card["actions"] = [{"type": "Action.OpenUrl", "title": link_text, "url": url}]
+    return _teams_shrink({"type": "message", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]})
 
 
 def _page_url(path: str) -> str | None:

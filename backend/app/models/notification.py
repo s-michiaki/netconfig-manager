@@ -8,7 +8,7 @@
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
   on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
   on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）/ on_unsaved（保存し忘れ）
-- 通知先は Discord / Slack の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
+- 通知先は Discord / Slack / Teams（ワークフロー）の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
 import json
@@ -57,6 +57,8 @@ class NotificationSetting(Base):
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="inherit")
     discord_webhook: Mapped[str | None] = mapped_column(EncryptedString(1024), nullable=True)
     slack_webhook: Mapped[str | None] = mapped_column(EncryptedString(1024), nullable=True)
+    # Teams のワークフロー（Webhook 要求を受信したとき）の URL。sig を含み長いので、暗号化後の長さを見て 2048
+    teams_webhook: Mapped[str | None] = mapped_column(EncryptedString(2048), nullable=True)
     # メールの宛先（カンマ区切り。送信はメールサーバーの設定＝mail_server を使う）
     email_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     all_devices: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

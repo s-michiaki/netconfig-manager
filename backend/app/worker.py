@@ -6,7 +6,7 @@ Celeryワーカー定義
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録・コマンド実行の結果を削除する
   （失効・期限切れから 30 日を過ぎた API トークンも）
 - run_command_device: コマンド実行（表示コマンドの一括実行）の機器 1 台ぶん。実行前にもう一度コマンドを検証する
-- send_change_notification: コンフィグに変更があったときの通知（Discord / Slack）
+- send_change_notification: コンフィグに変更があったときの通知（Discord / Slack / Teams）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
 - send_drift_notification: 基準の世代からずれたとき（ずれなし → ずれあり）の通知

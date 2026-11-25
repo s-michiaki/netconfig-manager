@@ -76,6 +76,7 @@ log() { echo "$(date '+%T') $*"; }
 redact() {
   sed -E \
     -e 's#(https://(discord(app)?\.com/api/webhooks|hooks\.slack\.com/services)/)[A-Za-z0-9/_.-]+#\1***#g' \
+    -e 's#(https://[A-Za-z0-9.-]+\.environment\.api\.powerplatform\.com)(:[0-9]+)?/[^[:space:]"'"'"']+#\1/***#Ig' \
     -e 's#(://[^/:@[:space:]]+:)[^@/[:space:]]+@#\1***@#g' \
     -e 's#eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}#***TOKEN***#g' \
     -e 's#gAAAA[A-Za-z0-9_=-]{40,}#***ENCRYPTED***#g' \

@@ -23,7 +23,16 @@ from app.models.notification import NotificationSetting, UserGroup, UserGroupMem
 from app.models.user import User
 from app.services import mail
 from app.services.audit import Audit, get_audit
-from app.services.notify import KINDS, has_target, mask_webhook, resolve_destinations, send_test, valid_webhook
+from app.services.notify import (
+    KINDS,
+    has_target,
+    mask_webhook,
+    normalize_teams_url,
+    resolve_destinations,
+    send_test,
+    teams_url_error,
+    valid_webhook,
+)
 
 router = APIRouter()
 
@@ -31,6 +40,8 @@ USER_MODE_LABELS = {"inherit": "所属グループの設定を使う", "custom":
 GROUP_MODE_LABELS = {"custom": "有効", "off": "無効", "inherit": "—"}
 
 WebhookUrl = Annotated[str, StringConstraints(strip_whitespace=True, max_length=600)]
+# Teams は sig などを含み長い。長さの上限は notify.teams_url_error で検査する（pydantic の長さ違反の応答は入力値を含むため）
+TeamsUrl = Annotated[str, StringConstraints(strip_whitespace=True)]
 
 
 class NotificationIn(BaseModel):
@@ -39,6 +50,7 @@ class NotificationIn(BaseModel):
     mode: Literal["inherit", "custom", "off"]
     discord_webhook: WebhookUrl | None = None
     slack_webhook: WebhookUrl | None = None
+    teams_webhook: TeamsUrl | None = None
     email_to: Annotated[str, StringConstraints(max_length=3000)] | None = None  # カンマ・改行区切り
     all_devices: bool = True
     device_group_ids: list[str] = Field(default_factory=list, max_length=500)
@@ -61,8 +73,10 @@ class NotificationOut(BaseModel):
     mode: str
     discord_webhook: str | None = None  # 伏せ字
     slack_webhook: str | None = None
+    teams_webhook: str | None = None
     has_discord: bool = False
     has_slack: bool = False
+    has_teams: bool = False
     email_to: list[str] = []
     all_devices: bool = True
     device_group_ids: list[str] = []
@@ -126,8 +140,10 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         mode=s.mode,
         discord_webhook=mask_webhook(s.discord_webhook),
         slack_webhook=mask_webhook(s.slack_webhook),
+        teams_webhook=mask_webhook(s.teams_webhook),
         has_discord=bool(s.discord_webhook),
         has_slack=bool(s.slack_webhook),
+        has_teams=bool(s.teams_webhook),
         email_to=s.emails,
         all_devices=s.all_devices,
         device_group_ids=s.group_ids,
@@ -152,6 +168,10 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
         raise HTTPException(status_code=422, detail="グループの通知は「有効」か「無効」を指定してください")
     for kind in KINDS:
         v = getattr(p, f"{kind}_webhook")
+        if v and kind == "teams" and (why := teams_url_error(v)):
+            raise HTTPException(status_code=422, detail=f"Teams の Webhook URL が正しくありません: {why}")
+        if v and kind == "teams":
+            p.teams_webhook = normalize_teams_url(v)  # スキーム・ホストは小文字にそろえて保存
         if v and not valid_webhook(kind, v):
             example = "https://discord.com/api/webhooks/…" if kind == "discord" else "https://hooks.slack.com/services/…"
             raise HTTPException(
@@ -204,7 +224,7 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
         raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
     if p.mode == "custom" and not has_target(s):
         raise HTTPException(status_code=422,
-                            detail="通知先（Discord・Slack の Webhook URL かメールの宛先）を1つ以上登録してください")
+                            detail="通知先（Discord・Slack・Teams の Webhook URL かメールの宛先）を1つ以上登録してください")
     if p.mode == "custom" and not p.all_devices and not ids and not p.include_ungrouped:
         raise HTTPException(status_code=422, detail="通知の対象にする機器グループを1つ以上選んでください")
     return s, changes
