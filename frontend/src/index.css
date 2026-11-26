@@ -1068,3 +1068,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .cmd-cell-commands { font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-row-active { background: var(--color-surface2); }
 @media (max-width: 1000px) { .cmd-grid { grid-template-columns: 1fr; } }
+
+/* ===== ダッシュボードの時計 ===== */
+.dash-header { flex-wrap: wrap; gap: 4px 16px; }
+.dash-clock { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dash-clock-date { margin-right: 6px; }
+@media (max-width: 640px) { .dash-clock-date { display: none; } }
