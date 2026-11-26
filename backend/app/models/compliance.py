@@ -25,6 +25,10 @@ class ComplianceRule(Base):
     scope: Mapped[str] = mapped_column(String(16), nullable=False, default="config")  # config / section
     section_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)  # scope=section のときの見出し（正規表現）
     severity: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")  # high / medium / low
+    # 違反したときの直し方（設定の例。複数行。機器へは送らず、画面で見る・コピーするだけ）・根拠の名前・分野
+    remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

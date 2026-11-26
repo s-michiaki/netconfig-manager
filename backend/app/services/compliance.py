@@ -52,6 +52,7 @@ from app.models.compliance import ComplianceException, ComplianceResult, Complia
 from app.models.device import Device
 from app.services.activity import SYSTEM_ACTOR
 from app.services.activity import record as record_activity
+from app.services.compliance_templates import ALL_TEMPLATES, CATEGORIES, TEMPLATES  # noqa: F401  再公開
 from app.services.config_service import CONFIG_FILENAME, repo_path
 
 logger = logging.getLogger(__name__)
@@ -595,91 +596,5 @@ def _record_transitions(db: AsyncSession, transitions: list[tuple], rules: dict,
 
 # ---------------------------------------------------------------- ルールのテンプレート
 
-_IOS = ["cisco_ios", "cisco_xe"]
-_AWPLUS = ["allied_telesis_awplus"]
-
-TEMPLATES: list[dict] = [
-    {
-        "name": "パスワードの暗号化表示", "severity": "medium", "platforms": _IOS,
-        "description": "コンフィグ上のパスワードを暗号化して表示する（service password-encryption）",
-        "match_type": "regex", "expect": "present", "pattern": r"^service password-encryption", "scope": "config",
-    },
-    {
-        "name": "enable secret を使う", "severity": "high", "platforms": _IOS,
-        "description": "enable password（弱いハッシュ）ではなく enable secret を使う",
-        "match_type": "regex", "expect": "absent", "pattern": r"^enable password ", "scope": "config",
-    },
-    {
-        "name": "HTTP サーバーの無効化", "severity": "medium", "platforms": _IOS,
-        "description": "Web 管理画面（ip http server）を無効にする",
-        "match_type": "regex", "expect": "absent", "pattern": r"^ip http server", "scope": "config",
-    },
-    {
-        "name": "SSH バージョン2", "severity": "high", "platforms": _IOS,
-        "description": "SSH はバージョン2のみ許可する",
-        "match_type": "regex", "expect": "present", "pattern": r"^ip ssh version 2", "scope": "config",
-    },
-    {
-        "name": "VTY で Telnet を許可しない", "severity": "high", "platforms": _IOS,
-        "description": "line vty の transport input に telnet を含めない",
-        "match_type": "regex", "expect": "absent", "pattern": r"transport input .*(telnet|all)", "scope": "section",
-        "section_pattern": r"^line vty",
-    },
-    {
-        "name": "NTP サーバーの設定", "severity": "low", "platforms": [*_IOS, "cisco_nxos", "arista_eos", *_AWPLUS],
-        "description": "時刻同期のため NTP サーバーを設定する",
-        "match_type": "regex", "expect": "present", "pattern": r"^ntp server ", "scope": "config",
-    },
-    {
-        "name": "Syslog の転送先", "severity": "low", "platforms": _IOS,
-        "description": "ログを Syslog サーバーへ転送する",
-        "match_type": "regex", "expect": "present", "pattern": r"^logging (host )?\d", "scope": "config",
-    },
-    {
-        "name": "既定の SNMP コミュニティを使わない", "severity": "high",
-        "platforms": [*_IOS, "cisco_nxos", "arista_eos", *_AWPLUS],
-        "description": "public / private のコミュニティ名は使わない",
-        "match_type": "regex", "expect": "absent", "pattern": r"^snmp-server community (public|private)\b",
-        "scope": "config",
-    },
-    {
-        "name": "物理インターフェースに説明を付ける", "severity": "low", "platforms": [*_IOS, "cisco_nxos", "arista_eos"],
-        "description": "各物理インターフェースに description を設定する",
-        "match_type": "regex", "expect": "present", "pattern": r"^\s+description ", "scope": "section",
-        "section_pattern": r"^interface (GigabitEthernet|TenGigabitEthernet|FastEthernet|Ethernet)",
-    },
-    {
-        "name": "PAN-OS: Telnet 管理を無効化", "severity": "high", "platforms": ["paloalto_panos"],
-        "description": "管理インターフェースの Telnet を無効にする",
-        "match_type": "contains", "expect": "present", "pattern": "deviceconfig system service disable-telnet yes",
-        "scope": "config",
-    },
-    {
-        "name": "FortiGate: 管理アクセスに Telnet / HTTP を許可しない", "severity": "high", "platforms": ["fortinet"],
-        "description": "インターフェースの allowaccess に telnet・http（暗号化されない管理アクセス）を含めない",
-        "match_type": "regex", "expect": "absent", "pattern": r"^\s*set allowaccess .*\b(telnet|http)\b",
-        "scope": "config",
-    },
-    {
-        "name": "FortiGate: 管理者のアイドルタイムアウト", "severity": "low", "platforms": ["fortinet"],
-        "description": "管理画面・CLI の無操作時の自動ログアウトを長くしすぎない（30 分以上を違反とする。既定は 5 分）",
-        "match_type": "regex", "expect": "absent", "pattern": r"^\s*set admintimeout (\d{3,}|[3-9]\d)$",
-        "scope": "config",
-    },
-    {
-        "name": "AW+: Telnet サーバーを無効化", "severity": "high", "platforms": _AWPLUS,
-        "description": "Telnet での管理アクセスを無効にする（no service telnet）",
-        "match_type": "regex", "expect": "present", "pattern": r"^no service telnet", "scope": "config",
-    },
-    {
-        "name": "AW+: HTTP サーバーを無効化", "severity": "medium", "platforms": _AWPLUS,
-        "description": "Web 管理画面（service http）を使わない場合は無効にする",
-        "match_type": "regex", "expect": "present", "pattern": r"^no service http\b", "scope": "config",
-    },
-    {
-        "name": "JunOS: root の SSH ログイン禁止", "severity": "high", "platforms": ["juniper_junos"],
-        "description": "root ユーザーで SSH ログインできないようにする",
-        "match_type": "contains", "expect": "present", "pattern": "set system services ssh root-login deny",
-        "scope": "config",
-    },
-]
+# ひな形は機種ごとに app/services/compliance_templates/ に分けて持つ（TEMPLATES は API に出す形。合格・違反の例を含む
+# 完全な一覧 ALL_TEMPLATES はテストで使う）

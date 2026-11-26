@@ -44,12 +44,15 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0038_vuln"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0039_rule_remediation"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols and "credential_profile_id" in cols
     # 既存の機器はプロファイルなし・ユーザー名はそのまま（今までどおり機器側の認証情報で接続する）
     assert con.execute("select username, credential_profile_id from devices").fetchall() == [("u", None)]
     assert con.execute("select name, jump_host_id from devices").fetchall() == [("sw1", None)]  # 既存データは保持
+    # コンプライアンスのルールの直し方・根拠・分野（既存のルールは NULL）
+    rule_cols = [r[1] for r in con.execute("pragma table_info(compliance_rules)")]
+    assert {"remediation", "reference", "category"} <= set(rule_cols)
     tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
     assert {"users", "jump_hosts", "config_comments", "credential_profiles", "command_runs", "command_results", "api_tokens",
             "report_sends"} <= tables

@@ -714,6 +714,31 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .cmp-test-result { margin-top: 8px; display: flex; gap: 8px; align-items: flex-start; font-size: 12px; }
 .cmp-templates { list-style: none; display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; margin-bottom: 8px; }
 .cmp-templates .form-check { align-items: flex-start; font-size: 13px; color: var(--color-text); }
+.cmp-modal-wide { width: min(860px, 94vw); max-width: 94vw; }
+.cmp-row2 { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 8px; }
+.cmp-fix-input { width: 100%; resize: vertical; min-height: 90px; font-size: 12px; }
+.cmp-tpl-filters { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; }
+.cmp-tpl-filters select { min-width: 180px; max-width: 100%; }
+.cmp-tpl-bulk { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.cmp-tpl-item { border-bottom: 1px solid var(--color-border); padding-bottom: 8px; min-width: 0; }
+.cmp-tpl-item:last-child { border-bottom: 0; }
+.cmp-tpl-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.cmp-tpl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.cmp-tpl-desc { line-height: 1.5; }
+.cmp-tpl-fix { margin: 4px 0 0 24px; }
+/* 違反の直し方。長い文・長い 1 行でも表が横へはみ出さないよう、折り返す */
+.cmp-rule-name { overflow-wrap: anywhere; min-width: 120px; }
+.cmp-fix-row > td { background: var(--color-surface2); padding: 10px 14px; max-width: 0; }
+.cmp-fix { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-top: 6px; }
+.cmp-fix-row .cmp-fix { margin-top: 0; }
+.cmp-fix-pre {
+  margin: 0; padding: 8px 10px; background: #0d1117; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto;
+  user-select: text;
+}
+.cmp-fix-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cmp-fix-note { line-height: 1.5; }
+.cmp-fix-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; overflow-wrap: anywhere; }
 
 /* 構成図の機器に付ける違反バッジ */
 .topo-violation {
