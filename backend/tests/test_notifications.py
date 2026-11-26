@@ -939,13 +939,16 @@ def test_every_event_neutralizes_links_and_mentions_for_discord_and_slack(ctx, m
     monkeypatch.setattr(notify.settings, "PUBLIC_URL", "https://ncm.example.local")
     got: list[tuple[str, dict]] = []
 
+    hooks = {"discord": D.format(777, uid()), "slack": S.format(7, uid())}
+
     def fake_send(kind, url, payload, cfg=None):
-        got.append((kind, payload))
+        # 共有の DB に、ほかのテストが残した通知設定の宛先が混ざっても数えない（このテストの Webhook だけ）
+        if url in hooks.values():
+            got.append((kind, payload))
         return None
 
     monkeypatch.setattr(notify, "_send", fake_send)
     u = _new_user(c, admin)
-    hooks = {"discord": D.format(777, uid()), "slack": S.format(7, uid())}
     r = c.put("/api/notifications/me", json={
         "mode": "custom", "discord_webhook": hooks["discord"], "slack_webhook": hooks["slack"], "all_devices": True,
         "on_change": True, "on_violation": True, "on_failure": True, "on_system": True, "on_inventory": True,
