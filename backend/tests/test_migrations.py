@@ -44,14 +44,21 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0036_teams_webhook"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0037_report"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols and "credential_profile_id" in cols
     # 既存の機器はプロファイルなし・ユーザー名はそのまま（今までどおり機器側の認証情報で接続する）
     assert con.execute("select username, credential_profile_id from devices").fetchall() == [("u", None)]
     assert con.execute("select name, jump_host_id from devices").fetchall() == [("sw1", None)]  # 既存データは保持
     tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
-    assert {"users", "jump_hosts", "config_comments", "credential_profiles", "command_runs", "command_results", "api_tokens"} <= tables
+    assert {"users", "jump_hosts", "config_comments", "credential_profiles", "command_runs", "command_results", "api_tokens",
+            "report_sends"} <= tables
+    # 定期レポート: 通知設定の report の既定は off、送信の記録は (設定, 種類, 期間) が一意
+    ns_cols = [r[1] for r in con.execute("pragma table_info(notification_settings)")]
+    assert "report" in ns_cols and "report_week_since" in ns_cols and "report_month_since" in ns_cols
+    con.execute("insert into report_sends (id, setting_id, kind, period_start, status, attempts, claimed_at) values ('r1','s','week','2026-02-23','sent',1,'2026-03-02')")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("insert into report_sends (id, setting_id, kind, period_start, status, attempts, claimed_at) values ('r2','s','week','2026-02-23','sent',1,'2026-03-02')")
     if with_users:
         assert con.execute("select username from users").fetchall() == [("admin",)]
 

@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     # 収集で変更が無かったときも記録するか（False なら変更あり・失敗などだけ記録）
     ACTIVITY_LOG_UNCHANGED: bool = True
 
+    # --- 定期レポート（services/report.py）。週次は月曜・月次は 1 日に、この時刻（TIMEZONE）以降の最初の判定で送る ---
+    REPORT_HOUR: int = Field(default=8, ge=0, le=23)
+
     # --- コマンド実行（表示コマンドの一括実行。services/command_run.py） ---
     COMMAND_RUN_ENABLED: bool = True
     COMMAND_RUN_MAX_DEVICES: int = Field(default=100, ge=1, le=1000)  # 1 回の実行で対象にできる機器の数

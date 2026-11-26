@@ -11,6 +11,7 @@ Celeryワーカー定義
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
 - send_drift_notification: 基準の世代からずれたとき（ずれなし → ずれあり）の通知
 - send_unsaved_notification: running-config が startup-config に保存されていない状態に変わったときの通知
+- send_periodic_reports: 定期レポート（週次・月次）の毎時の判定（月曜・1 日の REPORT_HOUR 時以降に送る。二重には送らない）
 - ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
 - git_export_sync: コンフィグ履歴を外部 Git へ push（GIT_EXPORT_URL を設定したとき。収集で変わったときと 1 時間ごと）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
@@ -41,6 +42,7 @@ from app.services import baseline as baseline_svc
 from app.services import collect_state, config_service, failure_batch, fw_hits, git_export, inventory, monitoring, system
 from app.services import command_run as command_run_svc
 from app.services import ping_monitor as ping_monitor_svc
+from app.services import report as report_svc
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -125,6 +127,11 @@ celery_app.conf.update(
         "fail-stale-command-runs": {
             "task": "app.worker.fail_stale_command_runs",
             "schedule": 300.0,
+        },
+        # 定期レポート: 毎時に「今が送る日・時刻か」「送信済みか」を判定する（送信済みの期間は DB に記録。二重には送らない）
+        "send-periodic-reports": {
+            "task": "app.worker.send_periodic_reports",
+            "schedule": 3600.0,
         },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
@@ -823,8 +830,27 @@ async def _purge() -> dict:
         result["ping_results"] = await ping_monitor_svc.purge(db)
         result["command_runs"] = await command_run_svc.purge_old_runs(db)
         result["api_tokens"] = await api_tokens_svc.purge_old(db)  # 失効・期限切れから 30 日を過ぎた API トークン
+        result["report_sends"] = await report_svc.purge_old(db)  # 定期レポートの古い送信の記録
         await db.commit()
         return result
+
+
+async def _send_reports() -> dict:
+    async with _sessionmaker()() as db:
+        return await report_svc.send_due_reports(db)
+
+
+@celery_app.task
+def send_periodic_reports():
+    """定期レポートの送信（beat が毎時に呼ぶ。月曜（週次）・1 日（月次）の REPORT_HOUR 時以降なら、未送信の設定へ送る）"""
+    try:
+        result = _run_async(_send_reports())
+    except Exception:  # noqa: BLE001 - 次の毎時にやり直せる。ほかのタスクに影響させない
+        logger.exception("定期レポートの送信に失敗しました")
+        return {"error": True}
+    if result["sent"] or result["failed"]:
+        logger.info("定期レポート: %s", result)
+    return result
 
 
 @celery_app.task

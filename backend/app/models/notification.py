@@ -8,6 +8,7 @@
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
   on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
   on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）/ on_unsaved（保存し忘れ）
+- 定期レポート（report）: 期間内の状況のまとめを週次・月次で送る（送る内容の選択 on_* とは別。対象の機器の絞り込みは同じ）
 - 通知先は Discord / Slack / Teams（ワークフロー）の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
 """
@@ -15,7 +16,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy import false as sa_false
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import Mapped, mapped_column
@@ -77,6 +78,13 @@ class NotificationSetting(Base):
     on_drift: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     # 保存し忘れ（startup と running の不一致に変わったとき）。既定は無効
     on_unsaved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # 定期レポート（services/report.py）。off / weekly / monthly / both。送る日・時刻は REPORT_HOUR（settings.TIMEZONE）
+    report: Mapped[str] = mapped_column(String(8), nullable=False, default="off", server_default="off")
+    # 種類ごとに、その種類が「無効 → 有効」になった時刻（API が入れる。無効になると NULL）。これより前に終わった期間は送らない
+    # （設定した直後に過去の分が届かないように。ほかの種類を足しても止まらない）。
+    # updated_at は last_sent_at の更新でも変わるので使わない
+    report_week_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    report_month_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -102,5 +110,32 @@ class NotificationSetting(Base):
         return device_group_id in self.group_ids
 
     @property
+    def report_kinds(self) -> list[str]:
+        """送るレポートの種類（week / month）"""
+        return {"weekly": ["week"], "monthly": ["month"], "both": ["week", "month"]}.get(self.report, [])
+
+    @property
     def emails(self) -> list[str]:
         return [a.strip() for a in (self.email_to or "").split(",") if a.strip()]
+
+
+class ReportSend(Base):
+    """定期レポートの送信の記録（同じ設定・同じ期間を二重に送らないための印）
+
+    送る前に (setting_id, kind, period_start) の行を作れた worker だけが送る（一意制約。同時に判定しても 1 つだけ）。
+    status: sending（送信中）/ sent（送った）/ failed（すべての宛先で失敗。attempts が上限未満なら次の毎時の判定でやり直す）/
+    missed（取り戻しの期間を過ぎても送れなかった。アクティビティに 1 回残した）。
+    設定を消しても残る（外部キーは張らない）ので、古い行は毎日の掃除で消す
+    """
+
+    __tablename__ = "report_sends"
+    __table_args__ = (UniqueConstraint("setting_id", "kind", "period_start", name="uq_report_sends_period"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    setting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)  # week / month
+    period_start: Mapped[str] = mapped_column(String(10), nullable=False)  # 期間の最初の日（TIMEZONE の日付。YYYY-MM-DD）
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="sending", server_default="sending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    claimed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

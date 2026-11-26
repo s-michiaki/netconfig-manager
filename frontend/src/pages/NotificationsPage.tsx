@@ -11,6 +11,11 @@ import MailServerTab from "../components/MailServerTab";
  */
 
 type Mode = "inherit" | "custom" | "off";
+type ReportMode = "off" | "weekly" | "monthly" | "both";
+const REPORT_OPTIONS: [ReportMode, string][] = [["off", "送らない"], ["weekly", "毎週（月曜に前の週の分）"], ["monthly", "毎月（1 日に前の月の分）"], ["both", "毎週と毎月の両方"]];
+interface ReportSection { key: string; title: string; basis: "period" | "now" | "mixed"; lines: string[]; top_title: string; top: string[]; top_total: number; }
+interface ReportData { kind: string; title: string; label: string; devices: number; empty: boolean; head: string[]; notes: string[]; sections: ReportSection[]; }
+const BASIS_LABEL = { period: "期間内", now: "いま", mixed: "期間内・いま" } as const;
 interface Notification {
   mode: Mode;
   discord_webhook: string | null;
@@ -31,6 +36,7 @@ interface Notification {
   on_ping: boolean;
   on_drift: boolean;
   on_unsaved: boolean;
+  report: ReportMode;
   last_sent_at: string | null;
   last_error: string | null;
 }
@@ -73,6 +79,7 @@ const EVENT_OPTIONS: [EventKey, string, string][] = [
 
 function eventsText(n: Notification): string {
   const t = EVENT_OPTIONS.filter(([k]) => n[k] ?? (k === "on_change")).map(([, label]) => label);
+  if (n.report && n.report !== "off") t.push(`定期レポート（${{ weekly: "毎週", monthly: "毎月", both: "毎週・毎月" }[n.report]}）`);
   return t.length ? t.join("・") : "（なし）";
 }
 
@@ -91,6 +98,7 @@ interface FormState {
   all_devices: boolean; device_group_ids: string[]; include_ungrouped: boolean;
   on_change: boolean; on_violation: boolean; on_failure: boolean; on_system: boolean;
   on_inventory: boolean; on_ping: boolean; on_drift: boolean; on_unsaved: boolean;
+  report: ReportMode;
 }
 
 function initForm(n: Notification | null): FormState {
@@ -99,6 +107,7 @@ function initForm(n: Notification | null): FormState {
     all_devices: n?.all_devices ?? true, device_group_ids: n?.device_group_ids ?? [], include_ungrouped: n?.include_ungrouped ?? false,
     on_change: n?.on_change ?? true, on_violation: n?.on_violation ?? false, on_failure: n?.on_failure ?? false, on_system: n?.on_system ?? true,
     on_inventory: n?.on_inventory ?? true, on_ping: n?.on_ping ?? true, on_drift: n?.on_drift ?? false, on_unsaved: n?.on_unsaved ?? false,
+    report: n?.report ?? "off",
   };
 }
 
@@ -115,6 +124,7 @@ function toPayload(mode: Mode, f: FormState) {
     include_ungrouped: f.all_devices ? false : f.include_ungrouped,
     on_change: f.on_change, on_violation: f.on_violation, on_failure: f.on_failure, on_system: f.on_system,
     on_inventory: f.on_inventory, on_ping: f.on_ping, on_drift: f.on_drift, on_unsaved: f.on_unsaved,
+    report: f.report,
   };
 }
 
@@ -173,6 +183,16 @@ function TargetForm({
         ))}
       </div>
       <div className="form-group">
+        <label className="form-label" htmlFor={`${idPrefix}-report`}>定期レポート</label>
+        <select id={`${idPrefix}-report`} value={form.report} onChange={(e) => set("report", e.target.value as ReportMode)} style={{ maxWidth: 320 }}>
+          {REPORT_OPTIONS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+        </select>
+        <p className="ntf-muted" style={{ marginTop: 4 }}>
+          期間内の収集・変更・コンプライアンス・Ping監視と、いまの基準のずれ・保存し忘れをまとめて、上の通知先へ送ります
+          （下の「通知する機器」の範囲だけで集計します。コンフィグの中身は載せません）。送る時刻は設定値 REPORT_HOUR（既定 8 時）です
+        </p>
+      </div>
+      <div className="form-group">
         <span className="form-label">通知する機器</span>
         <label className="form-check">
           <input type="checkbox" checked={form.all_devices} onChange={(e) => set("all_devices", e.target.checked)} />
@@ -217,6 +237,74 @@ function TestResult({ r }: { r: Record<string, string> | null }) {
           {k.startsWith("email:") ? `メール（${k.slice(6)}）` : KIND_LABEL[k]}: {v === "ok" ? <span style={{ color: "var(--color-success)" }}>送信しました</span> : <span style={{ color: "var(--color-danger)" }}>{v}</span>}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- 定期レポートのプレビュー・いま送る
+
+function ReportPreview({ canSend }: { canSend: boolean }) {
+  const [period, setPeriod] = useState<"week" | "month">("week");
+  const [data, setData] = useState<ReportData | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<Record<string, string> | null>(null);
+
+  const preview = async () => {
+    setBusy(true); setError(""); setResult(null);
+    try {
+      setData((await api.get<ReportData>("/notifications/report-preview", { params: { period } })).data);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const sendNow = async () => {
+    if (!confirm(`${period === "week" ? "先週" : "先月"}分のレポートを、保存済みの自分の通知先へ今すぐ送ります。よろしいですか？`)) return;
+    setError(""); setResult(null); setSending(true);
+    try {
+      setResult((await api.post("/notifications/me/report", null, { params: { period } })).data.results);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="ntf-section" data-testid="report-preview">
+      <p className="ntf-lead"><b>定期レポートの確認</b> — 保存済みの個別設定の範囲で、直前の期間の集計を表示します（送りません。続けて押せるのは数秒おき）</p>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <select value={period} onChange={(e) => { setPeriod(e.target.value as "week" | "month"); setData(null); setResult(null); }}
+          style={{ maxWidth: 200 }} aria-label="レポートの期間">
+          <option value="week">先週</option>
+          <option value="month">先月</option>
+        </select>
+        <button className="btn" onClick={preview} disabled={busy}>プレビュー</button>
+        {canSend && <button className="btn" onClick={sendNow} disabled={sending}>{sending ? "送信中..." : `いま送る（${period === "week" ? "先週" : "先月"}分）`}</button>}
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      <TestResult r={result} />
+      {data && (
+        <div className="card" style={{ marginTop: 10 }}>
+          <b>{data.title}</b>
+          {data.head.map((l, i) => <p key={`${i}-${l}`} className="ntf-muted" style={{ margin: "2px 0" }}>{l}</p>)}
+          {data.notes.map((l, i) => <p key={`${i}-${l}`} className="ntf-muted" style={{ margin: "2px 0" }}>※ {l}</p>)}
+          {data.sections.map((sec) => (
+            <div key={sec.key} style={{ marginTop: 8 }}>
+              <b>{sec.title}</b><span className="ntf-muted">（{BASIS_LABEL[sec.basis]}）</span>
+              {sec.lines.map((l, i) => <div key={`${i}-${l}`}>{l}</div>)}
+              {sec.top.length > 0 && (
+                <div className="ntf-muted">{sec.top_title}
+                  <ul style={{ margin: "2px 0 0 18px" }}>{sec.top.map((t, i) => <li key={`${i}-${t}`}>{t}</li>)}</ul>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -313,6 +401,9 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
       {error && <p className="form-error">{error}</p>}
       {msg && <p className="ntf-ok">{msg}</p>}
       <TestResult r={test} />
+      {/* 保存済みの個別設定の範囲で集計する。個別設定のときだけ出す（所属グループ・通知しないのときは、設定の範囲が無いため） */}
+      {mode === "custom" && data.mode === "custom" && <ReportPreview canSend={hasTarget(data)} />}
+      {mode === "custom" && data.mode !== "custom" && <p className="ntf-muted">定期レポートの確認と「いま送る」は、個別設定を保存すると使えます。</p>}
       <div className="btn-row">
         {mode === "custom" && hasTarget(data) && (
           <button className="btn" onClick={sendTest}>テスト通知を送る</button>

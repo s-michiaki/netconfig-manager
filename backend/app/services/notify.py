@@ -58,13 +58,14 @@ TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収�
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
                 "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知",
-                "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知"}
+                "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知", "report": "定期レポート"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
                  "inventory": "機器情報の変化を通知しました",
                  "ping": "Ping監視の応答なし・復旧を通知しました",
                  "profile": "認証情報プロファイルへの操作を所有者に通知しました",
-                 "drift": "基準からのずれを通知しました", "unsaved": "保存し忘れを通知しました"}
+                 "drift": "基準からのずれを通知しました", "unsaved": "保存し忘れを通知しました",
+                 "report": "定期レポートを送信しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 

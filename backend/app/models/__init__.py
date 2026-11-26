@@ -21,7 +21,7 @@ from app.models.device import (
 from app.models.ignore_rule import ConfigIgnoreRule
 from app.models.mail import MailServer
 from app.models.monitoring import FwHitStatus, FwRuleHit, IfSample, MonInterface, SnmpSetting
-from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
+from app.models.notification import NotificationSetting, ReportSend, UserGroup, UserGroupMember
 from app.models.ping import PingMonitor, PingResult, PingTarget
 from app.models.topology import TopologyMap
 from app.models.user import User
@@ -55,6 +55,7 @@ __all__ = [
     "PingMonitor",
     "PingResult",
     "PingTarget",
+    "ReportSend",
     "Schedule",
     "SnmpSetting",
     "TerminalSession",

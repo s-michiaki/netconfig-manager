@@ -3,13 +3,15 @@
 - 自分の通知設定: /me（閲覧者以上。自分の分だけ）
 - ユーザーグループ（メンバー・グループの通知設定）: /groups（管理者のみ）
 - 通知先の確認: /preview（管理者のみ。指定した機器グループの変更で、どこへ送られるか）
+- 定期レポート: /report-preview（自分の設定の範囲で、直前の期間のレポートを集計して返す）、/me/report（自分の宛先へ「いま送る」）
+  どちらも通知設定と同じ権限（NOTIFY_SELF）で、API トークンでは使えない（token_policy の許可一覧に無い）
 """
 import json
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -18,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.timeutil import utcnow
 from app.models.device import CredentialProfileAccess, DeviceGroup
 from app.models.notification import NotificationSetting, UserGroup, UserGroupMember
 from app.models.user import User
-from app.services import mail
+from app.services import mail, report
 from app.services.audit import Audit, get_audit
 from app.services.notify import (
     KINDS,
@@ -64,6 +67,7 @@ class NotificationIn(BaseModel):
     on_ping: bool = True
     on_drift: bool = False
     on_unsaved: bool = False
+    report: Literal["off", "weekly", "monthly", "both"] = "off"  # 定期レポート（services/report.py）
 
 
 PreviewEvent = Literal["change", "violation", "failure", "inventory", "ping", "drift", "unsaved"]
@@ -89,6 +93,7 @@ class NotificationOut(BaseModel):
     on_ping: bool = True
     on_drift: bool = False
     on_unsaved: bool = False
+    report: str = "off"
     last_sent_at: datetime | None = None
     last_error: str | None = None
 
@@ -151,6 +156,7 @@ def _out(s: NotificationSetting | None, default_mode: str) -> NotificationOut:
         on_change=s.on_change, on_violation=s.on_violation, on_failure=s.on_failure, on_system=s.on_system,
         on_inventory=s.on_inventory, on_ping=s.on_ping, on_drift=s.on_drift,
         on_unsaved=s.on_unsaved,
+        report=s.report,
         last_sent_at=s.last_sent_at,
         last_error=s.last_error,
     )
@@ -198,6 +204,7 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     if s is None:
         s = NotificationSetting(id=str(uuid.uuid4()), owner_type=owner_type, owner_id=owner_id)
         db.add(s)
+    old_mode = s.mode if s.mode is not None else "inherit"  # 新規の行は mode がまだ無い（custom ではない扱い）
     labels = GROUP_MODE_LABELS if owner_type == "group" else USER_MODE_LABELS
     changes: dict = {"mode": labels[p.mode]}
     for kind in KINDS:
@@ -215,13 +222,27 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     s.on_change, s.on_violation, s.on_failure = p.on_change, p.on_violation, p.on_failure
     s.on_system, s.on_inventory, s.on_ping = p.on_system, p.on_inventory, p.on_ping
     s.on_drift, s.on_unsaved = p.on_drift, p.on_unsaved
+    # 送るレポートの種類ごとに、「無効 → 有効」になったときだけ、その種類の since に「いま」を入れる（その時刻より前に終わった
+    # 期間は送らない）。有効のままの種類は変えない（weekly → both の週次が止まらないように）。無効になった種類は NULL。
+    # 有効 = mode が custom で、report がその種類を含む（個別設定に戻したときも、止めていた期間の分は送らない）
+    was = report.kinds_of(s.report) if old_mode == "custom" else set()
+    now_on = report.kinds_of(p.report) if p.mode == "custom" else set()
+    now_t = utcnow()
+    for k in report.KINDS:
+        col = f"report_{k}_since"
+        if k not in now_on:
+            setattr(s, col, None)
+        elif k not in was:
+            setattr(s, col, now_t)
+    s.report = p.report
     changes.update(all_devices=p.all_devices, device_groups=len(ids), include_ungrouped=p.include_ungrouped,
                    on_change=p.on_change, on_violation=p.on_violation, on_failure=p.on_failure, on_system=p.on_system,
                    on_inventory=p.on_inventory, on_ping=p.on_ping, on_drift=p.on_drift,
-                   on_unsaved=p.on_unsaved)
+                   on_unsaved=p.on_unsaved, report=p.report)
     if p.mode == "custom" and not (p.on_change or p.on_violation or p.on_failure or p.on_system
-                                    or p.on_inventory or p.on_ping or p.on_drift or p.on_unsaved):
-        raise HTTPException(status_code=422, detail="通知する内容を1つ以上選んでください")
+                                    or p.on_inventory or p.on_ping or p.on_drift or p.on_unsaved
+                                    or p.report != "off"):
+        raise HTTPException(status_code=422, detail="通知する内容（または定期レポート）を1つ以上選んでください")
     if p.mode == "custom" and not has_target(s):
         raise HTTPException(status_code=422,
                             detail="通知先（Discord・Slack・Teams の Webhook URL かメールの宛先）を1つ以上登録してください")
@@ -282,6 +303,49 @@ async def test_my_notification(
     audit("notify.test", target_type="user", target_id=user.id, target_name=user.username, detail=result["results"])
     await db.commit()
     return result
+
+
+ReportPeriod = Literal["week", "month"]
+
+
+@router.get("/report-preview")
+async def report_preview(
+    period: ReportPeriod = Query("week"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require(Perm.NOTIFY_SELF)),
+):
+    """自分の通知設定の範囲（設定が無ければすべての機器）で、直前の期間（先週・先月）のレポートを集計して返す（送らない）
+
+    集計は重いので、利用者ごとに短い間隔（PREVIEW_INTERVAL_SEC）を空ける
+    """
+    wait = await report.take_preview_slot(user.id)
+    if wait:
+        raise HTTPException(status_code=429, detail=f"続けて確認できません。{wait} 秒ほど待ってからやり直してください",
+                            headers={"Retry-After": str(wait)})
+    return (await report.preview_report(db, await _get_setting(db, "user", user.id), user, period)).to_dict()
+
+
+@router.post("/me/report")
+async def send_my_report(
+    period: ReportPeriod = Query("week"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require(Perm.NOTIFY_SELF)),
+    audit: Audit = Depends(get_audit),
+):
+    """自分の通知先へ、直前の期間（先週・先月）のレポートを「いま」送る。連打で大量に送らないよう、利用者ごとに間隔を空ける"""
+    s = await _get_setting(db, "user", user.id)
+    if not has_target(s):
+        raise HTTPException(status_code=400, detail="通知先が登録されていません")
+    wait = await report.take_send_slot(user.id)
+    if wait:
+        raise HTTPException(status_code=429, detail=f"続けて送れません。{wait} 秒ほど待ってからやり直してください",
+                            headers={"Retry-After": str(wait)})
+    results = await report.send_now(db, s, user, period)
+    out = {k: (err or "ok") for k, err in results.items()}
+    audit("notify.report_send", target_type="user", target_id=user.id, target_name=user.username,
+          detail={"period": period, **out})
+    await db.commit()
+    return {"results": out}
 
 
 # ---------------------------------------------------------------- ユーザーグループ（管理者）

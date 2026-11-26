@@ -182,6 +182,8 @@ ROUTES = {
     "GET /api/notifications/me": S,
     "PUT /api/notifications/me": S,
     "POST /api/notifications/me/test": S,
+    "GET /api/notifications/report-preview": S,  # 定期レポートの集計（機器名・件数。通知設定と同じくセッションだけ）
+    "POST /api/notifications/me/report": S,  # 自分の宛先へ定期レポートを送る
     "GET /api/notifications/groups": S,
     "POST /api/notifications/groups": S,
     "PUT /api/notifications/groups/{group_id}": S,

@@ -99,6 +99,7 @@ ACTIONS = {
     "mail.google_revoke": "メール送信の Google アカウントの同意の取り消し",
     "notify.update": "通知設定の変更",
     "notify.test": "テスト通知",
+    "notify.report_send": "定期レポートの送信（いま送る）",
     "user_group.create": "ユーザーグループ作成",
     "user_group.update": "ユーザーグループ変更",
     "user_group.delete": "ユーザーグループ削除",
