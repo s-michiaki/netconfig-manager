@@ -249,8 +249,14 @@ def _https_host(url: str) -> tuple[str, str]:
 
 
 def proxy_env(url: str) -> dict[str, str]:
-    """git のプロセスに渡すプロキシの環境変数。使わないときも、すべて空にして返す（コンテナの環境の値を使わない）"""
+    """git のプロセスに渡すプロキシの環境変数。使わないときも、すべて空にして返す（コンテナの環境の値を使わない）
+
+    GIT_HTTP_PROXY_AUTHMETHOD（http.proxyAuthMethod）: プロキシに認証情報があれば basic（最初の CONNECT から Basic を
+    付ける。git の版＝libcurl の版で「407 を受けてから付け直す」かどうかが変わらないように）。それ以外は anyauth
+    （git の既定と同じ。空にすると git が警告を出すため、既定の値を明示してコンテナの環境の値も使わない）。NTLM などは対象外
+    """
     env = dict.fromkeys(_PROXY_VARS, "")
+    env["GIT_HTTP_PROXY_AUTHMETHOD"] = "anyauth"
     scheme, host = _https_host(url)
     if not scheme:
         return env  # SSH・ローカルのパスは HTTP のプロキシを通せない（直接）
@@ -265,6 +271,9 @@ def proxy_env(url: str) -> dict[str, str]:
                            "OUTBOUND_NO_PROXY に入れてください）")
     value = settings.OUTBOUND_PROXY.strip()  # 認証情報は URL エンコードのまま（git・curl がデコードする）
     env.update(https_proxy=value, HTTPS_PROXY=value)
+    proxy = outbound.current_proxy()
+    if proxy is not None and proxy.auth:  # user:pw@・user:@（空のパスワード）
+        env["GIT_HTTP_PROXY_AUTHMETHOD"] = "basic"
     return env
 
 

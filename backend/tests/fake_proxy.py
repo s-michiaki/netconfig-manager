@@ -153,29 +153,35 @@ class FakeProxy:
     def _handle(self, conn):
         try:
             conn.settimeout(5)
-            head = _read_head(conn)
-            if not head:
-                return
-            first = head.split(b"\r\n", 1)[0].decode("latin-1")
-            if not first.startswith("CONNECT "):
-                self.plain.append(head.decode("latin-1"))
-                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                return
-            self.connects.append(head.decode("latin-1"))
-            if self.mode == "hang":
-                self.stop.wait(10)
-                return
-            if self.mode == "drip":  # CONNECT の応答を 1 文字ずつ、終わらないヘッダーで返し続ける
-                for b in b"HTTP/1.1 200 Connection established\r\nX-Pad: " + b"a" * 100000:
-                    if self.stop.is_set():
-                        return
-                    conn.sendall(bytes([b]))
-                    self.stop.wait(0.2)
-                return
-            if self.mode == "407" or (self.auth and _headers(head).get("proxy-authorization") != "Basic " + base64.b64encode(
-                    f"{self.auth[0]}:{self.auth[1]}".encode()).decode()):
-                conn.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"x\"\r\n"
-                             b"Content-Length: 0\r\n\r\n")
+            # 407 のあとも接続を保ち、同じ接続で次の CONNECT を受ける（新しい libcurl は、認証なしの CONNECT →
+            # 407（Proxy-Authenticate: Basic）→ 同じ接続で認証つきの CONNECT、の順に送る）。接続を閉じても新しい接続で受けられる
+            for _ in range(5):
+                head = _read_head(conn)
+                if not head:
+                    return
+                first = head.split(b"\r\n", 1)[0].decode("latin-1")
+                if not first.startswith("CONNECT "):
+                    self.plain.append(head.decode("latin-1"))
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    return
+                self.connects.append(head.decode("latin-1"))
+                if self.mode == "hang":
+                    self.stop.wait(10)
+                    return
+                if self.mode == "drip":  # CONNECT の応答を 1 文字ずつ、終わらないヘッダーで返し続ける
+                    for b in b"HTTP/1.1 200 Connection established\r\nX-Pad: " + b"a" * 100000:
+                        if self.stop.is_set():
+                            return
+                        conn.sendall(bytes([b]))
+                        self.stop.wait(0.2)
+                    return
+                want = "Basic " + base64.b64encode(f"{self.auth[0]}:{self.auth[1]}".encode()).decode() if self.auth else None
+                if self.mode == "407" or (want and _headers(head).get("proxy-authorization") != want):
+                    conn.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                                 b"Proxy-Authenticate: Basic realm=\"fake-proxy\"\r\nContent-Length: 0\r\n\r\n")
+                    continue
+                break
+            else:
                 return
             target = first.split()[1]
             host = target.rsplit(":", 1)[0].strip("[]")
