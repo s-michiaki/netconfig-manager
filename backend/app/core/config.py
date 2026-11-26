@@ -153,9 +153,21 @@ class Settings(BaseSettings):
     # 機器名・IP・バージョンは外部へ送らない（取得する URL に含めない）。無効のあいだは外部へ一切つながない
     VULN_ENABLED: bool = False
     VULN_FETCH_HOUR: int = Field(default=4, ge=0, le=23)  # 毎日この時刻（TIMEZONE）以降の最初の判定で取得する
-    VULN_HTTPS_PROXY: str = ""  # 外部へ出るときのプロキシ（http:// だけ。例: http://proxy.example.test:3128）。空なら直接つなぐ
     # 使う情報源（カンマ区切り）。paloalto=Palo Alto の勧告 / kev=CISA の悪用確認済み一覧 / eol=endoflife.date のサポート終了日
     VULN_SOURCES: str = "paloalto,kev,eol"
+
+    # --- 外部への接続（インターネットへの HTTP(S)。app/core/outbound.py） ---
+    # 対象: Discord・Slack・Teams の Webhook、メールの OAuth 2.0 のトークンの取得、脆弱性情報の取得。
+    # 外部 Git（https://）は git に環境変数で渡す（services/git_export.py）。SMTP・SSH・踏み台・DB・Redis は通さない
+    # プロキシ（http://[ユーザー:パスワード@]ホスト:ポート。http:// だけ。空なら直接つなぐ）。
+    # ユーザー名・パスワードの記号は URL エンコードで書く（@ → %40 など）。環境変数の HTTPS_PROXY などは見ない
+    OUTBOUND_PROXY: str = ""
+    # プロキシを通さない宛先（カンマ区切り。ホスト名・ドメイン（後方一致）・IP・CIDR。* はすべて直接）。
+    # localhost・ループバック・コンテナ名（db・redis など）は書かなくても常に直接つなぐ
+    OUTBOUND_NO_PROXY: str = ""
+    # 追加で信頼する CA 証明書（PEM。HTTPS の中身を検査するプロキシの CA など）。ホストの certs-outbound/ に置いた
+    # ファイルの名前（コンテナの中では OUTBOUND_CA_DIR の下）か、コンテナの中の絶対パス。空なら追加しない
+    OUTBOUND_CA_FILE: str = ""
 
     # --- 通知 ---
     # 利用者がブラウザで開く URL（例: https://netconfig.example.local）。通知に画面へのリンクを付けるのに使う。空ならリンクなし
@@ -191,27 +203,31 @@ class Settings(BaseSettings):
             ) from e
         return v
 
-    @field_validator("VULN_HTTPS_PROXY")
+    @field_validator("OUTBOUND_PROXY")
     @classmethod
-    def _check_vuln_proxy(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            return ""
-        from urllib.parse import urlsplit
+    def _check_outbound_proxy(cls, v: str) -> str:
+        from app.core import outbound  # 遅く読む（outbound は settings を読む）
 
-        try:
-            sp = urlsplit(v)
-            scheme = sp.scheme.lower()
-            ok = scheme == "http" and bool(sp.hostname) and (sp.port or 1) > 0
-        except ValueError:
-            scheme, ok = "", False
-        # 値（認証情報を含みうる）はエラーに出さない
-        if scheme == "https":  # プロキシとの間を TLS にする方式には対応していない（平文で認証情報を送ってしまうため受け付けない）
-            raise ValueError("VULN_HTTPS_PROXY は http:// で指定してください（プロキシとの間は暗号化されません。"
-                             "宛先との通信は TLS で保護されます。https:// のプロキシには対応していません）")
-        if not ok:
-            raise ValueError("VULN_HTTPS_PROXY は http:// で始まるプロキシの URL で指定してください"
-                             "（例: http://proxy.example.test:3128）")
+        v = v.strip()
+        outbound.parse_proxy(v)  # 不正なら ValueError（値・認証情報は文に入れない）
+        return v
+
+    @field_validator("OUTBOUND_NO_PROXY")
+    @classmethod
+    def _check_outbound_no_proxy(cls, v: str) -> str:
+        from app.core import outbound
+
+        outbound.parse_no_proxy(v)  # 不正な項目があれば ValueError
+        return v.strip()
+
+    @field_validator("OUTBOUND_CA_FILE")
+    @classmethod
+    def _check_outbound_ca(cls, v: str) -> str:
+        from app.core import outbound
+
+        v = v.strip()
+        if v:
+            outbound.load_ca_file(outbound.resolve_ca_path(v))  # 読めない・PEM でない・証明書が無い → ValueError
         return v
 
     @property

@@ -11,6 +11,7 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -283,7 +284,7 @@ def test_fetch_too_large_and_total_timeout(net, monkeypatch):
 
 
 def test_error_text_has_no_url_query_or_proxy_credentials(net, monkeypatch):
-    monkeypatch.setattr(settings, "VULN_HTTPS_PROXY", "http://proxyuser:proxypass@proxy.example.test:3128")
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "http://proxyuser:proxypass@proxy.example.test:3128")
     leak = "http://proxyuser:proxypass@proxy.example.test:3128 https://www.cisa.gov/x?token=SECRET123"
     for exc in (urllib.error.URLError(OSError(f"Tunnel connection failed: 407 Proxy Authentication Required {leak}")),
                 urllib.error.URLError(OSError(leak)), OSError(leak), ValueError(leak)):
@@ -460,13 +461,13 @@ class _ProxyServer(_LocalServer):
 
 
 def test_proxy_setting_is_used_for_connect_and_env_proxy_is_ignored(monkeypatch):
-    """VULN_HTTPS_PROXY へ CONNECT する（認証情報は Proxy-Authorization だけ・環境変数のプロキシ／NO_PROXY は見ない）"""
+    """OUTBOUND_PROXY へ CONNECT する（認証情報は Proxy-Authorization だけ・環境変数のプロキシ／NO_PROXY は見ない）"""
     monkeypatch.setattr(vf, "_open", _REAL_OPEN)
     proxy = _ProxyServer("proxy")
     try:
         monkeypatch.setenv("NO_PROXY", "security.paloaltonetworks.com,*")  # 環境変数の迂回指定は効かない
         monkeypatch.setenv("HTTPS_PROXY", "http://env-proxy.invalid:1")
-        monkeypatch.setattr(settings, "VULN_HTTPS_PROXY", f"http://proxyuser:proxypass@127.0.0.1:{proxy.port}")
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", f"http://proxyuser:proxypass@127.0.0.1:{proxy.port}")
         with pytest.raises(vf.FetchError) as e:
             vf.fetch_bytes(vf.URL_PALOALTO)
         text = str(e.value)
@@ -489,12 +490,12 @@ def test_no_proxy_means_direct_and_env_proxy_unused(monkeypatch):
 
     monkeypatch.setattr(vf, "_open", _REAL_OPEN)
     monkeypatch.setenv("HTTPS_PROXY", "http://env-proxy.invalid:1")
-    monkeypatch.setattr(settings, "VULN_HTTPS_PROXY", "")
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "")
     monkeypatch.setattr(vf._GuardedHTTPS, "__init__", spy)
     with pytest.raises(vf.FetchError):
         vf.fetch_bytes(vf.URL_KEV)
     monkeypatch.setattr(vf._GuardedHTTPS, "__init__", real)
-    assert seen["proxy"] == ""
+    assert seen["proxy"] is None
 
 
 @pytest.mark.parametrize("value,ok", [
@@ -511,13 +512,13 @@ def test_proxy_setting_is_validated_without_echoing_value(value, ok):
     from app.core.config import Settings
 
     base = {"SECRET_KEY": "x" * 40, "DEVICE_ENCRYPTION_KEY": Fernet.generate_key().decode(),
-            "VULN_HTTPS_PROXY": value}
+            "OUTBOUND_PROXY": value}
     if ok:
-        assert value == Settings(_env_file=None, **base).VULN_HTTPS_PROXY
+        assert value == Settings(_env_file=None, **base).OUTBOUND_PROXY
     else:
         with pytest.raises(ValidationError) as e:
             Settings(_env_file=None, **base)
-        assert "VULN_HTTPS_PROXY" in str(e.value) and "topsecret" not in str(e.value)
+        assert "OUTBOUND_PROXY" in str(e.value) and "topsecret" not in str(e.value)
         if value.lower().startswith("https://"):
             assert "http:// で指定" in str(e.value) and "暗号化されません" in str(e.value)
 
@@ -525,10 +526,31 @@ def test_proxy_setting_is_validated_without_echoing_value(value, ok):
 def test_https_proxy_is_refused_at_connect_time_too(monkeypatch):
     """設定の検査をすり抜けても（実行中の差し替えなど）、https:// のプロキシへは接続しない（認証情報を送らない）"""
     monkeypatch.setattr(vf, "_open", _REAL_OPEN)
-    monkeypatch.setattr(settings, "VULN_HTTPS_PROXY", "https://topsecret-user:topsecret-pw@127.0.0.1:9")
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "https://topsecret-user:topsecret-pw@127.0.0.1:9")
     with pytest.raises(vf.FetchError) as e:
         vf.fetch_bytes(vf.URL_PALOALTO)
     assert "http://" in str(e.value) and "topsecret" not in str(e.value) and "127.0.0.1" not in str(e.value)
+
+
+def test_proxy_auth_failure_recorded_in_last_error_without_secrets(monkeypatch, enabled, caplog):
+    """407: 情報源の last_error・取得の結果・ログに、プロキシのユーザー名・パスワード・Proxy-Authorization を残さない"""
+    import logging
+
+    from fake_proxy import FakeProxy
+
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(vf, "_open", _REAL_OPEN)
+    user, pw = "vuln-proxy-MARKU", "pw:MARK@P"
+    token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    with FakeProxy(mode="407") as px:
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", px.url(user, urllib.parse.quote(pw, safe="")))
+        res = run(_fetch(["kev"]))
+    err = res["sources"]["kev"]["error"]
+    saved = sources_state()["kev"].last_error or ""
+    assert "プロキシの認証に失敗しました" in err and err == saved
+    for text in (err, saved, json.dumps(res, ensure_ascii=False, default=str), caplog.text):
+        assert "MARKU" not in text and "MARK@P" not in text and "MARK%40P" not in text and token not in text
+    assert f"Basic {token}" in px.connects[0]
 
 
 # ================================================================ 解析
@@ -1670,7 +1692,7 @@ def test_tls_rejects_untrusted_and_wrong_host_certificates(monkeypatch, real_ope
         if case == "trusted":
             assert vf.fetch_json(url) == {"ok": True}  # 試験の組み立てが正しいこと（信頼する CA なら通る）
         else:
-            with pytest.raises(vf.FetchError, match="TLS の検証に失敗"):
+            with pytest.raises(vf.FetchError, match="証明書を検証できません"):
                 vf.fetch_bytes(url)
     finally:
         srv.close()

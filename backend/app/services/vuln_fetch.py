@@ -7,14 +7,14 @@
 - **機器名・IP・OS バージョンを URL・ヘッダーに入れない**。取得は製品単位（PAN-OS の勧告すべて、など）で行い、
   どの機器が該当するかの照合はサーバーの中（services/vuln_match.py）で行う。ここの関数は機器の情報を引数に取らない
 - 失敗の説明（FetchError）には URL・クエリ・プロキシの認証情報・相手の応答の本文を入れない（種類と HTTP のコードだけ）
-- プロキシは VULN_HTTPS_PROXY（http:// だけ。空なら直接。環境変数のプロキシは使わない）。プロキシとの間は平文で、
-  宛先との TLS は CONNECT のトンネルの中で張る（証明書とホスト名の検証は ssl.create_default_context のまま弱めない）
+- プロキシと TLS の文脈は core/outbound.py から取る（OUTBOUND_PROXY・OUTBOUND_NO_PROXY・OUTBOUND_CA_FILE。
+  環境変数のプロキシは使わない）。プロキシとの間は平文で、宛先との TLS は CONNECT のトンネルの中で張る
+  （証明書とホスト名の検証は ssl.create_default_context のまま弱めない。追加の CA は信頼に「足す」だけ）
 - TLS のハンドシェイクも全体の期限の見張り（_Guard）の中で行う（ハンドシェイクの途中で止まる相手でも打ち切れる）
 - 外から来た文字列（題・URL）は、長さを切り詰め、URL は https で許可リストのホストのものだけ残す
 
 テストでは _open（urlopen 相当）を差し替える。実際の通信は、有効にしたときの worker だけが行う
 """
-import base64
 import functools
 import http.client
 import json
@@ -30,7 +30,7 @@ from contextlib import closing
 from datetime import UTC, date, datetime
 from typing import Any
 
-from app.core.config import settings
+from app.core import outbound
 from app.services import vuln_match as vm
 
 ALLOWED_HOSTS = frozenset({
@@ -166,22 +166,6 @@ class _Guard:
 _tl = threading.local()  # 取得を行うスレッドの _Guard（_open が接続にひもづける）
 
 
-def _proxy_parts(proxy: str) -> tuple[str, int, dict[str, str]]:
-    """VULN_HTTPS_PROXY → (ホスト, ポート, CONNECT に付けるヘッダー)。認証情報は Proxy-Authorization にだけ使う
-
-    http:// のプロキシだけ（設定の検査でも弾く。ここでも念のため確かめる）。プロキシとの間は暗号化されないので、
-    認証情報つきのプロキシでは、プロキシまでの区間で認証情報が平文で流れる（README に明記）
-    """
-    sp = urllib.parse.urlsplit(proxy)
-    if sp.scheme.lower() != "http" or not sp.hostname:
-        raise FetchError("プロキシの URL は http:// で指定してください（値は表示しません）")
-    headers = {}
-    if sp.username:
-        cred = f"{urllib.parse.unquote(sp.username)}:{urllib.parse.unquote(sp.password or '')}"
-        headers["Proxy-Authorization"] = "Basic " + base64.b64encode(cred.encode()).decode()
-    return sp.hostname, sp.port or 80, headers
-
-
 class _GuardedMixin:
     """接続のソケットを _Guard に登録する（TCP 接続・プロキシ経由のトンネル・TLS のあとのソケット）"""
 
@@ -210,14 +194,13 @@ class _GuardedHTTP(_GuardedMixin, http.client.HTTPConnection):
 
 
 class _GuardedHTTPS(_GuardedMixin, http.client.HTTPSConnection):
-    """https。VULN_HTTPS_PROXY があれば、そこへ CONNECT して通す（環境変数のプロキシ・NO_PROXY は見ない）"""
+    """https。プロキシ（outbound.proxy_for）があれば、そこへ CONNECT して通す（環境変数のプロキシ・NO_PROXY は見ない）"""
 
-    def __init__(self, host, *args, guard=None, proxy: str = "", **kwargs):
-        if proxy:
-            phost, pport, pheaders = _proxy_parts(proxy)
-            super().__init__(phost, pport, *args, **kwargs)
-            hostname, _, port = host.partition(":")
-            self.set_tunnel(hostname, int(port) if port else 443, pheaders)
+    def __init__(self, host, *args, guard=None, proxy: outbound.Proxy | None = None, **kwargs):
+        if proxy is not None:
+            super().__init__(proxy.host, proxy.port, *args, **kwargs)
+            hostname, port = self._get_hostport(host, 443)
+            self.set_tunnel(hostname, port, proxy.connect_headers())
         else:
             super().__init__(host, *args, **kwargs)
         self._setup_guard(guard)
@@ -227,9 +210,12 @@ class _GuardedHTTPS(_GuardedMixin, http.client.HTTPSConnection):
 
         wrap_socket の既定（do_handshake_on_connect=True）では、包む前の TCP のソケットは detach され、見張りが閉じても
         ハンドシェイクの読み取りは止まらない。そこで包んだソケットを先に見張りに登録してから、ハンドシェイクする。
-        証明書とホスト名の検証は、渡された context（ssl.create_default_context）と本来の宛先（server_hostname）のまま
+        証明書とホスト名の検証は、渡された context（outbound.tls_context）と本来の宛先（server_hostname）のまま
         """
-        http.client.HTTPConnection.connect(self)  # TCP の接続（見張りに登録済み）と、プロキシなら CONNECT のトンネル
+        if self._tunnel_host:
+            outbound.open_tunnel(self)  # プロキシへの TCP の接続（見張りに登録済み）と CONNECT。失敗は種類の分かる ProxyError
+        else:
+            http.client.HTTPConnection.connect(self)  # TCP の接続（見張りに登録済み）
         server_hostname = self._tunnel_host or self.host
         sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname, do_handshake_on_connect=False)
         self.sock = sock
@@ -245,18 +231,19 @@ class _GuardedHTTPHandler(urllib.request.HTTPHandler):
 
 class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        factory = functools.partial(_GuardedHTTPS, guard=getattr(_tl, "guard", None), proxy=settings.VULN_HTTPS_PROXY.strip())
+        proxy = outbound.proxy_for(urllib.parse.urlsplit(req.full_url).hostname or req.host)
+        factory = functools.partial(_GuardedHTTPS, guard=getattr(_tl, "guard", None), proxy=proxy)
         kwargs = {"context": self._context} if getattr(self, "_context", None) is not None else {}
         return self.do_open(factory, req, **kwargs)
 
 
 def _tls_context() -> ssl.SSLContext:
-    """宛先との TLS の設定。証明書の検証とホスト名の確認を行う既定の設定（弱めない。テストでは信頼する CA だけ差し替える）"""
-    return ssl.create_default_context()
+    """宛先との TLS の設定（outbound.tls_context: 既定の検証＋OUTBOUND_CA_FILE を足したもの。弱めない）"""
+    return outbound.tls_context()
 
 
 def _open(req: urllib.request.Request, timeout: float):
-    """urlopen 相当（テストで差し替える）。プロキシは VULN_HTTPS_PROXY だけ（環境変数のものは使わない）"""
+    """urlopen 相当（テストで差し替える）。プロキシは OUTBOUND_PROXY だけ（環境変数のものは使わない）"""
     handlers = [urllib.request.ProxyHandler({}), _GuardedHTTPHandler(), _GuardedHTTPSHandler(context=_tls_context()),
                 _AllowlistRedirect()]
     return urllib.request.build_opener(*handlers).open(req, timeout=timeout)
@@ -265,15 +252,12 @@ def _open(req: urllib.request.Request, timeout: float):
 def _describe(e: BaseException) -> str:
     """接続の失敗の説明。例外の文言（URL・プロキシの認証情報・相手が返した行が入りうる）は使わず、種類だけにする"""
     reason = getattr(e, "reason", e)
-    text = str(reason)
-    if isinstance(reason, (TimeoutError, socket.timeout)):
-        return "時間切れ（相手が応答しません）"
+    if hit := outbound.classify(e):  # プロキシに届かない・407・ほかの拒否・証明書・時間切れ（文は秘密を含まない）
+        return hit[1]
     if isinstance(reason, ssl.SSLError):
-        return "TLS の検証に失敗しました"
+        return "TLS の接続に失敗しました"
     if isinstance(reason, socket.gaierror):
         return "名前を解決できません（DNS・プロキシの設定を確認してください）"
-    if m := re.search(r"Tunnel connection failed: (\d{3})", text):
-        return f"プロキシ経由で接続できません（プロキシが HTTP {m.group(1)} を返しました。認証・許可を確認してください）"
     if isinstance(reason, ConnectionRefusedError):
         return "接続を拒否されました"
     if isinstance(reason, http.client.HTTPException):

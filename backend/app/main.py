@@ -36,6 +36,7 @@ from app.api import (
     vulns,
 )
 from app.api.deps import get_current_user, require, require_session
+from app.core import outbound
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
 from app.core.database import AsyncSessionLocal, engine
@@ -79,6 +80,8 @@ async def _migrate_legacy_repos() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 外部への接続の設定（プロキシはホスト:ポートと認証の有無だけ）。廃止した VULN_HTTPS_PROXY が残っていれば知らせる
+    outbound.startup_log(logger)
     # DBスキーマを最新化（Alembic）。Alembic 導入前のDBも自動で引き継ぐ
     await asyncio.to_thread(run_migrations)
     await _encrypt_legacy_passwords()
@@ -96,7 +99,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.63.0",
+    version="1.64.0",
     lifespan=lifespan,
 )
 

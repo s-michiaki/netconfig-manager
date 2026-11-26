@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import outbound
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
@@ -315,18 +316,17 @@ def build_test_payload(kind: str, owner_label: str) -> dict:
 # ---------------------------------------------------------------- 送信
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """リダイレクトをたどらない（Teams の宛先は公式のホストに限るので、別のホストへ転送されないようにする）"""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+# 外へ出る通信は core/outbound.py の opener を使う（OUTBOUND_PROXY・OUTBOUND_CA_FILE。環境変数のプロキシは見ない）
 
 
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+def _open_default(req: urllib.request.Request, timeout: float):
+    """Discord・Slack（リダイレクトは urllib の既定どおりたどる）"""
+    return outbound.urlopen(req, timeout=timeout)
 
 
 def _open_no_redirect(req: urllib.request.Request, timeout: float):
-    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)
+    """Teams: リダイレクトをたどらない（宛先は公式のホストに限るので、別のホストへ転送されないようにする）"""
+    return outbound.urlopen(req, timeout=timeout, redirect=False)
 
 
 def _scrub(kind: str, url: str, text: str) -> str:
@@ -352,7 +352,7 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
     if not valid_webhook(kind, url):
         return "Webhook URL の形式が正しくありません"
     body = json.dumps(payload, ensure_ascii=False).encode()
-    opener = _open_no_redirect if kind == "teams" else urllib.request.urlopen
+    opener = _open_no_redirect if kind == "teams" else _open_default
     for attempt in range(2):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Content-Type": "application/json", "User-Agent": "NetConfig-Manager",
@@ -379,9 +379,9 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
             if kind == "teams":
                 return f"HTTP {e.code}（Teams・Power Automate 側のエラーです。ワークフローの実行の履歴を確認してください）"
             return f"HTTP {e.code} {detail}".strip()
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            reason = getattr(e, "reason", e)
-            return _scrub(kind, url, f"送信できません（{reason}）")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            # プロキシ・証明書・時間切れは分かる文に。そのほかは例外の文を、プロキシの認証情報と（Teams は）URL を伏せて
+            return _scrub(kind, url, outbound.scrub(f"送信できません（{outbound.describe(e)}）"))
     return "レート制限のため送信できませんでした"
 
 

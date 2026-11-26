@@ -159,6 +159,7 @@ ROUTES = {
     # システム・メール・ダッシュボード・モニタリング
     "GET /api/system/status": T,
     "POST /api/system/git-export": S,
+    "POST /api/system/outbound-check": S,  # 外部へ送る操作（管理者がログインして行う）
     "GET /api/mail/server": S,
     "PUT /api/mail/server": S,
     "POST /api/mail/server/test": S,

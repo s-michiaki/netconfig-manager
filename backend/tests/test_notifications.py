@@ -245,7 +245,7 @@ def test_send_webhook_retry_and_errors(monkeypatch):
             raise r
         return r
 
-    monkeypatch.setattr(notify.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(notify, "_open_default", fake_urlopen)
     url = "https://discord.com/api/webhooks/1/abc"
     assert notify.send_webhook("discord", url, {"content": "日本語"}) is None
     assert len(calls) == 2 and calls[0]["content"] == "日本語"
@@ -517,8 +517,8 @@ def test_teams_send_success_and_headers(monkeypatch):
         return Resp(b"")
 
     monkeypatch.setattr(notify, "_open_no_redirect", fake_open)
-    # Discord・Slack は従来どおり urllib.request.urlopen（Teams の経路を通らない）
-    monkeypatch.setattr(notify.urllib.request, "urlopen", lambda *a, **k: pytest.fail("Teams は urlopen を使わない"))
+    # Discord・Slack は _open_default（リダイレクトをたどる。Teams の経路を通らない）
+    monkeypatch.setattr(notify, "_open_default", lambda *a, **k: pytest.fail("Teams は _open_default を使わない"))
     payload = notify.build_test_payload("teams", "ops")
     assert notify.send_webhook("teams", TEAMS_OK, payload) is None  # 202 は成功
     url, method, headers, body, timeout = seen[0]
@@ -610,9 +610,9 @@ def test_teams_does_not_follow_redirects():
         with pytest.raises(urllib.error.HTTPError) as e:
             notify._open_no_redirect(req, 5)
         assert e.value.code == 302 and hits == [("POST", "/first")]  # /second へは行かない
-        # 比べ: 普通の urlopen（Discord・Slack）は 302 をたどる
+        # 比べ: Discord・Slack の経路（_open_default）は 302 をたどる
         hits.clear()
-        with urllib.request.urlopen(urllib.request.Request(f"{base}/first", data=b"{}", method="POST"), timeout=5) as r:
+        with notify._open_default(urllib.request.Request(f"{base}/first", data=b"{}", method="POST"), timeout=5) as r:
             assert r.status == 202
         assert hits == [("POST", "/first"), ("GET", "/second")]
     finally:
@@ -744,7 +744,7 @@ def test_teams_group_dedupe_and_failure_keeps_url_out_of_last_error(ctx, monkeyp
         def no_net(*a, **k):  # 共有 DB に残った Discord / Slack の設定で、外へ送らない
             raise urllib.error.URLError("blocked in test")
 
-        monkeypatch.setattr(notify.urllib.request, "urlopen", no_net)
+        monkeypatch.setattr(notify, "_open_default", no_net)
         r = c.post(f"/api/notifications/groups/{gid}/test", headers=admin)
         assert r.status_code == 200 and r.json()["results"]["teams"].startswith("HTTP 500")
         assert "SIGEXAMPLE" not in r.text and "WFIDEXAMPLE" not in r.text

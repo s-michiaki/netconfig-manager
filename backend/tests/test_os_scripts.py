@@ -45,6 +45,8 @@ while [[ "${1:-}" == -* ]]; do case "$1" in -u) shift 2 ;; *) shift ;; esac; don
 exec "$@"
 """
 COMMANDS = ["dnf", "apt-get", "apt", "rpm", "dpkg", "ufw", "firewall-cmd", "systemctl", "curl", "aa-status"]
+PROXY_ENV = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY",
+             "GIT_SSL_CAINFO", "OUTBOUND_CA_FILE", "NCM_OS_CA_BUNDLE")
 
 
 @pytest.fixture
@@ -69,7 +71,8 @@ def box(tmp_path):
 
         def env(self, release, **extra):
             # DEBIAN_FRONTEND は、lib が apt-get に渡すかを確かめるため、呼び出し側の環境からは外しておく
-            base = {k: v for k, v in os.environ.items() if k != "DEBIAN_FRONTEND"}
+            # 実行する人の環境のプロキシ（開発機・CI の設定）も外す（check_env.sh が拾うため）
+            base = {k: v for k, v in os.environ.items() if k != "DEBIAN_FRONTEND" and k not in PROXY_ENV}
             return {**base, "PATH": f"{stubs}:{os.environ['PATH']}", "FAKE_LOG": str(self.log),
                     "NCM_OS_RELEASE_FILE": str(release), "LC_ALL": "C",
                     "NCM_SYSTEMD_DROPIN_DIR": str(tmp_path / "dropin"), **extra}

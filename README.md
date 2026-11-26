@@ -151,6 +151,85 @@ bash setup.sh
 | gpg の案内（バックアップの暗号化） | `gnupg2` | `gnupg` |
 | 定期バックアップ（systemd タイマー） | `/etc/systemd/system/netconfig-backup.{service,timer}` | 同じ（パスの違いはありません） |
 
+### プロキシ環境での導入（`setup.sh`）
+
+直接インターネットへ出られないサーバーでは、`setup.sh` の外へ出るコマンド（git の clone・pull、dnf / apt-get、`podman pull`、コンテナのビルドの中の apt-get・pip・npm・apk）をプロキシに通します。設定はアプリと同じ `.env` の `OUTBOUND_PROXY`・`OUTBOUND_NO_PROXY`・`OUTBOUND_CA_FILE`（意味は「外部への接続（プロキシ・組織の CA）」）で、`.env` に無い・空のときだけ実行時の環境変数（`https_proxy` → `HTTPS_PROXY` → `http_proxy` → `HTTP_PROXY`、`no_proxy` / `NO_PROXY`）を使います。**設定しなければ、今までどおり直接つなぎます**。
+
+**初回の導入**（`.env` がまだ無い）は環境変数で渡します。渡した値は `.env` を作るときに書き込み、以後の更新とアプリが使います（空の値は書きません）。
+
+```bash
+# 認証なし
+export https_proxy=http://proxy.example.test:3128
+bash setup.sh
+
+# 認証あり: パスワードをコマンドの履歴・プロセスの一覧に残さないよう、画面に出さずに読み込んでから実行する
+read -rsp 'プロキシの URL（http://ユーザー:パスワード@ホスト:ポート）: ' https_proxy; echo; export https_proxy
+bash setup.sh
+unset https_proxy
+```
+
+- `sudo https_proxy=http://… bash setup.sh` の形でも動きますが、URL がコマンドの履歴に残り、実行中は `sudo` の引数としてプロセスの一覧（`ps`）から見えます。認証ありのときは上の書き方にしてください（root で動かすなら、`export` したあと `sudo --preserve-env=https_proxy bash setup.sh`）
+- プロキシを通さない宛先: `export no_proxy=intranet.example.test,10.0.0.0/8`（`OUTBOUND_NO_PROXY` として保存）。`localhost`・`127.0.0.1`・`::1`・コンテナ名（`db`・`redis`・`backend`・`worker`・`beat`・`frontend`）は書かなくても常に入れます（保存もしません）
+  - 書ける項目（アプリと同じ規則。カンマか空白で区切る）: ホスト名（`intranet.example.test`）、ドメイン（`.example.test`。`*.example.test` は `.example.test` とみなす）、IP・CIDR（`10.0.0.0/8`・`2001:db8::/32`・`[::1]`）、`*`（すべて直接）。大文字は小文字に、末尾の `.` は外します
+  - 書けない項目: ポートつき（`host.example.test:8080`・`[::1]:80`）、`<local>`、途中の `*`（`10.*`・`*example.test`）、英字以外の文字のドメイン。**環境変数から取り込むときは、これらを除いて保存し、何を除いたかを画面に出します**（そのまま保存すると backend・worker が起動時の検査で止まるため）。`.env` の `OUTBOUND_NO_PROXY` に書けない項目があるときは、どのキーのどの項目かを示して、コンテナを作り直す前に止まります
+  - `.example.test` の意味は道具で違います（アプリは「そのドメインと配下」、podman（Go）などは「配下だけ」）。`setup.sh` が各コマンドに渡す `no_proxy` には、`.example.test` に `example.test` も足します。手で設定するときに両方へ効かせたいなら `example.test,.example.test` と 2 つ書いてください
+- HTTPS の中身を検査するプロキシ（組織の CA）: CA（PEM）のファイルを `export OUTBOUND_CA_FILE=/root/example-corp-ca.pem` で渡すと、ソースの取得のあとで `certs-outbound/outbound-ca.pem` に写し、`.env` に `OUTBOUND_CA_FILE=outbound-ca.pem` を書きます。パッケージの導入（dnf / apt-get）と `podman pull` は OS の信頼ストアを使うので、**先に OS へ登録してください**（下の「CA を OS に登録する」。git の導入・clone のためにも要ります）
+  - CA のファイルに秘密鍵（`PRIVATE KEY`）が入っていると止まります（証明書だけのファイルにしてください）。各証明書は `openssl x509` で読めるかを確かめます（openssl が無ければ形式だけを確かめ、そのことを表示します）。写すとき（`certs-outbound/`・ビルド用の `build-ca/`・git 用の束）は、`CERTIFICATE` のブロックだけを書き出します
+- 形式は `http://[ユーザー:パスワード@]ホスト:ポート` だけです。ユーザー名があるならパスワードも要ります（空のパスワードは `http://ユーザー:@ホスト:ポート` と `:` を付けて書く。アプリと同じ）。ユーザー名・パスワードの記号は URL エンコードで書きます（「外部への接続」の表）
+  - **`.env` の `OUTBOUND_PROXY` が正しくないとき**は、値を表示せずに理由とキーだけを出して止まります（アプリも起動できないため。ソースの更新・ビルド・コンテナの作り直しの前＝今のコンテナが動いているうちに止めます）
+  - **環境変数の値が正しくないとき**（スキームの無い `proxy.example.test:3128`・`https://`・`socks5://`・ユーザー名だけ など。サーバーの `/etc/environment` などにあるもの）は止めません。「環境変数のプロキシ（形式が違うため）は使いません。今までどおり直接つなぎます」と警告して、今までと同じ動きにします（スキームの無い値を `http://` とみなすような読み替えはしません）。その結果つながらなかったときは、失敗の案内でもそのことを示します。使うには `.env` に `OUTBOUND_PROXY=http://…` を書いてください
+
+**更新**では `.env` の値を使います。古い導入で `.env` にキーが無いときに環境変数で渡すと、その値を `.env` の末尾に足します（「.env に保存しました: OUTBOUND_PROXY=http://\*\*\*@proxy.example.test:3128」のように伏せ字で表示。既存の行は書き換えません）。`.env` に空の値（`OUTBOUND_PROXY=`）で書いてあるときは足さず、その回の導入・更新だけ環境変数を使います（アプリは直接つなぐので、アプリにも使うときは `.env` に書いてください）。`.env` に廃止した `VULN_HTTPS_PROXY` が残っていれば、`OUTBOUND_PROXY` へ移すよう 1 行出します。
+
+**どのコマンドに、どう渡すか**
+
+| コマンド | プロキシ | 追加の CA |
+|---|---|---|
+| git の clone・pull | 環境変数 | OS の信頼ストアと追加の CA を束ねた一時ファイルを `GIT_SSL_CAINFO` で渡す（終了時に消す。OS の設定は変えない） |
+| dnf / apt-get・`podman pull` | 環境変数 | OS の信頼ストア（利用者が登録する。未登録なら手順を表示） |
+| コンテナのビルド（`podman-compose build`） | `podman build` が既定で RUN の中にだけ渡す（イメージの環境変数・履歴には保存しない） | `setup.sh` がビルドの直前に `backend/build-ca/`・`frontend/build-ca/` へ写し、Dockerfile が apt-get・pip（OS の信頼ストア）・npm（`NODE_EXTRA_CA_CERTS`）・apk（`SSL_CERT_FILE`）に使わせる。backend のイメージには CA が入る（実行時のアプリも使う。証明書は秘密ではない）。frontend のイメージのファイルとしては残さない |
+| コンテナの起動（`podman-compose up`） | **渡さない**（podman は既定で、起動したプロセスのプロキシの環境変数をコンテナにも入れるため、外してから起動する。アプリは `.env` の `OUTBOUND_PROXY` だけを使う） | — |
+
+- `sudo` は環境変数を落とすので、値ではなく**名前**で引き継ぎます（`sudo --preserve-env=http_proxy,https_proxy,…`。コマンドラインと sudo のログに値が出ない）。sudo の設定で名前の引き継ぎが許されないとき（`timestamp_timeout=0` などで確かめの `sudo -n` が通らないときも）は、値を自分だけが読める一時ファイル（0600。終了時に消す）に書き、`sudo bash -c '. <ファイル>; …'` で root に読ませます（コマンドラインと sudo のログ（journal・`/var/log/auth.log`・`/var/log/secure`）にはファイルのパスしか出ません）。`sudo env 変数=値` の形は使いません
+- `setup.sh` の画面に出すのは `http://***@proxy.example.test:3128` の形だけです。`bash -x setup.sh` で実行しても、値を扱うところでは表示を止めます。`podman-compose build`・`up` の出力（podman-compose 1.0.6 は、実行する `podman run … -e SECRET_KEY=… -e OUTBOUND_PROXY=…` をそのまま表示します）は伏せ字のフィルタに通し、秘密らしい名前のキー（`PASSWORD`・`SECRET`・`KEY`・`TOKEN`・`PROXY` など）の値と `scheme://ユーザー:パスワード@` の形を伏せます（終了コードは podman-compose のもの）
+- ただし、アプリ用の `OUTBOUND_PROXY` は、ほかの秘密（`SECRET_KEY`・DB のパスワードなど）と同じくコンテナの環境変数として渡すので、`podman run` の実行中の引数（プロセスの一覧）と `podman inspect` には含まれます（どちらも root だけが見られます）。`env_file` で渡す形への移行は、既存の秘密すべてに及ぶので別の作業にします
+- CA がビルドで使われなくなったとき（`OUTBOUND_CA_FILE` を空にした）は、次の `setup.sh` が `build-ca/` の写しを消します（`build-ca/` は README.md だけになり、CA なしと同じビルドになります）
+
+**CA を OS に登録する**（`setup.sh` は OS の信頼の設定を変えません。追加の CA があって OS に登録されていないとき＝CA の証明書が OS の束に含まれていないときは、OS に合わせた手順を表示します。失敗したときにも同じ案内を出します）
+
+```bash
+# AlmaLinux / RHEL
+sudo cp /opt/netconfig-manager/certs-outbound/outbound-ca.pem /etc/pki/ca-trust/source/anchors/netconfig-outbound-ca.pem
+sudo update-ca-trust
+# Ubuntu（拡張子は .crt。1 つのファイルに 1 つの証明書にする）
+sudo cp /opt/netconfig-manager/certs-outbound/outbound-ca.pem /usr/local/share/ca-certificates/netconfig-outbound-ca.crt
+sudo update-ca-certificates
+```
+
+`podman pull` だけに使わせるなら、レジストリごとに `/etc/containers/certs.d/<レジストリ>/ca.crt` に置く方法もあります。
+
+**確かめ方**
+
+- `sudo bash scripts/check_env.sh`: 「インターネット接続」に、使うプロキシ（伏せ字）と出どころ、追加の CA が OS に登録済みか、宛先（Docker Hub・PyPI・npm・Debian・GitHub）ごとの結果を出します。失敗は「プロキシに接続できません」「プロキシのホスト名を解決できません」「プロキシの認証に失敗しました（407）」「プロキシが接続を拒否しました（CONNECT に HTTP 403）」「証明書を検証できません」（CA の案内つき）に切り分けます
+- イメージにプロキシ（認証情報）が残っていないこと（何も出なければよい）:
+
+```bash
+for i in $(sudo podman images --format '{{.Repository}}:{{.Tag}}' | grep -E 'backend|worker|beat|frontend'); do
+  sudo podman history --no-trunc "$i" | grep -i proxy
+  sudo podman inspect "$i" | grep -i proxy
+done
+# 動いているコンテナに http_proxy などが入っていないこと（アプリ用の OUTBOUND_PROXY は入ります）
+for c in $(sudo podman ps -q); do sudo podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$c" | grep -iE '^(https?|no)_proxy='; done
+```
+
+**限界**
+
+- `setup.sh` だけをダウンロードした初回は、ソースの取得（git の導入と clone）までは環境変数のプロキシを名前で引き継ぐだけです（形式の検査・追加の CA の git への受け渡しは、取得のあと）。HTTPS を検査するプロキシでは、先に OS へ CA を登録してください
+- **この版へ初めて更新するとき**は、古い `setup.sh` が `git pull` します。リポジトリの所有者が実行する人と違う（`sudo -u <所有者>` で pull する）と、古い `setup.sh` はプロキシの環境変数を引き継げません。その場合は、`export https_proxy=…` したうえで所有者として `git -C /opt/netconfig-manager pull --ff-only` を実行してから `setup.sh` を実行してください
+- プロセスの環境変数（`/proc/<PID>/environ`）は、同じユーザーと root からは見えます（ビルドの RUN の中も同じ）。アプリ用の `OUTBOUND_PROXY` は、DB のパスワードなどと同じく、コンテナの `podman inspect` で root から見えます
+- frontend の最終イメージ（nginx）では CA のファイルを消しますが、`COPY` の層（下の層）には残ります（CA の証明書は公開の情報です）
+- ビルドへの CA の渡し方（apt-get・pip・npm・apk）と、イメージ・履歴にプロキシが残らないことは、Ubuntu 24.04 と同じ Podman 4.9・podman-compose 1.0.6 と HTTPS を検査するプロキシで確かめています。`setup.sh` 全体の流れは偽のコマンドのテストで確かめており、実機での通しの導入（AlmaLinux 10 の Podman 5・SELinux、Ubuntu 24.04）は未確認です
+
 ### Ubuntu 24.04 LTS で使う（実機未確認）
 
 自動セットアップと同じ `bash scripts/setup.sh` で導入・更新できるように作っていますが、**実機での導入は確認していません**。前提と、初めて試すときの確認項目です。
@@ -589,7 +668,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 
 ### 有効にする
 
-1. `.env` に `VULN_ENABLED=true` を追加する（`.env.example` の「脆弱性」の節を参照。プロキシを通すなら `VULN_HTTPS_PROXY`。`http://` で始まる URL だけを受け付けます（`https://` のプロキシ・不正な値は起動時にエラーになります。値はエラーに出しません）。プロキシへは CONNECT で通し、認証情報は `http://ユーザー:パスワード@ホスト:ポート` の形で指定します。**プロキシとの間は暗号化されません**（宛先との通信は CONNECT のトンネルの中で TLS により保護され、証明書とホスト名を検証します）。**認証情報つきのプロキシでは、プロキシまでの区間で認証情報（Basic 認証）が平文で流れます**。信頼できる社内の経路でだけ使ってください。**環境変数のプロキシ（`HTTPS_PROXY`・`NO_PROXY` など）は見ません**。設定した宛先だけを使い、`NO_PROXY` の対象でも迂回しません）
+1. `.env` に `VULN_ENABLED=true` を追加する（`.env.example` の「脆弱性」の節を参照）。プロキシを通す・HTTPS を検査するプロキシの CA を信頼するときは、下の「外部への接続（プロキシ・組織の CA）」の `OUTBOUND_PROXY`・`OUTBOUND_CA_FILE` を設定します（以前の `VULN_HTTPS_PROXY` は廃止しました。`.env` に残っていても起動は止まらず、無視します。`OUTBOUND_PROXY` に移してください）
 2. サーバーから、下の「通信先」へ HTTPS（443 番）で接続できることを確かめる（社内のプロキシ・ファイアウォールの許可）
 3. `bash scripts/setup.sh` でコンテナを作り直す（メニュー「監視」に「脆弱性・サポート期限」が出ます）
 4. 毎日 `VULN_FETCH_HOUR`（既定 4 時。`TIMEZONE` の時刻）以降の最初の判定で取得します。すぐ取りたいときは、画面の「いま取得」（管理者のみ。5 分に 1 回まで）
@@ -600,6 +679,7 @@ PAN-OS などログイン後のプロンプト表示やコマンド応答に時�
 
 - worker の `fetch_vulns` を beat が**毎時**に呼び、「今日まだ成功していない情報源」だけを取ります。失敗した情報源は 3 時間あけて再試行します。1 つの情報源の失敗で、ほかは止まりません。結果（最後の成功・失敗の理由・件数）は情報源ごとに記録し、画面の上部に出します
 - 宛先は固定の一覧（`vuln_fetch.py` の `ALLOWED_HOSTS`）だけ。https のみ・リダイレクトも一覧の中だけ・接続・1 回の読み取りは 10 秒、**TLS のハンドシェイクとヘッダーの受信を含めて全体 60 秒**（相手が少しずつ返し続けても、期限でソケットを閉じて打ち切ります）・応答は 50MB まで。相手の不正な応答（途中で切れる・形式が違う）は失敗として記録し、相手が返した文字列は載せません。応答は JSON だけを標準ライブラリで読みます。失敗の理由には、URL・プロキシの認証情報・相手の応答の本文を入れません
+- プロキシと TLS の信頼は「外部への接続」の共通の設定（`OUTBOUND_*`）を使います。接続そのもの（許可リスト・期限の見張り・CONNECT）はこの機能の専用のままです
 - 外から来た文字列（勧告の題・URL）は長さを切り詰めます。URL は https で一覧のホストのものだけ保存し、画面ではテキストとして表示します（リンクは `rel="noopener noreferrer"` の新しいタブ）
 - 取得のあと全機器を照合し、機器の OS バージョンが変わったとき（収集のあと）は、その機器だけ照合し直します（外部へはつながりません）
 - 判定の移り変わり: 新しく該当 → 未確認（open）／「確認済み」（メモ必須。対応不要・対応済みの予定）／バージョンが上がって影響範囲から外れる → 解消（fixed。確認済みも解消になります）／また該当したら未確認に戻る。OS バージョンが読めなくなった機器の判定は変えません
@@ -922,6 +1002,11 @@ running-config を変えても startup-config に保存（`write memory` / `copy
 - **相手のリポジトリ**: 空のリポジトリを作っておきます。ブランチは `GIT_EXPORT_BRANCH`（既定 main）。**相手のブランチを直接変更しないでください**（こちらに無いコミットがあると push を拒否され、失敗として通知します）。強制 push はしません
 - **認証（HTTPS）**: `GIT_EXPORT_USERNAME` と `GIT_EXPORT_TOKEN`（GitLab ならプロジェクトアクセストークン・権限 write_repository。ユーザー名は空のままで可、Gitea ならユーザー名とアクセストークン）。トークンは push のときだけ環境変数で git に渡し、URL や `.git/config` には書きません。URL に認証情報（`https://user:token@...`）を書いても動きますが、`.git/config` には除いた URL を保存し、画面・調査用ログ（`collect_logs.sh`）では伏せ、「システム状態」で `GIT_EXPORT_USERNAME` / `GIT_EXPORT_TOKEN` へ移すよう注意を出します
   - 社内の CA の証明書なら `GIT_EXPORT_CA_FILE` に CA 証明書のコンテナ内のパスを指定します（例: `/data/ssh/git-ca.crt` に置く）
+- **プロキシ（インターネット上の Git へ出すとき）**: `https://` の宛先が「外部への接続」のプロキシの対象（`OUTBOUND_PROXY` があり、`OUTBOUND_NO_PROXY`・内向きに当たらない）なら、`OUTBOUND_PROXY` を git のプロセスの環境変数（`https_proxy`）だけで渡します。コマンドラインの引数・`.git/config` には書きません。対象でない宛先では、プロキシの環境変数を空にして渡します（コンテナの環境の値は使いません）。失敗の文の中のプロキシの URL・認証情報は伏せます
+  - プロキシを設定すると、`OUTBOUND_NO_PROXY` に入れていない **社内の `https://` の Git サーバー** への push もプロキシへ向かいます。社内の Git サーバーは `OUTBOUND_NO_PROXY` に入れてください
+  - `GIT_EXPORT_TOKEN` は宛先の Git サーバーの問いにだけ答え、プロキシの認証の問いには答えません（プロキシへトークンを送らない）
+  - SSH の宛先（`git@host:path`・`ssh://`）は HTTP のプロキシを通せないので、今までどおり直接つなぎます。平文の `http://` の宛先は、プロキシ経由では接続しません（`https://` にするか `OUTBOUND_NO_PROXY` に入れてください）
+  - `OUTBOUND_CA_FILE`（HTTPS を検査するプロキシの CA）があれば、`https://` の宛先で使います。`GIT_EXPORT_CA_FILE` が無いときは OS の信頼と束ねたものを、あるときは `GIT_EXPORT_CA_FILE` と束ねたものを使います（`GIT_EXPORT_CA_FILE` があるときは、今までどおり OS の信頼は使いません）。束ねたファイルは push の間だけの一時ファイルです
 - **認証（SSH）**: `GIT_EXPORT_URL=git@gitea.local:net/configs.git` と `GIT_EXPORT_SSH_KEY=/data/ssh/git_export_key`。鍵は worker コンテナの `/data/ssh`（ssh_data ボリューム）に置きます
   ```bash
   ssh-keygen -t ed25519 -N "" -f git_export_key   # 公開鍵（.pub）を相手のデプロイキーに登録（書き込みを許可）
@@ -931,6 +1016,51 @@ running-config を変えても startup-config に保存（`write memory` / `copy
   相手のホスト鍵は初回の接続で `/data/ssh/git_known_hosts` に記録し、以後は変わったら接続しません
 - **結果**: 「システム状態」の「外部 Git への push」に最後の結果を表示します。失敗は「システムの異常」として通知し、アクティビティにも残します（同じ失敗が続く間は繰り返しません）。成功するとアクティビティに「外部 Git への push」を残します
 - 機器ごとの履歴（世代管理の画面）とは別のリポジトリなので、外部へ送っていない過去の世代は含みません（設定した時点の最新から始まります）
+
+## 外部への接続（プロキシ・組織の CA）
+
+直接インターネットへ出られない環境で、アプリ（backend・worker）からインターネットへの HTTPS を、`.env` の 1 か所の設定でプロキシに通し、HTTPS の中身を検査するプロキシの CA（例: Example Corp CA）を信頼させます。設定しなければ、今までどおり直接つなぎます。導入・更新（`setup.sh` の git・パッケージ・イメージの取得）のプロキシは「自動セットアップ」の節を参照してください。
+
+### 対象の通信
+
+| 通信 | プロキシ（`OUTBOUND_*`） |
+|---|---|
+| Discord・Slack・Teams の Webhook | 通す |
+| メールの OAuth 2.0 のトークンの取得（Microsoft 365・Google） | 通す |
+| 脆弱性情報・サポート終了日の取得（`VULN_ENABLED=true` のとき） | 通す |
+| システム状態の「接続を確かめる」（固定の宛先 `endoflife.date`） | 通す |
+| メールの送信そのもの（SMTP） | **通さない**（HTTP のプロキシは通常 SMTP を通しません） |
+| 外部 Git への push（`GIT_EXPORT_URL` が `https://` のとき。「外部 Git への push」を参照） | 通す（git に環境変数で渡す。SSH の宛先は直接） |
+| 機器への SSH・踏み台・SNMP・Ping、DB・Redis、HTTPS の証明書の期限の確認 | 通さない（内向き・HTTP 以外） |
+
+### 設定（`.env`。変えたら `setup.sh` でコンテナを作り直す）
+
+| 設定 | 内容 |
+|---|---|
+| `OUTBOUND_PROXY` | `http://ホスト:ポート`、認証が要るなら `http://ユーザー:パスワード@ホスト:ポート`（例: `http://proxy.example.test:3128`）。**`http://` だけ**で、**ポートは必須**です（`https://`・SOCKS のプロキシ・ポートの無い値・不正な値は起動時にエラー。値はエラーに出しません）。ユーザー名・パスワードの記号は URL エンコードで書きます（`@` → `%40`、`:` → `%3A`、`%` → `%25`、`#` → `%23`、`/` → `%2F`。例: パスワード `p@ss:word` → `http://user01:p%40ss%3Aword@proxy.example.test:8080`）。**ユーザー名だけ（`http://user01@…`）は起動時にエラー**です（git などがパスワードを聞き返し、ほかの秘密を答えてしまうおそれがあるため）。パスワードが空なら `http://user01:@proxy.example.test:8080` と書きます |
+| `OUTBOUND_NO_PROXY` | プロキシを通さない宛先（カンマ区切り）。書けるのは **ホスト名・ドメイン（`example.test`・`.example.test`・`*.example.test` はどれも同じ扱いで、そのドメインと配下）・IP・CIDR** と、すべてを直接にする `*` だけです。ポートつき（`host:8080`）・途中に `*` を含む書き方・日本語のドメイン（punycode の `xn--…` で書く）は起動時にエラーです。`localhost`・ループバック・コンテナ名（`db`・`redis`・`backend` など）は書かなくても直接つなぎます |
+| `OUTBOUND_CA_FILE` | 追加で信頼する CA 証明書（PEM。複数をつなげてもよい）のファイルの名前。ファイルはサーバーの `certs-outbound/`（例: `/opt/netconfig-manager/certs-outbound/outbound-ca.pem`）に置き、`.env` には `outbound-ca.pem` のように名前だけを書きます。コンテナの中では `/etc/netconfig/outbound/` に読み取り専用で見えます。読めない・PEM でない・証明書が無い・秘密鍵が入っているときは起動時にエラーです |
+
+- **環境変数の `HTTPS_PROXY`・`NO_PROXY` などは見ません**（設定の出どころを `.env` の 3 つにまとめるため）
+- HTTPS の宛先へは CONNECT のトンネルで通し、宛先との TLS はトンネルの中で張ります。証明書とホスト名の検証は弱めません（追加の CA は OS の既定の信頼に **足す** だけ。検証を切る設定はありません）。組織の CA を入れても、名前の違う証明書は拒否します
+- プロキシの認証は Basic（`Proxy-Authorization`）で、CONNECT にだけ付けます（宛先へのリクエストには付けません）
+- 平文（`http://`）の宛先には、プロキシ経由では接続しません（外部へは HTTPS だけ。平文の宛先へのリクエストにプロキシの認証情報を付けて送ることはしません）
+- `certs/`（nginx のサーバー証明書と秘密鍵）とは別のディレクトリです（backend に秘密鍵を見せないため）
+- 失敗は分かる文にします: 「プロキシに接続できません」「プロキシの認証に失敗しました（HTTP 407）」「プロキシが接続を断りました（HTTP 403 など）」「証明書を検証できません（HTTPS を検査するプロキシなら、組織の CA を OUTBOUND_CA_FILE に指定してください）」「時間切れ」。どの文・ログ・画面・監査ログにも、プロキシのユーザー名・パスワード・`Proxy-Authorization` の値は出しません（画面に出すのはホスト:ポートと「認証あり／なし」だけ）
+- 起動時に backend・worker のログへ 1 行（例: `外部への接続: プロキシ proxy.example.test:3128（認証あり）・追加の CA 1 件`）出します
+
+### 確かめる（システム状態の「外部への接続」）
+
+プロキシの有無（ホスト:ポートと認証の有無）、プロキシを通さない宛先、追加の CA の件数といちばん近い有効期限（期限切れ・30 日以内は注意）を表示します。管理者は **「接続を確かめる」** で、固定の宛先（`https://endoflife.date/`。利用者は宛先を選べません）へ HEAD を送り、結果（成功／プロキシに接続できない／プロキシの認証に失敗／証明書を検証できない／時間切れ など）を確かめられます。宛先から HTTP の応答が返れば成功です（プロキシが宛先を許可していないと「プロキシが接続を断りました」になります）。30 秒に 1 回まで、操作は監査ログ（「外部への接続の確認」。結果の種類だけ）に残ります。API トークンでは使えません（ログインして操作）。
+
+### 限界
+
+- SMTP（メールの送信そのもの）はプロキシを通しません。要望があれば別に対応します
+- SOCKS・`https://` のプロキシ・NTLM / Kerberos の認証には対応しません（Basic 認証だけ）
+- **プロキシまでの区間は暗号化されないため、認証情報（Basic 認証）が平文で流れます**。信頼できる社内の経路でだけ使ってください（宛先との通信はトンネルの中の TLS で保護されます）
+- 3 文字未満のパスワードは、伏せ字の対象にしません（短い文字列を伏せると文が読めなくなるため。エラーの文は種類ごとの決まった文にしているので、通常は出ません）。ユーザー名は普通の語でありうるので、`ユーザー名:`・`ユーザー名@` の形のときだけ伏せます
+- OS（サーバー本体）の信頼ストアへの CA の登録は、`setup.sh` の節の案内に従って利用者が行います
+- backend のイメージには、ビルドのときに組織の CA が OS の信頼として入ります。そのため外向きの HTTPS 以外（SMTP の TLS・外部 Git など、OS の信頼を使う通信）でも、その CA で署名された証明書を信頼します
 
 ## システム状態（止まっていることに気づく）
 
@@ -951,6 +1081,7 @@ API が応答していても、worker やスケジューラーが止まってい
 | 外部 Git への push | 設定したとき（`GIT_EXPORT_URL`）だけ。最後の push の結果。失敗で異常（「今すぐ push」で再実行） | GitLab / Gitea のコンフィグが古いまま |
 | メール送信 | メール送信を有効にしたときだけ。設定の不足と、最後の送信の結果。失敗で異常 | メールの通知が届かない |
 | 脆弱性情報の取得 | `VULN_ENABLED=true` のときだけ。情報源ごとの最後の成功・失敗の理由。失敗している情報源があるか、3 日以上取得できていないときは注意（通知はしません） | 脆弱性・サポート終了日が古いまま |
+| 外部への接続 | プロキシ（ホスト:ポートと認証の有無だけ）・プロキシを通さない宛先・追加の CA の件数と期限・最後の「接続を確かめる」の結果。CA の期限切れ・30 日以内、確認の失敗は注意（通知はしません）。何も設定していなければ「—」（直接） | Webhook・メールの OAuth・脆弱性情報の取得が外へ出られない |
 | コンテナのイメージ | `setup.sh` が伝えた PostgreSQL・Redis・ビルドの土台のイメージの作成日時。`IMAGE_STALE_DAYS`（既定 60 日、0 で確認しない）より古い・取り直せなかったときは注意 | セキュリティ修正が入っていない |
 
 注意・異常があるときは、管理者のメニュー「管理」の「システム状態」に印（黄・赤）が付きます（「管理」を閉じているときは「管理」の見出しに付きます）。
@@ -998,6 +1129,7 @@ bash /opt/netconfig-manager/scripts/collect_logs.sh
 - **集めないもの**: 機器のコンフィグ、DB の中身、ターミナルの記録、`.env` の秘密の値、証明書の秘密鍵
 - **大きさを抑える工夫**: ログは期間（既定 3 日）と行数（コンテナごとに 5000 行）で絞り、テキストを gzip（最高の圧縮率）でまとめます。通常は数百 KB〜数 MB です。50 MB を超えたときは、絞り込みを案内します
 - **伏せるもの**: `.env` のパスワード・暗号化キー・トークン・Webhook の URL・接続先 URL、ログの中の Webhook の URL・URL に埋め込んだパスワード・`password=` などの値・トークンらしい文字列
+  - プロキシ: `.env` の `OUTBOUND_PROXY`（と廃止した `VULN_HTTPS_PROXY`）は、認証情報だけを伏せて host:port は残します（`http://***@proxy.example.test:3128`。認証なしならそのまま。起動時のログ・「システム状態」の表示と同じで、切り分けに使えます）。`OUTBOUND_NO_PROXY` は件数だけ、`OUTBOUND_CA_FILE`（ファイル名）はそのまま。ログの中の `http_proxy=`・`https_proxy=` の認証情報も伏せます。`certs-outbound/` の CA の subject・発行者・期限は `app/outbound-ca-*.txt` に入れます
 - **注意**: 機器名・IP アドレス・ユーザー名は含まれます。外部へ渡す前に、展開して中身を確かめてください（`tar -xzf <ファイル> -C /tmp`。中身はテキストです）。ファイルは実行した人だけが読める権限（600）で作ります
 - **まず見る場所**: `summary.txt`（概要と集められなかったもの）→ `containers/*.state.txt`（止まった理由）→ `containers/*.log`
 
@@ -1393,8 +1525,10 @@ netconfig-manager/
 ├── docker-compose.prod.yml      # 本番用（nginx 配信）
 ├── .env.example
 ├── certs/                       # HTTPS の証明書（import_cert.sh で配置。Git 管理外）
+├── certs-outbound/              # 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE。Git 管理外。README.md だけ管理）
 ├── scripts/
 │   ├── lib/os.sh                # OS の判定と、OS ごとに違う操作（パッケージ・ファイアウォールなど。AlmaLinux / Ubuntu）
+│   ├── lib/proxy.sh             # 外部への通信のプロキシ・追加の CA（setup.sh・check_env.sh が読む。伏せ字・sudo への受け渡し）
 │   ├── setup.sh                 # 自動セットアップ・更新
 │   ├── check_env.sh             # 導入前チェック
 │   ├── import_cert.sh           # HTTPS 化（証明書の取り込み）
@@ -1404,6 +1538,7 @@ netconfig-manager/
 │   └── collect_logs.sh          # 調査用のログをまとめる（起動しない・動きがおかしいとき）
 ├── backend/
 │   ├── Dockerfile
+│   ├── build-ca/                # ビルド用の追加の CA の写し（setup.sh が certs-outbound/ から置く。Git 管理外。README.md だけ管理）
 │   ├── requirements.in          # 依存パッケージ（直接使うもの。人が編集する）
 │   ├── requirements.txt         # ロックファイル（全部の版とハッシュ。lock_deps.sh で生成し、手で編集しない）
 │   ├── requirements-dev.in      # テスト用の依存パッケージ
@@ -1428,6 +1563,7 @@ netconfig-manager/
 │       │   ├── permissions.py   # ロールと権限の定義（RBAC）
 │       │   ├── crypto.py        # 機器パスワード暗号化
 │       │   ├── csv_export.py    # CSV 出力の共通処理（監査ログ・アクティビティ）・ダウンロードのファイル名
+│       │   ├── outbound.py      # 外部への HTTPS の共通部品（プロキシ・NO_PROXY・追加の CA・失敗の文・伏せ字・接続の確認）
 │       │   ├── safe_regex.py    # 利用者が入力する正規表現の読み込みの重さの確認（別のプロセスで測る）とコンパイル（無視する行・コンプライアンス・検索で共通）
 │       │   ├── ssh_hostkeys.py  # SSH ホスト鍵検証
 │       │   ├── ssh_keys.py      # SSH 秘密鍵の読み込み（機器・踏み台共通）
@@ -1512,6 +1648,7 @@ netconfig-manager/
 │           └── connection.py    # 接続情報（踏み台含む）の読み出し・認証情報（機器 / プロファイル）の決定
 └── frontend/
     ├── Dockerfile               # dev / prod マルチステージ
+    ├── build-ca/                # ビルド用の追加の CA の写し（backend と同じ。npm ci・apk upgrade の間だけ使う）
     ├── nginx/                   # 本番用 nginx 設定（HTTP / HTTPS を起動時に自動選択・セキュリティヘッダー。CSP の値は csp.inc）
     ├── package.json
     ├── package-lock.json
@@ -1553,7 +1690,7 @@ netconfig-manager/
             ├── AuditPage.tsx    # 監査ログ（操作履歴・ターミナルの記録の再生）
             ├── PingPage.tsx     # Ping監視（deadman 風。リアルタイム / 常時監視のタブ）
             ├── PingMonitorPanel.tsx # Ping監視の常時監視（対象の追加・状態・推移のグラフ）
-            ├── SystemPage.tsx   # システム状態（worker・スケジューラー・収集の状況・ディスク・証明書）
+            ├── SystemPage.tsx   # システム状態（worker・スケジューラー・収集の状況・ディスク・証明書・外部への接続）
             ├── DashboardPage.tsx # ダッシュボード（ログイン後の最初の画面）
             ├── SearchPage.tsx   # コンフィグ検索（全機器の最新コンフィグ・過去の世代の横断検索・機種での絞り込み・CSV 出力）
             ├── MonitoringPage.tsx # モニタリング（帯域のグラフ・FW ルールのヒット数・SNMP 設定）※試験導入
@@ -1593,4 +1730,5 @@ netconfig-manager/
 - **コマンド実行の拡張**: MikroTik RouterOS への対応（メニュー名の許可リスト方式で対応する想定）、スケジュール実行（定期的に `show` を取って比べる）、設定の投入（承認・確認の仕組みとセットで）、時刻・カウンタなど毎回変わる部分を除いた「同じ出力」のまとめ、機器グループ単位の権限、実機での機種ごとの許可リストの確認（Yamaha・NetScaler・Nokia などの絞り込み）、出力が大きいときの分割取得（今は 1 回の応答にまとめて返す）、失敗したコマンドまでの出力の保持（今は 1 台の接続が途中で失敗するとその機器の出力は残らない）
 - **コンフィグ検索の拡張**: 世代の多い環境向けに過去の世代の検索を Celery のタスクにして結果を後で受け取る形、登録済みの機器がある機種だけを選択肢にする
 - **API トークンの拡張**: 権限を細かく選べるトークン（API・機器グループごと）、接続元 IP の制限、期限が近いトークンの通知、`/docs`・`/openapi.json` の公開範囲の見直し（今はログインなしで見られる）、トークンで使える API の拡大（認証情報を扱う操作を、別の確認の仕組みとセットで）
+- **導入・更新のプロキシの拡張**: 秘密を compose の `environment:` ではなく `env_file:` で渡す形への移行（`podman run` の引数・プロセスの一覧に出なくなる。既存の秘密すべてに及ぶ）、`setup.sh` だけをダウンロードした初回の clone での追加の CA、AlmaLinux 10（Podman 5・SELinux）の実機での確認
 - **CSP の強化**: 違反をブラウザから受け取って記録する仕組み（`report-to`）、`style-src 'unsafe-inline'` の撤廃（ターミナルの xterm.js などがノンスに対応したら）、HSTS の期間の延長（証明書の更新が安定したら）

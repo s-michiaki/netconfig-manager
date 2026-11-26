@@ -9,6 +9,7 @@ OAuth 2.0 のトークン
   google_sa   : サービスアカウントの鍵で署名した JWT を渡す（ドメイン全体の委任で username として振る舞う）
   google_user : 画面で一度 Google に同意して得た更新用トークンから取る（authorize_url / complete_authorization）
 取ったトークンは有効期限の少し前まで、プロセスの中で使い回す。トークンを取る先は上の固定のホストだけ（任意の URL に送らない）
+トークンの取得（HTTPS）は core/outbound.py を通す（OUTBOUND_PROXY・OUTBOUND_CA_FILE）。SMTP（smtplib）はプロキシを通さない
 
 送信の結果は Redis に残し、画面「システム状態」の「メール送信」に出す（失敗はシステムの異常として通知する）
 """
@@ -33,6 +34,7 @@ from email.utils import formataddr, formatdate, make_msgid
 import jwt
 from redis.exceptions import RedisError
 
+from app.core import outbound
 from app.core.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
@@ -142,13 +144,18 @@ _token_cache: dict[tuple, tuple[str, float]] = {}
 _token_lock = threading.Lock()
 
 
+def _urlopen(req: urllib.request.Request, timeout: float):
+    """外向きの HTTPS（core/outbound.py。OUTBOUND_PROXY・OUTBOUND_CA_FILE を使う。テストで差し替える）"""
+    return outbound.urlopen(req, timeout=timeout)
+
+
 def _post_form(url: str, data: dict) -> dict:
     """トークンの取得（固定のホストだけ）。エラーの応答も JSON で読み、説明を返す"""
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "NetConfig-Manager"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as r:  # noqa: S310 - 固定のホスト
+        with _urlopen(req, timeout=TIMEOUT_SEC) as r:  # 固定のホスト
             return json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -158,7 +165,9 @@ def _post_form(url: str, data: dict) -> dict:
         desc = (err.get("error_description") or err.get("error") or f"HTTP {e.code}").splitlines()[0][:300]
         raise MailError(f"トークンを取得できません（{desc}）") from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise MailError(f"トークンを取得できません（{getattr(e, 'reason', e)}）") from e
+        # プロキシ・証明書・時間切れは分かる文に。そのほかも、プロキシの認証情報を伏せる。元の例外はつなげない
+        # （ログの traceback にプロキシの応答などを残さない）
+        raise MailError(f"トークンを取得できません（{outbound.describe(e)}）") from None
     except ValueError as e:
         raise MailError("トークンの応答を読めません") from e
 

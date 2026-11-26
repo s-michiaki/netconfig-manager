@@ -82,8 +82,20 @@ x-backend-env: &backend-env
   # 脆弱性・サポート終了日の管理（既定は無効。有効にすると worker が外部へ HTTPS で接続する）
   VULN_ENABLED: ${VULN_ENABLED:-false}
   VULN_FETCH_HOUR: ${VULN_FETCH_HOUR:-4}
-  VULN_HTTPS_PROXY: ${VULN_HTTPS_PROXY:-}
   VULN_SOURCES: ${VULN_SOURCES:-paloalto,kev,eol}
+  # 外部への接続（Webhook・メールの OAuth のトークン・脆弱性情報）。プロキシ（http:// だけ）・プロキシを通さない宛先・
+  # 追加で信頼する CA（ホストの certs-outbound/ に置いたファイルの名前。下の volumes で読み取り専用で渡す）
+  OUTBOUND_PROXY: ${OUTBOUND_PROXY:-}
+  OUTBOUND_NO_PROXY: ${OUTBOUND_NO_PROXY:-}
+  OUTBOUND_CA_FILE: ${OUTBOUND_CA_FILE:-}
+  # podman は、起動したプロセス（setup.sh など）のプロキシの環境変数をコンテナへ入れる。手で podman-compose up したときに
+  # プロキシの認証情報がコンテナの環境に残らないよう、空で明示する（アプリは OUTBOUND_* だけを使う。空は「なし」と同じ）
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
   ALLOWED_ORIGINS: ""
 
 x-backend-depends: &backend-depends
@@ -134,6 +146,9 @@ services:
       - config_repo:/app/configs
       - ssh_data:/data/ssh
       - terminal_logs:/data/terminal-logs
+      # 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE）。certs/（nginx の秘密鍵）とは別のディレクトリ。
+      # 3 つのコンテナで共有するので :z（小文字。大文字の Z は 1 つのコンテナ専用のラベルになり、ほかから読めなくなる）
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     # 接続元 IP は nginx が付ける X-Forwarded-For（クライアントの値は nginx で上書き）から取る。
     # backend のポートは外部に公開しないこと（公開すると X-Forwarded-For を直接送れてしまう）
@@ -154,6 +169,9 @@ services:
       - config_repo:/app/configs
       - ssh_data:/data/ssh
       - terminal_logs:/data/terminal-logs
+      # 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE）。certs/（nginx の秘密鍵）とは別のディレクトリ。
+      # 3 つのコンテナで共有するので :z（小文字。大文字の Z は 1 つのコンテナ専用のラベルになり、ほかから読めなくなる）
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     command: celery -A app.worker.celery_app worker --loglevel=info -c 4
 
@@ -163,6 +181,8 @@ services:
       args: { OS_UPGRADE: "${OS_UPGRADE:-}" }  # setup.sh が日付を渡す（OS のパッケージの更新を日に 1 回やり直す）
     restart: unless-stopped
     environment: *backend-env
+    volumes:
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     command: celery -A app.worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
 
@@ -175,6 +195,13 @@ services:
     environment:
       # HTTP から HTTPS へ転送するときのポート（外から見たポート番号）
       HTTPS_PORT: ${HTTPS_PORT:-443}
+      # プロキシの環境変数は空で明示する（x-backend-env と同じ理由。nginx・vite は外へ出ない）
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"

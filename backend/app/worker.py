@@ -29,11 +29,13 @@ from zoneinfo import ZoneInfo
 
 import redis
 from celery import Celery
+from celery.signals import worker_ready
 from croniter import croniter
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.core import outbound
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, CommandResult, CommandRun, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
@@ -79,6 +81,13 @@ celery_app = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
+
+
+@worker_ready.connect
+def _log_outbound(**_kw) -> None:
+    """worker の起動時に、外部への接続の設定を 1 行（プロキシはホスト:ポートと認証の有無だけ）"""
+    outbound.startup_log(logger)
+
 
 celery_app.conf.update(
     task_serializer="json",

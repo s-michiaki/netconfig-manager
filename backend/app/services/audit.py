@@ -93,6 +93,7 @@ ACTIONS = {
     "ping.monitor_on": "Ping監視の常時監視の開始",
     "ping.monitor_off": "Ping監視の常時監視の終了",
     "system.git_export": "外部 Git への push の実行",
+    "system.outbound_check": "外部への接続の確認",
     "mail.update": "メールサーバーの設定変更",
     "mail.test": "テストメールの送信",
     "mail.google_authorize": "メール送信の Google アカウントの同意",
