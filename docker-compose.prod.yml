@@ -79,6 +79,11 @@ x-backend-env: &backend-env
   MONITOR_RETENTION_DAYS: ${MONITOR_RETENTION_DAYS:-30}
   MONITOR_FW_INTERVAL_MIN: ${MONITOR_FW_INTERVAL_MIN:-60}
   MONITOR_PANOS_VSYS: ${MONITOR_PANOS_VSYS:-vsys1}
+  # 脆弱性・サポート終了日の管理（既定は無効。有効にすると worker が外部へ HTTPS で接続する）
+  VULN_ENABLED: ${VULN_ENABLED:-false}
+  VULN_FETCH_HOUR: ${VULN_FETCH_HOUR:-4}
+  VULN_HTTPS_PROXY: ${VULN_HTTPS_PROXY:-}
+  VULN_SOURCES: ${VULN_SOURCES:-paloalto,kev,eol}
   ALLOWED_ORIGINS: ""
 
 x-backend-depends: &backend-depends

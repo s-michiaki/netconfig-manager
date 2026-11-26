@@ -33,6 +33,7 @@ from app.api import (
     terminal,
     topology,
     users,
+    vulns,
 )
 from app.api.deps import get_current_user, require, require_session
 from app.core.config import settings
@@ -95,7 +96,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.62.2",
+    version="1.63.0",
     lifespan=lifespan,
 )
 
@@ -141,6 +142,7 @@ app.include_router(system.router, prefix="/api/system", tags=["system"], depende
 app.include_router(mail.router, prefix="/api/mail", tags=["mail"], dependencies=protected + session_only)
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"], dependencies=protected)
 app.include_router(monitoring.router, prefix="/api/monitoring", tags=["monitoring"], dependencies=protected)
+app.include_router(vulns.router, prefix="/api/vulns", tags=["vulns"], dependencies=protected)
 app.include_router(
     notifications.router, prefix="/api/notifications", tags=["notifications"], dependencies=protected
 )
@@ -157,4 +159,4 @@ async def health():
     # 画面のサイドバーに表示するバージョンもここから取る（version は上の FastAPI(...) の1か所で管理）
     return {"status": "ok", "version": app.version,
             # 試験導入中の機能（画面のメニューの表示に使う）
-            "features": {"monitoring": settings.MONITORING_ENABLED}}
+            "features": {"monitoring": settings.MONITORING_ENABLED, "vuln": settings.VULN_ENABLED}}

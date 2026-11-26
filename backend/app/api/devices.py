@@ -43,12 +43,14 @@ from app.models.device import (
     DeviceGroup,
     JumpHost,
 )
+from app.models.vuln import VulnMatch
 from app.services import collect_state, device_import, inventory, login_limit, profile_access, startup_check
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.compliance import lock_result_writes
 from app.services.config_service import PLATFORMS
 from app.services.connection import effective_credentials
 from app.services.notify import notify_profile_owner
+from app.services.vuln_service import lock_vuln_writes
 from app.worker import collect_all_devices, collect_device_config, mark_collect_queued
 
 router = APIRouter()
@@ -592,6 +594,9 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
     await db.execute(delete(ComplianceResult).where(ComplianceResult.device_id == device.id))
     await db.execute(delete(ComplianceException).where(ComplianceException.device_id == device.id))
     await delete_device_monitoring(db, device.id)
+    # 脆弱性の照合結果（SQLite では外部キーの CASCADE が効かないので明示して消す。照合と同じロックを先に取る）
+    await lock_vuln_writes(db)
+    await db.execute(delete(VulnMatch).where(VulnMatch.device_id == device.id))
     await db.execute(delete(ConfigComment).where(ConfigComment.device_id == device.id))
     await db.execute(delete(ConfigReview).where(ConfigReview.device_id == device.id))
     await db.execute(delete(ConfigBaseline).where(ConfigBaseline.device_id == device.id))

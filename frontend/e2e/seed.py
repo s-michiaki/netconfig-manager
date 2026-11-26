@@ -38,6 +38,10 @@ def main() -> None:
                                                    "username": "admin", "password": "pw", "group_id": group["id"]})
             devs[name] = d
             first_gen[name] = cs.save_config(d["id"], (CONFIG_NG if ng else CONFIG_OK).format(name=name), "manual")
+        # 脆弱性・サポート期限（vulns.spec.ts）用の Palo Alto の機器 2 台。OS バージョンは台帳の自動取得のかわりに下で入れる
+        for name, host in [("FW-Edge01", "10.0.3.1"), ("FW-Edge02", "10.0.3.2")]:
+            devs[name] = call("POST", "/devices/", h, json={"name": name, "hostname": host, "platform": "paloalto_panos",
+                                                            "username": "admin", "password": "pw", "group_id": dc["id"]})
         # 世代の比較用に Core-SW01 だけ 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
         second = cs.save_config(devs["Core-SW01"]["id"], CONFIG_OK.format(name="Core-SW01") + "logging host 10.0.9.9\n", "schedule")
         # 変更の確認（reviews.spec.ts）用に SW-3F を 2 世代にする（検索・コンプライアンスの結果が変わらない行を足す）
@@ -113,7 +117,71 @@ def main() -> None:
                 db.add(PingResult(key=key, at=now - timedelta(minutes=i), rtt=rtt))
             await db.commit()
     asyncio.run(inventory())
+    asyncio.run(vulns(devs))
     print("seeded")
+
+
+async def vulns(devs: dict) -> None:
+    """脆弱性・サポート期限の見本のデータ（作り物。実際は worker が外部から取得して保存する）。照合は本物の処理で行う"""
+    from datetime import date, timedelta
+
+    from sqlalchemy import select, update
+
+    from app.core.database import AsyncSessionLocal
+    from app.core.timeutil import utcnow
+    from app.models.device import Device
+    from app.models.vuln import EolDate, VulnAdvisory, VulnMatch, VulnSource
+    from app.services import vuln_service
+
+    now = utcnow()
+    async with AsyncSessionLocal() as db:
+        for name, model, version in [("FW-Edge01", "PA-440", "10.2.5-h1"), ("FW-Edge02", "PA-440", "10.2.9")]:
+            await db.execute(update(Device).where(Device.name == name).values(model=model, os_version=version, inventory_at=now))
+
+        def adv(ext_id, title, severity, cvss, affected, kev=False):
+            db.add(VulnAdvisory(
+                source="paloalto", ext_id=ext_id, cve_ids=[ext_id] if ext_id.startswith("CVE-") else [], title=title,
+                severity=severity, cvss=cvss, published_at=now - timedelta(days=20), modified_at=now - timedelta(days=3),
+                url=f"https://security.paloaltonetworks.com/{ext_id}", products=["paloalto_panos"], affected=affected,
+                kev=kev, kev_due=date(2099, 2, 1) if kev else None, fetched_at=now))
+        adv("CVE-2099-0001", "（見本）管理画面の認証の回避", "critical", 9.3,
+            [{"branch": "10.2", "ge": "10.2.0", "lt": "10.2.5-h2"}], kev=True)
+        adv("CVE-2099-0002", "（見本）VPN 機能のサービス拒否", "high", 7.5, [{"branch": "10.2", "ge": "10.2.0", "lt": "10.2.9"}])
+        adv("PAN-SA-2099-0001", "（見本）すべてのバージョンに影響する情報漏えい", "medium", 5.3, [{"all": True}])
+        # 影響範囲を読み取れなかった勧告（該当・非該当のどちらにもしない。画面の注記と「判定できない機器」に出る）
+        adv("CVE-2099-0004", "（見本）影響範囲の書き方を読み取れない勧告", "high", 7.0, [{"unreadable": True, "branch": "10.2", "raw": "10.2.0"}])
+        # 「候補」の見本（FW-Edge01 は 10.2.5-h1・PA-440）。特定の機種だけに影響する勧告（10.2.6 より前の FW-Edge01 だけが当たる）と、
+        # 記載のない系列も影響ありとする勧告（10.2 は表に載っていないので両方の機器が当たる）
+        adv("CVE-2099-0005", "（見本）特定の機種だけに影響するコマンド実行", "medium", 5.0,
+            [{"branch": "10.2", "ge": "10.2.0", "lt": "10.2.6", "platforms": ["PA-3200 Series"]}])
+        adv("CVE-2099-0006", "（見本）記載のない系列も影響ありとする勧告", "low", 3.1,
+            [{"branch": "10.1", "ge": "10.1.0", "lt": "10.1.9"}, {"kind": "default", "default": "affected"}])
+        # あとで取り下げる勧告（最初は該当にして、下で rejected にして照合し直すと解消になる。実際の流れと同じ）
+        adv("CVE-2099-0007", "（見本）取り下げられた勧告", "high", 8.0, [{"branch": "10.2", "ge": "10.2.0", "lt": "10.2.99"}])
+        for name, ok_days in (("kev", 0), ("paloalto", 0), ("eol", 0)):
+            db.add(VulnSource(source=name, last_at=now, last_ok_at=now - timedelta(days=ok_days), last_count={"kev": 1800, "paloalto": 3, "eol": 6}[name]))
+        today = now.date()
+        # サポート終了日（自動取得の見本）: PAN-OS 10.2 は終了済み、Core-SW01 の IOS XE 17.6 は約 200 日後
+        db.add(EolDate(platform="paloalto_panos", kind="os", branch="10.2", model="", eol_date=today - timedelta(days=400),
+                       source="endoflife.date", url="https://endoflife.date/panos", updated_at=now))
+        db.add(EolDate(platform="cisco_xe", kind="os", branch="17.6", model="", eol_date=today + timedelta(days=200),
+                       source="endoflife.date", url="https://endoflife.date/cisco-ios-xe", updated_at=now))
+        await db.flush()
+        await vuln_service.reconcile(db)
+        # 取り下げ: CVE-2099-0007 を rejected にして照合し直す（該当の判定は解消になり、未確認の一覧には出ない）
+        await db.execute(update(VulnAdvisory).where(VulnAdvisory.ext_id == "CVE-2099-0007").values(rejected=True))
+        await vuln_service.reconcile(db)
+        # stale の見本: 前回（古い版）は該当だったが、機器の版が変わり、いまの版では範囲を読み取れない勧告（CVE-2099-0004）。
+        # FW-Edge01 は未確認、FW-Edge02 は確認済み（メモ付き）。古い版で作ってから照合し直すと、本物の処理が stale にする
+        adv04 = (await db.execute(select(VulnAdvisory).where(VulnAdvisory.ext_id == "CVE-2099-0004"))).scalar_one()
+        for name, old, state, note in [("FW-Edge01", "10.2.4", "open", None), ("FW-Edge02", "10.2.8", "ack", "次回の保守で版を確かめる")]:
+            dev = (await db.execute(select(Device).where(Device.name == name))).scalar_one()
+            db.add(VulnMatch(device_id=dev.id, advisory_id=adv04.id, confidence="confirmed", os_version=old, first_seen=now,
+                             last_seen=now, state=state, note=note, acked_by="admin" if note else None,
+                             acked_at=now if note else None))
+        await db.flush()
+        await vuln_service.reconcile(db)
+        await db.commit()
 
 
 if __name__ == "__main__":

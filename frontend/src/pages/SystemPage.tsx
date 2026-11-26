@@ -31,6 +31,7 @@ interface Component {
     url?: string; branch?: string; // 外部 Git（last は GitExportState）
     images?: ImageInfo[]; pull_failed?: string[]; reported_at?: string; // コンテナのイメージ（setup.sh が伝える）
     host?: string; auth?: string; mail_last?: { at: string; ok: boolean } | null; // メール送信
+    sources?: { source: string; label: string; last_ok_at: string | null; last_error: string | null }[]; failed?: string[]; // 脆弱性情報の取得
   };
 }
 /** コンテナのイメージ（名前・作成日時。stale_days より前なら古い） */
@@ -61,6 +62,7 @@ const HELP: Record<string, string> = {
   git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
   images: "PostgreSQL・Redis と、ビルドの土台（Python・Node.js・nginx）のイメージ。setup.sh で取り直す",
   mail: "メール通知の送信（通知設定 → メールサーバー）。最後の送信の結果",
+  vuln: "脆弱性・サポート終了日の外部からの取得（.env の VULN_ENABLED=true のときだけ）。3 日以上取得できていないと注意",
 };
 
 function fmt(iso: string | null | undefined): string {
@@ -142,6 +144,19 @@ function Detail({ c }: { c: Component }) {
       <ul className="sys-list">
         <li>SMTP サーバー: <span className="mono">{d.host}</span>（{d.auth}）</li>
         {d.mail_last && <li>最後の送信: {fmt(d.mail_last.at)}（{d.mail_last.ok ? "成功" : "失敗"}）</li>}
+      </ul>
+    );
+  }
+  if (c.key === "vuln" && d.sources) {
+    return (
+      <ul className="sys-list">
+        {d.sources.map((x) => (
+          <li key={x.source} className="sys-wrap">
+            {x.label}: {x.last_ok_at ? `最後の成功 ${fmt(x.last_ok_at)}` : "まだ成功していません"}
+            {x.last_error ? `　失敗: ${x.last_error}` : ""}
+          </li>
+        ))}
+        <li>{"　"}<Link to="/vulns">脆弱性・サポート期限を開く →</Link></li>
       </ul>
     );
   }

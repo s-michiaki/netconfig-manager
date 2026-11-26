@@ -111,6 +111,12 @@ ACTIONS = {
     "monitor.fw_collect": "FW ヒット数の取得",
     "activity.export": "アクティビティログの CSV 出力",
     "config.search_export": "コンフィグ検索結果の CSV 出力",
+    "vuln.ack": "脆弱性の確認済み",
+    "vuln.unack": "脆弱性の確認済みの取り消し",
+    "vuln.export": "脆弱性の CSV 出力",
+    "vuln.eol_set": "サポート終了日の手入力",
+    "vuln.eol_delete": "サポート終了日の手入力の削除",
+    "vuln.fetch": "脆弱性情報の取得（いま取得）",
     "command.run": "コマンド実行",
     "command.export": "コマンド実行結果の出力",
 }

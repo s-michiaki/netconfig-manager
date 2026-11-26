@@ -132,6 +132,15 @@ TOKEN_ALLOWED: frozenset[str] = frozenset({
     "GET /api/monitoring/fw/{device_id}/rules",
     "POST /api/monitoring/fw/{device_id}/collect",
     "GET /api/monitoring/fw/{device_id}/raw",
+    # 脆弱性・サポート終了日（閲覧だけ。確認済み・手入力・いま取得はログインが必要）
+    "GET /api/vulns/summary",
+    "GET /api/vulns/matches",
+    "GET /api/vulns/matches/export",
+    "GET /api/vulns/devices",
+    "GET /api/vulns/unknown",
+    "GET /api/vulns/advisories/{advisory_id}",
+    "GET /api/vulns/eol",
+    "GET /api/vulns/eol/devices",
 })
 
 # 範囲が read のトークンで呼べるメソッド（副作用の無いもの）

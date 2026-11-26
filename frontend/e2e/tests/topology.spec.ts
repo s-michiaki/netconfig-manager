@@ -5,7 +5,7 @@ test("構成図を編集し、取り消し・やり直しのあと保存でき�
   await login(page);
   await page.goto("/topology");
   await page.locator(".topo-map-select").selectOption({ label: "本社ネットワーク" });
-  await expect(page.locator(".react-flow__node-device")).toHaveCount(4);
+  await expect(page.locator(".react-flow__node-device")).toHaveCount(6);
   await page.getByRole("button", { name: "編集", exact: true }).click();
 
   const texts = page.locator(".react-flow__node-text");
@@ -29,7 +29,7 @@ test("保存したあとも、保存より前の状態へ取り消せる", async
   await login(page);
   await page.goto("/topology");
   await page.locator(".topo-map-select").selectOption({ label: "本社ネットワーク" });
-  await expect(page.locator(".react-flow__node-device")).toHaveCount(4);
+  await expect(page.locator(".react-flow__node-device")).toHaveCount(6);
   await page.getByRole("button", { name: "編集", exact: true }).click();
   const texts = page.locator(".react-flow__node-text");
   const before = await texts.count();

@@ -39,15 +39,19 @@ class Perm(str, Enum):
     # 表示コマンド（show / display など。設定を変えないもの）の一括実行と、その結果の閲覧。
     # 出力に設定の中身（show running-config など）が含まれるため、コンフィグの閲覧（CONFIG_READ）を持つロールだけに付ける
     COMMAND_RUN = "command:run"
+    # ファームウェアの脆弱性（CVE）とサポート終了日の閲覧。機器と OS バージョンは閲覧者も見られるので、全ロール
+    VULN_READ = "vuln:read"
+    # 脆弱性の「確認済み」（メモ付き）・サポート終了日の手入力。オペレーター以上（外部からの取得の実行は管理者＝SYSTEM_READ）
+    VULN_WRITE = "vuln:write"
 
 
 _VIEWER = {
     Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ, Perm.PING_USE,
-    Perm.NOTIFY_SELF, Perm.ACTIVITY_READ, Perm.MONITOR_READ,
+    Perm.NOTIFY_SELF, Perm.ACTIVITY_READ, Perm.MONITOR_READ, Perm.VULN_READ,
 }
 _OPERATOR = _VIEWER | {
     Perm.COLLECT, Perm.TERMINAL, Perm.TOPOLOGY_WRITE, Perm.COMPLIANCE_WRITE, Perm.PING_WRITE, Perm.CONFIG_COMMENT,
-    Perm.CONFIG_REVIEW, Perm.COMMAND_RUN,
+    Perm.CONFIG_REVIEW, Perm.COMMAND_RUN, Perm.VULN_WRITE,
 }
 _ADMIN = set(Perm)
 
@@ -64,6 +68,7 @@ ROLE_LABELS = {Role.ADMIN: "管理者", Role.OPERATOR: "オペレーター", Rol
 READ_ONLY_PERMS: frozenset[Perm] = frozenset({
     Perm.DEVICE_READ, Perm.CONFIG_READ, Perm.SCHEDULE_READ, Perm.TOPOLOGY_READ, Perm.COMPLIANCE_READ,
     Perm.AUDIT_READ, Perm.PING_USE, Perm.ACTIVITY_READ, Perm.SYSTEM_READ, Perm.MONITOR_READ,
+    Perm.VULN_READ,
 })
 
 # API トークンの範囲（scope）

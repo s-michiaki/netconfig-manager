@@ -1074,3 +1074,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .dash-clock { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dash-clock-date { margin-right: 6px; }
 @media (max-width: 640px) { .dash-clock-date { display: none; } }
+
+/* 脆弱性・サポート期限 */
+.vuln-notice { border: 1px solid var(--color-border); border-left: 3px solid var(--color-warning); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; }
+.vuln-notice p { margin: 0 0 4px; }
+.vuln-sources { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; margin-bottom: 12px; align-items: center; }
+.vuln-source { display: inline-flex; align-items: center; gap: 6px; }
+.vuln-source-error { color: var(--color-danger); }
+.vuln-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding-bottom: 6px; }
+.vuln-table .vuln-title { max-width: 420px; word-break: break-word; }
+.vuln-table .vuln-title a { color: var(--color-accent); }

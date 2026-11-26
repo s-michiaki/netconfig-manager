@@ -25,6 +25,7 @@ from app.models.notification import NotificationSetting, ReportSend, UserGroup, 
 from app.models.ping import PingMonitor, PingResult, PingTarget
 from app.models.topology import TopologyMap
 from app.models.user import User
+from app.models.vuln import EolDate, VulnAdvisory, VulnMatch, VulnSource
 
 __all__ = [
     "ActivityLog",
@@ -45,6 +46,7 @@ __all__ = [
     "CredentialProfile",
     "Device",
     "DeviceGroup",
+    "EolDate",
     "FwHitStatus",
     "FwRuleHit",
     "IfSample",
@@ -63,4 +65,7 @@ __all__ = [
     "User",
     "UserGroup",
     "UserGroupMember",
+    "VulnAdvisory",
+    "VulnMatch",
+    "VulnSource",
 ]

@@ -57,7 +57,7 @@ def device(c, h, **kw):
 def test_disabled_by_default(ctx):
     c, admin = ctx["c"], ctx["admin"]
     assert settings.MONITORING_ENABLED is False
-    assert c.get("/api/health").json()["features"] == {"monitoring": False}
+    assert c.get("/api/health").json()["features"] == {"monitoring": False, "vuln": False}
     r = c.get("/api/monitoring/snmp", headers=admin)
     assert r.status_code == 404 and "MONITORING_ENABLED" in r.json()["detail"]
     assert worker.poll_snmp.apply().get() == {"disabled": True}

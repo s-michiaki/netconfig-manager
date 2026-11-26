@@ -7,7 +7,10 @@ _WEAK_SECRETS = {"change-me-in-production", "changeme", "secret", "your_jwt_secr
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore",
+        hide_input_in_errors=True,  # 不正な値（鍵・認証情報つき URL）をエラーに出さない
+    )
 
     DATABASE_URL: str = "postgresql+asyncpg://netconfig:changeme@localhost:5432/netconfig"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -145,6 +148,15 @@ class Settings(BaseSettings):
     SNMP_TIMEOUT: float = Field(default=3.0, gt=0, le=30)
     SNMP_RETRIES: int = Field(default=1, ge=0, le=5)
 
+    # --- 脆弱性（CVE）とサポート終了日（EOL）の管理（services/vuln_*.py。既定は無効） ---
+    # 有効にすると、毎日 1 回、外部（Palo Alto・CISA・endoflife.date）から製品単位の情報を取得して機器の OS バージョンと照合する。
+    # 機器名・IP・バージョンは外部へ送らない（取得する URL に含めない）。無効のあいだは外部へ一切つながない
+    VULN_ENABLED: bool = False
+    VULN_FETCH_HOUR: int = Field(default=4, ge=0, le=23)  # 毎日この時刻（TIMEZONE）以降の最初の判定で取得する
+    VULN_HTTPS_PROXY: str = ""  # 外部へ出るときのプロキシ（http:// だけ。例: http://proxy.example.test:3128）。空なら直接つなぐ
+    # 使う情報源（カンマ区切り）。paloalto=Palo Alto の勧告 / kev=CISA の悪用確認済み一覧 / eol=endoflife.date のサポート終了日
+    VULN_SOURCES: str = "paloalto,kev,eol"
+
     # --- 通知 ---
     # 利用者がブラウザで開く URL（例: https://netconfig.example.local）。通知に画面へのリンクを付けるのに使う。空ならリンクなし
     PUBLIC_URL: str = ""
@@ -178,6 +190,33 @@ class Settings(BaseSettings):
                 "(例: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\")"
             ) from e
         return v
+
+    @field_validator("VULN_HTTPS_PROXY")
+    @classmethod
+    def _check_vuln_proxy(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return ""
+        from urllib.parse import urlsplit
+
+        try:
+            sp = urlsplit(v)
+            scheme = sp.scheme.lower()
+            ok = scheme == "http" and bool(sp.hostname) and (sp.port or 1) > 0
+        except ValueError:
+            scheme, ok = "", False
+        # 値（認証情報を含みうる）はエラーに出さない
+        if scheme == "https":  # プロキシとの間を TLS にする方式には対応していない（平文で認証情報を送ってしまうため受け付けない）
+            raise ValueError("VULN_HTTPS_PROXY は http:// で指定してください（プロキシとの間は暗号化されません。"
+                             "宛先との通信は TLS で保護されます。https:// のプロキシには対応していません）")
+        if not ok:
+            raise ValueError("VULN_HTTPS_PROXY は http:// で始まるプロキシの URL で指定してください"
+                             "（例: http://proxy.example.test:3128）")
+        return v
+
+    @property
+    def vuln_sources(self) -> list[str]:
+        return [x.strip().lower() for x in self.VULN_SOURCES.split(",") if x.strip()]
 
     @property
     def cors_origins(self) -> list[str]:
