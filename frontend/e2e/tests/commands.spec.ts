@@ -84,6 +84,23 @@ test("閲覧者にはメニューも画面も出ない", async ({ page }) => {
   await expect(page.locator('.sidebar-nav a[href="/commands"]')).toHaveCount(0);
 });
 
+test("機器の一覧が届く前はグループで選べず、届いたら選べて正しい台数が選ばれる", async ({ page }) => {
+  await login(page, USERS.op);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  await page.route("**/api/devices/", async (route) => {
+    await gate; // 機器の一覧の応答を止めておく
+    await route.continue();
+  });
+  await page.goto("/commands");
+  const select = page.getByLabel("グループで選ぶ");
+  await expect(select).toBeDisabled();
+  release();
+  await expect(select).toBeEnabled();
+  await select.selectOption({ label: "本社" });
+  await expect(page.getByText("3 台を選択中")).toBeVisible();
+});
+
 test("送れないコマンドは入力中に理由が出て実行できず、送れるコマンドで実行して結果を見られる", async ({ browser }) => {
   const ctx = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
   const page = await ctx.newPage();
@@ -95,7 +112,9 @@ test("送れないコマンドは入力中に理由が出て実行できず、�
   const run_ = page.getByRole("button", { name: /実行/ }).first();
   await expect(run_).toBeDisabled(); // 機器もコマンドも未入力
 
-  // 機器: グループを選ぶと、そのグループの機器が選ばれる
+  // 機器: 機器の一覧が出てから、グループを選ぶと、そのグループの機器が選ばれる
+  await expect(page.getByLabel("グループで選ぶ")).toBeEnabled();
+  await expect(page.getByRole("checkbox", { name: /を選ぶ$/ }).first()).toBeVisible();
   await page.getByLabel("グループで選ぶ").selectOption({ label: "本社" });
   await expect(page.getByText("3 台を選択中")).toBeVisible();
 

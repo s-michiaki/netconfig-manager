@@ -183,6 +183,7 @@ export default function CommandsPage() {
   const { label: platformLabel } = usePlatforms();
   const [limits, setLimits] = useState<Limits | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [devicesLoaded, setDevicesLoaded] = useState(false); // 機器の一覧が届くまで「グループで選ぶ」を使えなくする
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupFilter, setGroupFilter] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -202,7 +203,7 @@ export default function CommandsPage() {
 
   useEffect(() => {
     api.get<Limits>("/commands/limits").then((r) => setLimits(r.data)).catch((e) => setError(errorMessage(e)));
-    api.get<Device[]>("/devices/").then((r) => setDevices(r.data)).catch((e) => setError(errorMessage(e)));
+    api.get<Device[]>("/devices/").then((r) => { setDevices(r.data); setDevicesLoaded(true); }).catch((e) => setError(errorMessage(e)));
     api.get<Group[]>("/device-groups/").then((r) => setGroups(r.data)).catch(() => undefined);
     loadRuns();
   }, [loadRuns]);
@@ -374,7 +375,7 @@ export default function CommandsPage() {
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
               <p className="section-label" style={{ margin: 0 }}>対象の機器</p>
-              <select value={groupFilter} onChange={(e) => pickGroup(e.target.value)} style={{ width: 220, marginLeft: "auto" }} aria-label="グループで選ぶ">
+              <select value={groupFilter} onChange={(e) => pickGroup(e.target.value)} disabled={!devicesLoaded} style={{ width: 220, marginLeft: "auto" }} aria-label="グループで選ぶ">
                 <option value="">すべてのグループ</option>
                 {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                 <option value={UNGROUPED}>未分類</option>
