@@ -63,8 +63,8 @@ Netmiko のドライバーがあり、コンフィグを取得するコマンド
 | 上記以外 | 対象外 | `setup.sh` は dnf が無ければ止まります。`check_env.sh` は警告を出します |
 
 - `scripts/` のスクリプト（`setup.sh`・`check_env.sh`・`import_cert.sh`・`backup.sh`・`restore.sh`・`collect_logs.sh`）は、同じものを両方の OS で使います。OS の判定と、OS ごとに違う操作（パッケージの導入・ファイアウォール）は `scripts/lib/os.sh` の 1 か所にまとめています（`/etc/os-release` の `ID`・`VERSION_ID`・`ID_LIKE` で判定）
-- AlmaLinux / RHEL 10 系での動きは変えていません（分岐を足しただけです）。ただし `setup.sh` だけをダウンロードして初回に実行したときは、リポジトリが無く OS の共通部品（`lib/os.sh`）を読めないため、先に git を入れてリポジトリを取得してから読み込みます（取得の前に、`/etc/os-release` で明らかに対象外の OS なら止まります）
-- **Ubuntu 24.04 LTS は、偽のコマンドを使ったテスト（`backend/tests/test_os_scripts.py`）で動きを確かめただけで、実機での導入・更新は確認していません**。実機で試すときは、下の「Ubuntu 24.04 LTS で使う」の確認項目を順に見てください
+- AlmaLinux / RHEL 10 系での動きは変えていません（分岐を足しただけです）。ただし `setup.sh` だけをダウンロードして初回に実行したときは、リポジトリが無く OS の共通部品（`lib/os.sh`）を読めないため、先に git を入れてリポジトリを取得してから読み込みます（取得の前に、`/etc/os-release` で明らかに対象外の OS なら止まります。リポジトリの中の `setup.sh` も、対象外の OS なら、パッケージを入れる前に止まります）
+- **Ubuntu 24.04 LTS は、偽のコマンドを使ったテスト（`backend/tests/test_os_scripts.py`・`backend/tests/test_setup_script.py`）で動きを確かめただけで、実機での導入・更新は確認していません**。実機で試すときは、下の「Ubuntu 24.04 LTS で使う」の確認項目を順に見てください
 - 画面の左下には、アプリの版だけを表示します（OS 名は表示しません）
 
 ### 前提条件
@@ -133,6 +133,7 @@ bash setup.sh
 - 2回目以降の実行は「更新」として動作します（`git pull` → イメージの取り直し → 再ビルド → 再起動。既存の `.env` は変更しません）
   - PostgreSQL・Redis のイメージと、ビルドの土台（Python・Node.js・nginx）のイメージを毎回取り直し、セキュリティ修正を取り込みます（同じタグでも中身は更新されるため）。取り直せない（インターネットに出られない等）ときは、警告を出して手元のイメージで続けます。使われなくなった古いイメージは消します（`podman image prune`）
   - backend・frontend のビルドでは、OS のパッケージも更新します（`apt-get upgrade` / `apk upgrade`。公式のイメージが作り直される前に出た修正を取り込むため。ビルドのキャッシュがあっても日に 1 回はやり直します）
+  - `.env` は、更新で変えるものがあっても、最初に変える前に `/root/netconfig-manager-backup/` へバックアップします。足りないキー（`HTTP_PORT` など）を足すときは、`.env` の末尾が改行で終わっていなければ改行を補ってから別の行として足します（既存の行は変えません）。ポートは、前後の引用符と CR（CRLF の `.env`）を除いて読みます（`.env` は書き換えません）
   - 取り直したイメージの作成日時は「システム状態」の「コンテナのイメージ」に表示します。OS や PostgreSQL などのセキュリティ修正を取り込むため、**月に 1 回程度は `setup.sh` を実行してください**
   - 更新では何も聞きません。ポートは `.env` の `HTTP_PORT`・`HTTPS_PORT` をそのまま使います
   - ポートや IP アドレスを聞き直したいときは `bash scripts/setup.sh --reconfigure`
@@ -1209,7 +1210,7 @@ PYTHON=python3 npm run e2e         # backend の依存パッケージが入っ�
 
 GitHub に push すると、GitHub Actions（`.github/workflows/ci.yml`）が自動で次を実行します（結果はリポジトリの「Actions」タブで確認）:
 
-- backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff、導入・運用スクリプトの構文検査（`bash -n scripts/*.sh scripts/lib/*.sh`）、pytest（Python 3.12。`tests/test_os_scripts.py` が、偽の os-release と偽のコマンドで AlmaLinux・Ubuntu の分岐を確かめます）
+- backend: ロックファイルが `requirements*.in` と合っているかの確認（`scripts/lock_deps.sh --check`）、ruff、導入・運用スクリプトの構文検査（`bash -n scripts/*.sh scripts/lib/*.sh`）、pytest（Python 3.12。`tests/test_os_scripts.py` が、偽の os-release と偽のコマンドで AlmaLinux・Ubuntu の分岐を確かめます。`tests/test_setup_script.py` は `setup.sh` を最初から最後まで走らせます。一時ディレクトリの中に導入先を作り、PATH の先頭に置いた偽のコマンド（sudo・dnf・apt-get・git・podman・podman-compose・firewall-cmd・ufw・systemctl・curl など。呼び出しを記録するだけ）で、AlmaLinux 10・Ubuntu 24.04 のそれぞれについて、初回（パッケージの導入・`.env` の作成とキー・ポート開放・ビルドと起動・自動起動・最後の確認）、更新（`.env` が 1 バイトも変わらない・`git pull`・再ビルドとコンテナの再作成・`setup.sh` が変わったときのやり直し）、途中の失敗（ビルド・起動の失敗で 0 以外で終わり、後の手順を呼ばない）、対象外の OS で止まること（dnf があっても）、`.env` の書き方（末尾の改行なし・CRLF・引用符つきのポート・`=` `#` `$` を含む値）でも更新で 1 バイトも変わらないこと、末尾に改行が無い古い `.env` に足りないキーが別の行として足されること、バックアップを `.env` の変更より前に取ること、`endfield-news-bot`・crontab・`python3-pip` に触れないこと、`rm -rf`・`podman system prune`・`volume rm`・`down -v`・パッケージの削除のような消す操作を呼ばないことを、記録から確かめます。偽の sudo は、`/opt`・`/etc`・`/root`・`/var`・`/usr`・`/run`・`/sys` など一時ディレクトリの外のパスが引数のどこかに含まれる呼び出しを実行せずに落とすので、実際のサーバーの設定には触れません。実機の動作の確認ではありません）
 - frontend: `npm ci` → 型チェック（tsc）→ 本番ビルド（vite build）（Node.js 22）
 - nginx: `frontend/Dockerfile` と同じ nginx のイメージか、脆弱性の修正版（`NGINX_MIN`、今は 1.30.7）以上かを確かめ、設定を読み込み（`nginx -t`）、HTTPS・HTTP のそれぞれで起動して、CSP・HSTS などのヘッダーが付くこと（HSTS は HTTPS のときだけ）を確かめます
 - e2e: 画面テスト（`csp` プロジェクトを含む。失敗したときはレポートとスクリーンショットを Artifacts に保存）
@@ -1239,6 +1240,21 @@ bash scripts/lock_deps.sh --check
 - 更新したら、`pip install --require-hashes -r backend/requirements-dev.txt` で入れて pytest を実行し、差分（`git diff backend/requirements*.txt`）を確認して `.in` と一緒にコミットしてください。push 後は CI の `deps-smoke` で本番の依存だけでの起動も確かめられます
 - 意図して固定しているもの（`requirements.in` のコメント参照。消さないこと）: kombu 5.6.2（5.7.0 は依存の宣言漏れで本番の worker が Redis に接続できない）、paramiko 3.5.1（5 系は ssh-rsa を廃止し古い機器へ接続できなくなる）
 - 本番の Python を 3.13 などに上げるときは、`scripts/lock_deps.sh` の `--python-version` を変えてロックを生成し直してください
+
+### 依存の更新の通知（Dependabot）
+
+**実際に PR が来るのは、主に GitHub Actions と npm です**（イメージは、下に書くとおり、タグの形と除外のためほとんど来ません）。
+
+`.github/dependabot.yml` で、GitHub の Dependabot が週 1 回（月曜 9 時。日本時間）、更新を **プルリクエスト（PR）で知らせます**（自動では取り込みません）。対象は、土台のイメージ（`backend/Dockerfile` の python、`frontend/Dockerfile` の node・nginx、`docker-compose.yml`・`docker-compose.prod.yml` の postgres・redis）、GitHub Actions（`.github/workflows/` の `uses:`）、npm（`frontend/`）です。ecosystem ごとに PR は 3 件までで、マイナー・パッチはまとめて 1 本の PR になります。
+
+- **提案させないもの**: nginx のマイナー・メジャー（`1.30-alpine` のように 2 段のタグは段数が保たれるため、パッチの PR は出ず、nginx の PR も実質来ません。安定版の切り替え 1.30 → 1.32 は年 1 回ほど手で行います）、node・postgres・redis のメジャー版（PostgreSQL は上げるとデータの移行が要ります）、python のメジャー・マイナー版（3.12 → 3.13。依存のロックと CI を 3.12 に固定しているため）
+- **postgres・redis・node・python は、実際には PR がほとんど来ません**: タグが `16-alpine` のようにメジャー（python は `3.12`）までの形で、メジャー（python はマイナーも）を除外しているためです。同じタグの中身の更新は `setup.sh` の取り直しで入り、古さは画面「システム状態」の「コンテナのイメージ」で分かります
+- **PR が来たとき**: CI（`ci.yml`・`audit.yml`）が通ったことを確認して取り込みます。取り込んだあと、サーバーで `bash scripts/setup.sh` を実行すると、イメージの取り直しと再ビルドで反映されます。イメージの PR は、Trivy の検査（`image-scan`）が通ることも確認してください
+- **nginx の PR（通常は来ません。来た場合）**: `ci.yml` の `IMAGE`（と、`NGINX_MIN` を上げる場合はその値）が `frontend/Dockerfile` と食い違うため、**同じブランチで `ci.yml` を直すまで CI の nginx のジョブが落ちます**。
+- **nginx の安定版の切り替え**（1.30 → 1.32 など。年 1 回ほど、手で行います）: 奇数のマイナー版（mainline）は使いません。`frontend/Dockerfile` の `FROM docker.io/library/nginx:1.30-alpine AS prod` と、`.github/workflows/ci.yml` の `IMAGE`・`NGINX_MIN` を **同じコミットで**直し、README の「1.30」の記載（上の「テスト」の nginx の説明など）も合わせます。CI の nginx のジョブ（`nginx -t`・ヘッダーの確認）が通ってから取り込み、サーバーで `setup.sh` を実行します。
+- **pip は Dependabot の対象にしていません**: ロックファイル（`requirements*.txt`）は uv で生成し、CI が `scripts/lock_deps.sh --check` で `.in` との一致を確かめているため、Dependabot の PR はほぼ確実に CI で落ちます。意図して固定している kombu・paramiko を上げる PR も出てしまいます。pip の更新は、`audit.yml` の `pip-audit`（毎週）で脆弱性を知り、「依存パッケージの更新（ロックファイル）」の手順（`scripts/lock_deps.sh`）で上げます
+- **Dependabot の対象外で、手で上げるもの**: `ci.yml` の `IMAGE` と `NGINX_MIN`、`audit.yml` の `services` の `redis:7-alpine`、`ci.yml`・`audit.yml` の `python-version`・`node-version`、uv の版（`pip install uv==…`。`ci.yml`・README・`scripts/lock_deps.sh` の `UV_VERSION`）、Trivy の版とハッシュ（`audit.yml` の `TRIVY_VERSION`・`TRIVY_SHA256`）、pip のロック（上記）
+- 設定を変えるときは、`dependabot.yml` の `ignore`・`groups` を編集します。GitHub 側で Dependabot version updates が有効になっていないと PR は来ません（リポジトリの Settings → Code security の「Dependabot version updates」）
 
 ---
 
@@ -1281,6 +1297,7 @@ sudo firewall-cmd --reload
 netconfig-manager/
 ├── .github/workflows/ci.yml     # GitHub Actions（テスト・ビルドの自動実行）
 ├── .github/workflows/audit.yml  # GitHub Actions（依存パッケージの脆弱性の確認。毎週も実行）
+├── .github/dependabot.yml       # Dependabot（イメージ・Actions・npm の更新を PR で通知。毎週。pip は対象外）
 ├── docker-compose.yml           # 開発用
 ├── docker-compose.prod.yml      # 本番用（nginx 配信）
 ├── .env.example
@@ -1452,7 +1469,8 @@ netconfig-manager/
 
 ## 今後の拡張ポイント
 
-- **イメージの更新の通知**: Dependabot / Renovate で Dockerfile・compose のイメージのタグの更新（nginx の stable 系の切り替わりなど）を知らせる
+- **イメージの更新の通知の拡張**: Dependabot（`.github/dependabot.yml`）は導入済み。nginx の安定版が切り替わったとき（1.30 → 1.32 など）に、`NGINX_MIN`（CI）と合わせて追従する手順の自動化、`audit.yml` のサービス用イメージ（`redis:7-alpine`）の更新の通知、PR を自動で取り込む設定（今は人が確認して取り込む）
+- **導入スクリプトのテストの拡張**: `setup.sh` を偽のコマンドで通すテスト（`test_setup_script.py`）は導入済み。実機の AlmaLinux・Ubuntu での導入・更新の確認（コンテナの起動・再起動後の自動起動）、ルート以外の所有者のリポジトリを `sudo -u` で更新する分岐、`--reconfigure` の入力の組み合わせ、`restore.sh`・`import_cert.sh` を同じ作りで通すテスト
 - **認証強化**: LDAP/AD 連携、2 段階認証の必須化（ロールごと）、機器グループ単位の権限、ログイン中の端末（セッション）の一覧と個別の切断、複数プロセス構成でのターミナルの強制切断（Redis 経由の通知など）
 - **通知機能の拡張**: Teams の実環境での確認と、Teams 宛の本文の改良（Adaptive Card の色・列の表示、特定の人へのメンション）、Teams のチャネルへ直接送る Graph API 方式（アプリ登録が必要）、メールの Microsoft Graph（HTTPS）での送信（SMTP のポートを開けられない環境向け）、クライアントシークレットの期限の通知
 - **定期レポートの拡張**: 集計を期間ごとに 1 回だけ集めて設定ごとの範囲をメモリで絞る作り直し（設定が多いとき）、PDF / CSV の添付、任意の期間（日付を指定したレポート）、ユーザーグループの設定のプレビュー・「いま送る」、期間内の件数を履歴として残していない項目（基準のずれ・保存し忘れ・未確認の変更）の推移、レポートごとの項目の選択
@@ -1473,7 +1491,7 @@ netconfig-manager/
 - **モニタリング（試験導入）の本採用**: 既定を有効に切り替え。使用率のしきい値超えの通知、構成図の接続線への使用率の表示、FortiGate の VDOM・PAN-OS の複数 vsys 対応、他機種（Cisco ASA など）のヒット数
 - **コンプライアンスの検査の非同期化**: ルールの作成・更新の直後の全機器の検査（照合）が API のイベントループの上で動くため、機器が多いと応答が遅れる。スレッドか worker へ移す
 - **CSV 一括登録の拡張**: 既存の機器の CSV による更新（上書き）、SSH 鍵での一括登録、未登録のグループの自動作成、タブ区切り（TSV）の貼り付け
-- **Ubuntu 24.04 LTS の実機での確認と対応 OS の拡張**: 実機での導入・更新の確認（「Ubuntu 24.04 LTS で使う」の確認項目）、Podman・podman-compose の版の差で出た問題の吸収、Debian 12 の確認、`setup.sh` 全体を偽のコマンドで通すテスト（今は OS ごとの関数だけをテスト）、ユニットそのものが無い環境への `podman-restart.service` の自動配置、RHEL 系の `podman-restart.service` が `unless-stopped` のコンテナを起動するかの本番での確認、Ubuntu の `podman-compose` を新しい版へ上げる手順
+- **Ubuntu 24.04 LTS の実機での確認と対応 OS の拡張**: 実機での導入・更新の確認（「Ubuntu 24.04 LTS で使う」の確認項目）、Podman・podman-compose の版の差で出た問題の吸収、Debian 12 の確認、ユニットそのものが無い環境への `podman-restart.service` の自動配置、RHEL 系の `podman-restart.service` が `unless-stopped` のコンテナを起動するかの本番での確認、Ubuntu の `podman-compose` を新しい版へ上げる手順
 - **コマンド実行の拡張**: MikroTik RouterOS への対応（メニュー名の許可リスト方式で対応する想定）、スケジュール実行（定期的に `show` を取って比べる）、設定の投入（承認・確認の仕組みとセットで）、時刻・カウンタなど毎回変わる部分を除いた「同じ出力」のまとめ、機器グループ単位の権限、実機での機種ごとの許可リストの確認（Yamaha・NetScaler・Nokia などの絞り込み）、出力が大きいときの分割取得（今は 1 回の応答にまとめて返す）、失敗したコマンドまでの出力の保持（今は 1 台の接続が途中で失敗するとその機器の出力は残らない）
 - **コンフィグ検索の拡張**: 世代の多い環境向けに過去の世代の検索を Celery のタスクにして結果を後で受け取る形、登録済みの機器がある機種だけを選択肢にする
 - **API トークンの拡張**: 権限を細かく選べるトークン（API・機器グループごと）、接続元 IP の制限、期限が近いトークンの通知、`/docs`・`/openapi.json` の公開範囲の見直し（今はログインなしで見られる）、トークンで使える API の拡大（認証情報を扱う操作を、別の確認の仕組みとセットで）

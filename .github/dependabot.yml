@@ -1,0 +1,82 @@
+# 依存の更新の通知（Dependabot が PR で知らせる。自動では取り込まない）
+#   土台のイメージ（python・node・nginx は Dockerfile、postgres・redis は compose）、GitHub Actions、npm
+#   pip は対象にしない（ロックファイルを uv で生成しており、Dependabot の PR は CI の lock_deps.sh --check で落ちるため。
+#   pip の更新は audit.yml の pip-audit で知り、scripts/lock_deps.sh で上げる）
+# 方針（README「依存の更新の通知（Dependabot）」）:
+#   - 週 1 回（月曜 9 時 日本時間）、ecosystem ごとに PR は 3 件まで。マイナー・パッチはまとめて 1 本の PR にする
+#   - nginx は安定版（偶数のマイナー版。いま 1.30）だけを使う。パッチ（1.30.x）だけ提案させ、マイナー・メジャーは提案させない
+#     （奇数のマイナー版 = mainline を避けるため。安定版の切り替え 1.30 → 1.32 は年 1 回ほど手で行う。README）
+#   - python・node・postgres・redis はメジャー版を上げない（postgres はデータの移行が要る）。
+#     python は 3.12 → 3.13 のようなマイナー版も上げない（依存のロックと CI を 3.12 で固定しているため）
+#   - 取り込んだあとサーバーで scripts/setup.sh を実行する（イメージの取り直し・再ビルド）
+version: 2
+updates:
+  # backend/Dockerfile（python）・frontend/Dockerfile（node・nginx）
+  - package-ecosystem: "docker"
+    directories:
+      - "/backend"
+      - "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    groups:
+      docker-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "*node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "*nginx"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # docker-compose.yml・docker-compose.prod.yml（postgres・redis）
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    groups:
+      compose-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "*postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "*redis"
+        update-types: ["version-update:semver-major"]
+
+  # .github/workflows/*.yml の uses:（actions/checkout など）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # frontend/package.json・package-lock.json
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

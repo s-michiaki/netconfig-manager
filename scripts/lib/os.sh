@@ -138,6 +138,16 @@ ncm_install_packages() {
   fi
 }
 
+# .env に 1 行を足す（引数: ファイル 行）。共通部品（OS には依存しない）
+#   末尾が改行で終わっていなければ、先に改行を 1 つ補う（補わないと最後の行とつながり、暗号化キーなどが壊れる）。
+#   空のファイルには補わない。既存の行の中身は変えない
+#   ファイルがある前提（無ければ何も作らず 1 を返す。tee -a が 644 の権限で .env を新しく作らないため）
+ncm_env_append() {
+  sudo test -f "$1" || return 1
+  if [ -n "$(sudo tail -c1 "$1")" ]; then echo | sudo tee -a "$1" >/dev/null; fi
+  printf '%s\n' "$2" | sudo tee -a "$1" >/dev/null
+}
+
 # ポートを開ける（引数: ポート番号...）。ファイアウォールが動いていなければ何もしない
 #   RHEL 系: firewalld が動いているとき（80・443 は service、それ以外は port で許可）
 #   Ubuntu : ufw が有効（ufw status が active）のときだけ ufw allow

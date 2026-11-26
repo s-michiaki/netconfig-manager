@@ -32,6 +32,12 @@ for arg in "$@"; do
   esac
 done
 
+# テスト用の差し替えが設定されていれば知らせる（本番では設定しない。設定すると、バックアップ先の差し替えには
+# chmod 700 をかけ、systemd が読まない場所にユニットを書いて enable に失敗する）
+for v in NCM_ENV_BACKUP_DIR NCM_SYSTEMD_UNIT_DIR NCM_OS_RELEASE_FILE NCM_SYSTEMD_DROPIN_DIR; do
+  [ -z "${!v:-}" ] || echo "[WARN] テスト用の差し替え（$v）が設定されています"
+done
+
 # ===========================
 # sudo Password Enter Please
 # ===========================
@@ -88,6 +94,10 @@ pull_source() { # $1 = リポジトリ
     sudo -u "$owner" git -C "$1" pull --ff-only || return 1
   fi
   PULLED_DIR="$1"
+}
+# .env の値を 1 つ読む（前後の引用符と CR は取り除く。.env 自体は書き換えない）
+env_get() { # $1 = キー, $2 = .env
+  sudo sed -n "s/^$1=//p" "$2" | tail -1 | tr -d '\r' | sed -e "s/^[\"']//" -e "s/[\"']\$//"
 }
 file_hash() { sha256sum "$1" 2>/dev/null | cut -d" " -f1 || true; }
 
@@ -148,8 +158,8 @@ if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
 
 # 2回目以降は .env の値を既定にする（Enter だけで今のポートを維持）
 if [ -f "$INSTALL_DIR/.env" ]; then
-  v=$(sudo sed -n 's/^HTTP_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTP_PORT="$v"
-  v=$(sudo sed -n 's/^HTTPS_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTPS_PORT="$v"
+  v=$(env_get HTTP_PORT "$INSTALL_DIR/.env"); [ -n "$v" ] && HTTP_PORT="$v"
+  v=$(env_get HTTPS_PORT "$INSTALL_DIR/.env"); [ -n "$v" ] && HTTPS_PORT="$v"
 fi
 
 ask "HTTP_PORT Please Enter [${HTTP_PORT}]: " Red_HTTP_PORT
@@ -185,7 +195,11 @@ else
   fi
 fi
 
-ENV_BACKUP_DIR="/root/netconfig-manager-backup"
+# テスト用の差し替え（本番では設定しない。tests/test_setup_script.py が、実際の /root・/etc に触れずに通すために使う）
+#   NCM_ENV_BACKUP_DIR      .env のバックアップ先（既定 /root/netconfig-manager-backup）
+#   NCM_SYSTEMD_UNIT_DIR    定期バックアップの systemd ユニットの置き場（既定 /etc/systemd/system）
+ENV_BACKUP_DIR="${NCM_ENV_BACKUP_DIR:-/root/netconfig-manager-backup}"
+SYSTEMD_UNIT_DIR="${NCM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 TS=$(date +%Y%m%d-%H%M%S)
 
 # =========================
@@ -237,6 +251,7 @@ fi
 if [ -r "$OS_LIB" ]; then . "$OS_LIB"; else . <(sudo cat "$OS_LIB"); fi
 
 echo "[INFO] OS: ${NCM_OS_PRETTY:-不明}（${NCM_OS_FAMILY}）"
+if [ "$NCM_OS_LEVEL" = "unsupported" ]; then echo "対象外の OS です: $NCM_OS_NOTE"; exit 1; fi
 [ -z "$NCM_OS_NOTE" ] || echo "[WARN] $NCM_OS_NOTE"
 ncm_require_pkg_manager || exit 1
 
@@ -297,6 +312,13 @@ fi
 # .env が無いのに DB データ（ボリューム）が残っている場合、新しいパスワードでは
 # 既存DBに接続できず、機器パスワードも復号できないため、ここで止める
 PROJECT_NAME=$(basename "$INSTALL_DIR")
+# .env のバックアップ（root のみ読める場所へ）。.env を作った直後、または更新で最初に変える前に取る
+backup_env() {
+  echo "[INFO] Backing up .env..."
+  sudo mkdir -p "$ENV_BACKUP_DIR"
+  sudo chmod 700 "$ENV_BACKUP_DIR"
+  sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
+}
 if [ "$FIRST_INSTALL" -eq 1 ] && sudo podman volume exists "${PROJECT_NAME}_postgres_data" 2>/dev/null; then
   echo ""
   echo "⚠ .env がありませんが、既存のデータベース（ボリューム ${PROJECT_NAME}_postgres_data）が残っています。"
@@ -329,25 +351,20 @@ PUBLIC_URL=
 EOF
   sudo install -m 600 -o root -g root "$TMP_ENV" "$INSTALL_DIR/.env"
   rm -f "$TMP_ENV"
+  backup_env
 else
-  # HTTP_PORT・HTTPS_PORT だけは入力値を反映する
+  # .env を変える前に、まずバックアップを取る（壊れる前の内容を必ず残すため）
+  backup_env
+  # HTTP_PORT・HTTPS_PORT だけは入力値を反映する（値が同じなら .env は書き換えない）
   for kv in "HTTP_PORT=${HTTP_PORT}" "HTTPS_PORT=${HTTPS_PORT}"; do
     k="${kv%%=*}"
     if sudo grep -q "^${k}=" .env; then
-      sudo sed -i "s/^${k}=.*/${kv}/" .env
+      [ "$(env_get "$k" .env)" = "${kv#*=}" ] || sudo sed -i "s/^${k}=.*/${kv}/" .env
     else
-      echo "$kv" | sudo tee -a .env >/dev/null
+      ncm_env_append .env "$kv"
     fi
   done
 fi
-
-# =========================
-# .env バックアップ（root のみ読める場所へ）
-# =========================
-echo "[INFO] Backing up .env..."
-sudo mkdir -p "$ENV_BACKUP_DIR"
-sudo chmod 700 "$ENV_BACKUP_DIR"
-sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
 
 # =========================
 # ファイアウォールのポート開放（RHEL 系: firewalld / Ubuntu: ufw が有効なときだけ）
@@ -374,7 +391,7 @@ if [ -z "$CUR_URL" ]; then
   if sudo grep -q '^PUBLIC_URL=' "$INSTALL_DIR/.env"; then
     sudo sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=${AUTO_URL}|" "$INSTALL_DIR/.env"
   else
-    echo "PUBLIC_URL=${AUTO_URL}" | sudo tee -a "$INSTALL_DIR/.env" >/dev/null
+    ncm_env_append "$INSTALL_DIR/.env" "PUBLIC_URL=${AUTO_URL}"
   fi
   echo "[INFO] PUBLIC_URL=${AUTO_URL}（通知のリンク先。変更する場合は .env を編集）"
 fi
@@ -426,7 +443,7 @@ elif ! systemd-analyze calendar "$BACKUP_ON_CALENDAR" >/dev/null 2>&1; then
 else
   BACKUP_TIMER="on"
   echo "[INFO] Enabling scheduled backup ($BACKUP_ON_CALENDAR)..."
-  sudo tee /etc/systemd/system/netconfig-backup.service >/dev/null <<UNIT
+  sudo tee "$SYSTEMD_UNIT_DIR/netconfig-backup.service" >/dev/null <<UNIT
 [Unit]
 Description=NetConfig Manager backup (DB / config history / .env)
 After=podman-restart.service
@@ -435,7 +452,7 @@ After=podman-restart.service
 Type=oneshot
 ExecStart=/bin/bash $INSTALL_DIR/scripts/backup.sh
 UNIT
-  sudo tee /etc/systemd/system/netconfig-backup.timer >/dev/null <<UNIT
+  sudo tee "$SYSTEMD_UNIT_DIR/netconfig-backup.timer" >/dev/null <<UNIT
 [Unit]
 Description=NetConfig Manager scheduled backup
 

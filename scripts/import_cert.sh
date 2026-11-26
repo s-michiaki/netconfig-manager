@@ -236,7 +236,7 @@ if sudo test -f "$INSTALL_DIR/.env"; then
   if sudo grep -q '^HTTPS_PORT=' "$INSTALL_DIR/.env"; then
     sudo sed -i "s/^HTTPS_PORT=.*/HTTPS_PORT=${HTTPS_PORT}/" "$INSTALL_DIR/.env"
   else
-    echo "HTTPS_PORT=${HTTPS_PORT}" | sudo tee -a "$INSTALL_DIR/.env" >/dev/null
+    ncm_env_append "$INSTALL_DIR/.env" "HTTPS_PORT=${HTTPS_PORT}"
   fi
 fi
 
@@ -249,7 +249,7 @@ if sudo test -f "$INSTALL_DIR/.env"; then
     if sudo grep -q '^PUBLIC_URL=' "$INSTALL_DIR/.env"; then
       sudo sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=${NEW_URL}|" "$INSTALL_DIR/.env"
     else
-      echo "PUBLIC_URL=${NEW_URL}" | sudo tee -a "$INSTALL_DIR/.env" >/dev/null
+      ncm_env_append "$INSTALL_DIR/.env" "PUBLIC_URL=${NEW_URL}"
     fi
     PUBLIC_URL_CHANGED=1
   fi
