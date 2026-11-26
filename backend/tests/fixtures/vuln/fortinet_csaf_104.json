@@ -1,0 +1,23 @@
+{
+ "document": {
+  "title": "Example library notice",
+  "category": "Fortinet PSIRT Advisories",
+  "csaf_version": "2.0",
+  "tracking": {
+   "id": "FG-IR-99-104",
+   "initial_release_date": "2099-01-10T00:00:00",
+   "current_release_date": "2099-01-12T00:00:00",
+   "status": "final",
+   "version": "0"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "category": "vendor",
+    "name": "Fortinet PSIRT",
+    "branches": []
+   }
+  ]
+ }
+}

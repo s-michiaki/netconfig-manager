@@ -1381,3 +1381,16 @@ def test_worker_paths_enqueue_after_commit_and_recheck_expired(viol, monkeypatch
     assert asyncio.run(recheck()) == 1
     assert _mine(viol) == _ids(d2)
     c.delete(f"/api/compliance/exceptions/{ex2['id']}", headers=admin)
+
+
+def test_on_vuln_setting_roundtrip_and_counts_as_content(ctx):
+    """脆弱性・サポート期限（on_vuln）: 既定は無効。これだけを選んだ個別設定も保存できる"""
+    c, a = ctx["c"], ctx["u"]["ntf-a"]["h"]
+    assert c.get("/api/notifications/me", headers=a).json()["on_vuln"] is False
+    body = {"mode": "custom", "discord_webhook": D.format(77, uid()), "on_change": False, "on_system": False,
+            "on_inventory": False, "on_ping": False, "on_vuln": True}
+    r = c.put("/api/notifications/me", json=body, headers=a)
+    assert r.status_code == 200, r.text
+    assert r.json()["on_vuln"] is True
+    assert c.put("/api/notifications/me", json={**body, "on_vuln": False}, headers=a).status_code == 422  # 内容が 1 つも無い
+    assert c.put("/api/notifications/me", json={"mode": "inherit"}, headers=a).status_code == 200

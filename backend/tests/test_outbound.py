@@ -307,6 +307,29 @@ def test_vuln_fetch_via_proxy_keeps_guard(monkeypatch, trust, corp_ca):
     assert "socket" in seen and "SSLSocket" in seen  # TCP（プロキシへ）と TLS のあとのソケットを見張りに登録している
 
 
+def test_vuln_conditional_get_and_xml_via_proxy(monkeypatch, trust, corp_ca):
+    """Fortinet: 条件つき GET（304）と XML（RSS）も、プロキシの CONNECT のトンネルの中で（条件はトンネルの中だけに載る）"""
+    rss = (b"<?xml version='1.0' encoding='UTF-8'?><rss xmlns:csaf=\"https://fortiguard.fortinet.com/rss/ns/csaf\"><channel>"
+           b"<item><link>https://fortiguard.fortinet.com/psirt/FG-IR-99-101</link><csaf:link>"
+           b"https://filestore.fortinet.com/fortiguard/psirt/csaf_x_fg-ir-99-101.json</csaf:link></item></channel></rss>")
+
+    def respond(method, path, headers, body):
+        if headers.get("if-none-match") == '"r1"':
+            return 304, {"ETag": '"r1"'}, b""
+        return 200, {"Content-Type": "text/xml", "ETag": '"r1"'}, rss
+
+    with FakeProxy(corp_ca, auth=(USER, PASS), respond=respond) as px:
+        use(monkeypatch, px, auth=True)
+        trust(corp_ca)
+        got = vf.fetch(vf.URL_FORTINET_RSS, accept=vf.ACCEPT_XML)
+        assert got.status == 200 and got.etag == '"r1"'
+        assert vf.parse_fortinet_rss(got.body)[0][0]["ext_id"] == "FG-IR-99-101"
+        again = vf.fetch(vf.URL_FORTINET_RSS, accept=vf.ACCEPT_XML, etag=got.etag)
+        assert again.status == 304 and again.body == b""
+    assert all(c.startswith("CONNECT filestore.fortinet.com:443") for c in px.connects)
+    assert all('"r1"' not in c for c in px.connects)  # 条件（ETag）は CONNECT には載らない
+
+
 # ================================================================ HTTPS を検査するプロキシ（組織の CA）
 
 

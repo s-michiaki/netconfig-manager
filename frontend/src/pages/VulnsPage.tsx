@@ -5,7 +5,7 @@ import { PERM, useAuth } from "../auth";
 import { CsvButton, downloadCsv } from "../components/CsvButton";
 
 /**
- * 脆弱性・サポート期限: 機器の OS バージョンを、ベンダーの勧告（Palo Alto）・悪用確認済み一覧（CISA KEV）・
+ * 脆弱性・サポート期限: 機器の OS バージョンを、ベンダーの勧告（Palo Alto・Fortinet）・悪用確認済み一覧（CISA KEV）・
  * サポート終了日（endoflife.date と手入力）と照合した結果。.env の VULN_ENABLED=true のときだけメニューに出る。
  * 外部から来た文字列（勧告の題・URL）はテキストとして表示し、リンクは https のものだけ rel="noopener noreferrer" の新しいタブで開く。
  * 画面はタブで分ける: 脆弱性 / 機器別 / サポート期限 / 判定できない機器
@@ -16,16 +16,23 @@ type State = "open" | "ack" | "fixed";
 interface Advisory {
   id: string; ext_id: string; cve_ids: string[]; title: string; severity: Severity; cvss: number | null;
   url: string | null; kev: boolean; kev_due: string | null; published_at: string | null; rejected?: boolean;
+  provisional?: boolean; // final でない文書（暫定の勧告）
 }
+interface Notice { ext_id: string; title: string; published_at: string | null; modified_at: string | null; url: string | null; }
 interface Match {
   id: string; device_id: string; device_name: string; group_name: string | null; os_version: string | null;
   confidence: "confirmed" | "candidate"; state: State; note: string | null; acked_by: string | null; acked_at: string | null;
-  first_seen: string | null; advisory: Advisory; candidate_reason: string | null;
+  first_seen: string | null; advisory: Advisory; candidate_reason: string | null; candidate_code?: string | null;
 }
 interface MatchList { total: number; limit: number; offset: number; items: Match[]; }
 interface SourceInfo { source: string; label: string; last_at: string | null; last_ok_at: string | null; last_error: string | null; last_count: number | null; skipped: number | null; }
+interface Coverage {
+  source: string; label: string; count: number; documents: number; pending: number; oldest: string | null; newest: string | null;
+}
 interface Summary {
-  counts: Record<Severity, number> & { kev: number; candidate: number; acked: number };
+  counts: Record<Severity, number> & { kev: number; candidate: number; acked: number; candidate_not_listed?: number };
+  coverage?: Coverage[];
+  notices?: { count: number; recent: number; items: Notice[] }; // 要確認の告知（製品の記載が無く、機器を特定できない勧告）
   eol: { ended: number; soon: number }; devices: number; unknown_devices: number;
   sources: SourceInfo[]; unknown_sources: string[]; fetch_hour: number;
   range_unreadable: { devices: number; pairs: number; advisories: number; stale?: number };
@@ -68,10 +75,34 @@ const NOTE_MAX = 500;
 
 const fmt = (iso: string | null | undefined) =>
   iso ? new Date(iso).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+const fmtDay = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleDateString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit" }) : "—";
+// 勧告に載っていない系列による候補（勧告に載っていない系列・勧告より新しい系列）。既定で折りたたむ
+const NOT_LISTED = ["not_listed", "newer_branch"];
 
-/** 出典へのリンク。https の URL だけ（それ以外はリンクにしない） */
+/** 配列は同じ名前を繰り返す形（reason=a&reason=b）で送る（axios の既定の reason[]= は API が読まない） */
+function toQuery(params: Record<string, unknown>): URLSearchParams {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "") continue;
+    for (const x of Array.isArray(v) ? v : [v]) q.append(k, String(x));
+  }
+  return q;
+}
+
+// 出典としてリンクにしてよいホスト（サーバーの許可リストと同じ。https だけ）
+const LINK_HOSTS = ["security.paloaltonetworks.com", "www.fortiguard.com", "www.cisa.gov", "endoflife.date"];
+
+/** 出典へのリンク。https で、決まったホストの URL だけ（それ以外はリンクにしない） */
 function SafeLink({ url, children }: { url: string | null; children: React.ReactNode }) {
-  if (url && /^https:\/\//.test(url)) return <a href={url} target="_blank" rel="noopener noreferrer">{children}</a>;
+  let ok = false;
+  try {
+    const u = url ? new URL(url) : null;
+    ok = !!u && u.protocol === "https:" && LINK_HOSTS.includes(u.hostname) && !u.username && !u.password && !u.port;
+  } catch {
+    ok = false;
+  }
+  if (ok && url) return <a href={url} target="_blank" rel="noopener noreferrer">{children}</a>;
   return <>{children}</>;
 }
 
@@ -125,30 +156,38 @@ function AckModal({ match, onClose, onDone }: { match: Match; onClose: () => voi
 
 // ---------------------------------------------------------------- 脆弱性の一覧
 
-function MatchesTab({ groups, canWrite, deviceId, onDevice }: {
-  groups: Group[]; canWrite: boolean; deviceId: string; onDevice: (id: string) => void;
+function MatchesTab({ groups, canWrite, deviceId, onDevice, notListed }: {
+  groups: Group[]; canWrite: boolean; deviceId: string; onDevice: (id: string) => void; notListed: number;
 }) {
   const [state, setState] = useState<State | "all">("open");
   const [severity, setSeverity] = useState("");
   const [groupId, setGroupId] = useState("");
   const [kevOnly, setKevOnly] = useState(false);
+  // 判定: すべて / 該当だけ / 候補だけ / 候補のうち「勧告に載っていない系列」だけ
+  const [judge, setJudge] = useState<"" | "confirmed" | "candidate" | "not_listed">("");
+  // 「勧告に載っていない系列」による候補は、既定で折りたたむ（多くなりやすいため。件数は出す）
+  const [showNotListed, setShowNotListed] = useState(false);
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<MatchList | null>(null);
   const [ack, setAck] = useState<Match | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
+  const hideNotListed = !showNotListed && judge !== "not_listed" && judge !== "confirmed";
   const params = useCallback(() => ({
     state, severity: severity || undefined, group_id: groupId || undefined, device_id: deviceId || undefined,
     kev: kevOnly ? true : undefined,
-  }), [state, severity, groupId, deviceId, kevOnly]);
+    confidence: judge === "confirmed" ? "confirmed" : judge ? "candidate" : undefined,
+    reason: judge === "not_listed" ? NOT_LISTED : undefined,
+    hide_reason: hideNotListed ? NOT_LISTED : undefined,
+  }), [state, severity, groupId, deviceId, kevOnly, judge, hideNotListed]);
   const load = useCallback(() => {
-    api.get<MatchList>("/vulns/matches", { params: { ...params(), limit: PAGE, offset } })
+    api.get<MatchList>("/vulns/matches", { params: toQuery({ ...params(), limit: PAGE, offset }) })
       .then((r) => { setData(r.data); setError(""); })
       .catch((e) => setError(errorMessage(e)));
   }, [params, offset]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setOffset(0); }, [state, severity, groupId, deviceId, kevOnly]);
+  useEffect(() => { setOffset(0); }, [state, severity, groupId, deviceId, kevOnly, judge, showNotListed]);
 
   const unack = async (m: Match) => {
     setError("");
@@ -184,6 +223,15 @@ function MatchesTab({ groups, canWrite, deviceId, onDevice }: {
             {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </label>
+        <label className="audit-field">
+          <span className="form-label">判定</span>
+          <select aria-label="判定" value={judge} onChange={(e) => setJudge(e.target.value as typeof judge)}>
+            <option value="">すべて</option>
+            <option value="confirmed">該当だけ</option>
+            <option value="candidate">候補だけ</option>
+            <option value="not_listed">候補（勧告に載っていない系列・勧告より新しい系列）だけ</option>
+          </select>
+        </label>
         <label className="vuln-check">
           <input type="checkbox" checked={kevOnly} onChange={(e) => setKevOnly(e.target.checked)} /> 悪用確認済みだけ
         </label>
@@ -193,10 +241,23 @@ function MatchesTab({ groups, canWrite, deviceId, onDevice }: {
           </button>
         )}
         <span style={{ flex: 1 }} />
-        <CsvButton onClick={() => downloadCsv("/vulns/matches/export", params(), "vulns.csv")} />
+        <CsvButton onClick={() => downloadCsv("/vulns/matches/export", toQuery(params()) as unknown as Record<string, unknown>, "vulns.csv")} />
       </div>
       {error && <p className="form-error">{error}</p>}
       {message && <p className="review-message">{message}</p>}
+      {hideNotListed && notListed > 0 && state === "open" && (
+        <p className="hist-note vuln-folded" data-testid="vuln-not-listed-folded">
+          勧告のデータに機器の系列が載っていない（勧告より新しい系列を含む）ための「候補」{notListed} 件を折りたたんでいます
+          （新しい系列の機器に、古い勧告が当たることが多いものです）。
+          <button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={() => setShowNotListed(true)}>表示する</button>
+        </p>
+      )}
+      {showNotListed && judge !== "not_listed" && (
+        <p className="hist-note">
+          勧告に載っていない系列による候補も表示しています。
+          <button className="btn btn-sm" style={{ marginLeft: 8 }} onClick={() => setShowNotListed(false)}>折りたたむ</button>
+        </p>
+      )}
       {data && !items.length ? (
         <p className="topo-muted">{state === "open" ? "未確認の該当はありません。" : "該当する記録はありません。"}</p>
       ) : (
@@ -209,12 +270,16 @@ function MatchesTab({ groups, canWrite, deviceId, onDevice }: {
           <tbody>
             {items.map((m) => (
               <tr key={m.id} className="vuln-row">
-                <td style={{ minWidth: "8em" }}>
+                <td style={{ minWidth: "9em" }}>
                   <b>{m.device_name}</b>
                   <div className="topo-muted topo-small">{m.os_version ?? "—"}{m.group_name ? `・${m.group_name}` : ""}</div>
                 </td>
                 <td className="vuln-title" style={{ minWidth: "14em" }}>
                   <SafeLink url={m.advisory.url}><span className="mono">{m.advisory.ext_id}</span></SafeLink>
+                  {m.advisory.provisional && (
+                    <span className="badge badge-warning" data-testid="vuln-provisional" style={{ marginLeft: 6 }}
+                      title="勧告の文書が確定版（final）ではありません。内容が変わることがあります">暫定の勧告</span>
+                  )}
                   {m.advisory.rejected && (
                     <span className="badge badge-neutral" data-testid="vuln-rejected" style={{ marginLeft: 6 }}
                       title="ベンダーが勧告を取り下げました。照合には使わず、この勧告の判定は解消にしています">取り下げ</span>
@@ -291,7 +356,7 @@ function DevicesTab({ onOpen }: { onOpen: (deviceId: string) => void }) {
   return (
     <>
       {error && <p className="form-error">{error}</p>}
-      {rows && !rows.length && <p className="topo-muted">脆弱性を判定できた機器がありません（OS バージョンが読み取れている Palo Alto の機器が対象です）。</p>}
+      {rows && !rows.length && <p className="topo-muted">脆弱性を判定できた機器がありません（OS バージョンが読み取れている Palo Alto・Fortinet の機器が対象です）。</p>}
       {rows && rows.length > 0 && (
         <table className="data-table">
           <thead><tr><th>機器</th><th>OS バージョン</th><th>重大</th><th>高</th><th>中</th><th>低</th><th>悪用確認済み</th><th>確認済み</th><th /></tr></thead>
@@ -523,6 +588,146 @@ function UnknownTab() {
   );
 }
 
+// ---------------------------------------------------------------- 取得済みの範囲・過去の勧告の取り込み（Fortinet）
+
+interface ImportResult { ext_id: string; ok: boolean; result: string; message: string; }
+interface ImportState {
+  status: "queued" | "done" | "busy" | "error"; by?: string | null; ids?: string[]; at?: string; finished_at?: string;
+  message?: string; results?: ImportResult[];
+}
+
+/** 要確認の告知: 製品の記載が無く、機器を特定できない勧告（NGINX・Java などの告知）。機器ごとの件数には入れない */
+function NoticesPanel({ notices }: { notices: { count: number; recent: number; items: Notice[] } }) {
+  const [open, setOpen] = useState(false);
+  if (!notices.count) return null;
+  return (
+    <div className="hist-note vuln-notices" data-testid="vuln-notices">
+      <span>
+        要確認の告知（製品の記載が無く、機器を特定できない勧告）が <b>{notices.count} 件</b>あります
+        {notices.recent ? `（直近 30 日に公開 ${notices.recent} 件）` : ""}。機器ごとの件数には数えていません。勧告のページで、自分の機器に関係するかを確かめてください。
+      </span>
+      <button className="btn btn-sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? "閉じる" : "一覧を見る"}</button>
+      {open && (
+        <ul className="vuln-notice-list">
+          {notices.items.map((n) => (
+            <li key={n.ext_id}>
+              <SafeLink url={n.url}><span className="mono">{n.ext_id}</span></SafeLink>
+              <span className="vuln-notice-title"> {n.title}</span>
+              <span className="topo-muted topo-small">（公開 {fmtDay(n.published_at)}）</span>
+            </li>
+          ))}
+          {notices.count > notices.items.length && <li className="topo-muted">ほか {notices.count - notices.items.length} 件</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function CoveragePanel({ coverage }: { coverage: Coverage[] }) {
+  if (!coverage.length) return null;
+  return (
+    <div className="vuln-coverage" data-testid="vuln-coverage">
+      <span className="form-label">取得済みの範囲</span>
+      {coverage.map((c) => (
+        <span key={c.source} className="vuln-source">
+          {c.label}: {c.count} 件
+          {c.count > 0 && <>（公開日 {fmtDay(c.oldest)} 〜 {fmtDay(c.newest)}）</>}
+          {c.source === "fortinet" && c.documents > c.count && <span className="topo-muted">　ほかの製品の勧告 {c.documents - c.count} 件</span>}
+          {c.pending > 0 && <span className="topo-muted">　取得待ち {c.pending} 件（次回の取得で取ります）</span>}
+        </span>
+      ))}
+      <span className="topo-muted topo-small">
+        取得済みの範囲より前の勧告は照合していません。<b>勧告が見つからないことは、安全であることを意味しません。</b>
+      </span>
+    </div>
+  );
+}
+
+function ImportPanel({ onDone }: { onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [max, setMax] = useState(20);
+  const [st, setSt] = useState<ImportState | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    api.get<{ state: ImportState | null; max: number }>("/vulns/fortinet/import")
+      .then((r) => { setSt(r.data.state); setMax(r.data.max); })
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => { if (open) load(); }, [open, load]);
+  // 依頼中は 3 秒ごとに状態を見る（worker が結果を書いたら止める）
+  useEffect(() => {
+    if (!open || st?.status !== "queued") return;
+    const t = window.setInterval(load, 3000);
+    return () => window.clearInterval(t);
+  }, [open, st?.status, load]);
+  const prev = st?.status;
+  useEffect(() => { if (prev === "done") onDone(); }, [prev, onDone]);
+  const ids = text.split(/[\s,、]+/).filter(Boolean);
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.post("/vulns/fortinet/import", { ids: text });
+      load();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="vuln-import">
+      <button className="btn btn-sm" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} Fortinet の過去の勧告を取り込む
+      </button>
+      {open && (
+        <div className="card vuln-import-body" data-testid="vuln-import">
+          <p className="hist-note">
+            毎日の取得は、Fortinet の RSS に出ている最新の 50 件だけを新しく見つけます。それより前の勧告は、勧告の ID
+            （FG-IR-YY-NNN の形）を指定して取り込めます。改行かカンマで区切り、1 回に {max} 件まで。1 件ごとに 2 秒以上あけて取りに行きます。
+            2021 年以前の勧告など、機械で読める形式（CSAF）の文書が無い勧告は取り込めません。
+          </p>
+          <div className="form-group">
+            <label className="form-label" htmlFor="vuln-import-ids">勧告の ID</label>
+            <textarea id="vuln-import-ids" rows={3} maxLength={4000} value={text} onChange={(e) => setText(e.target.value)}
+              placeholder={"FG-IR-24-015\nFG-IR-22-398"} className="mono" />
+            <p className="hist-note" style={{ marginTop: 4 }}>{ids.length} 件</p>
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          <div className="btn-row" style={{ justifyContent: "flex-start" }}>
+            <button className="btn btn-primary" disabled={busy || !ids.length || st?.status === "queued"} onClick={submit}>取り込む</button>
+          </div>
+          {st && (
+            <div className="vuln-import-state" data-testid="vuln-import-state">
+              <p className="topo-small">
+                {st.status === "queued" ? "取り込み中です…" : st.status === "done" ? `取り込みが終わりました（${fmt(st.finished_at ?? st.at)}）`
+                  : st.message}
+                {st.by ? <span className="topo-muted">　依頼: {st.by}</span> : null}
+              </p>
+              {st.results && st.results.length > 0 && (
+                <table className="data-table">
+                  <thead><tr><th>勧告</th><th>結果</th></tr></thead>
+                  <tbody>
+                    {st.results.map((r) => (
+                      <tr key={r.ext_id}>
+                        <td className="mono nowrap">{r.ext_id}</td>
+                        <td><span className={`badge ${r.ok ? "badge-success" : "badge-warning"}`}>{r.ok ? "成功" : "取り込めません"}</span>
+                          <span className="vuln-import-msg"> {r.message}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- 画面
 
 export default function VulnsPage() {
@@ -573,8 +778,9 @@ export default function VulnsPage() {
             機器名・IP・OS バージョンは外部へ送らず、製品単位の公開情報を取得して、サーバーの中で照合しています。
           </p>
           <p className="topo-muted topo-small">
-            出典: Palo Alto Networks Security Advisories（security.paloaltonetworks.com）／ CISA Known Exploited Vulnerabilities Catalog（www.cisa.gov）／
-            endoflife.date。各情報の権利は、それぞれの提供元に帰属します。
+            出典: Palo Alto Networks Security Advisories（security.paloaltonetworks.com）／ Fortinet PSIRT Advisories（www.fortiguard.com・
+            filestore.fortinet.com）／ CISA Known Exploited Vulnerabilities Catalog（www.cisa.gov）／ endoflife.date。
+            各情報の権利は、それぞれの提供元に帰属します。
           </p>
         </div>
         {summary && c && (
@@ -583,7 +789,7 @@ export default function VulnsPage() {
               <div className="card cmp-card"><span className="cmp-card-label">重大</span><span className="cmp-card-value" style={{ color: c.critical ? "var(--color-danger)" : undefined }}>{c.critical}</span></div>
               <div className="card cmp-card"><span className="cmp-card-label">高</span><span className="cmp-card-value" style={{ color: c.high ? "var(--color-danger)" : undefined }}>{c.high}</span></div>
               <div className="card cmp-card"><span className="cmp-card-label">悪用確認済み</span><span className="cmp-card-value" style={{ color: c.kev ? "var(--color-danger)" : undefined }}>{c.kev}</span></div>
-              <div className="card cmp-card"><span className="cmp-card-label">候補</span><span className="cmp-card-value">{c.candidate}</span><span className="topo-muted topo-small">機種・系列を自動では決められない勧告に当たるもの（Panorama だけ・特定の機種だけ・記載のない系列も影響あり）</span></div>
+              <div className="card cmp-card"><span className="cmp-card-label">候補</span><span className="cmp-card-value">{c.candidate}</span><span className="topo-muted topo-small">機種・系列を自動では決められない勧告に当たるもの（Panorama だけ・特定の機種だけ・記載のない系列も影響あり・勧告に機器の系列が載っていない）</span></div>
               <div className="card cmp-card"><span className="cmp-card-label">サポート終了済み</span><span className="cmp-card-value" style={{ color: summary.eol.ended ? "var(--color-danger)" : undefined }}>{summary.eol.ended}<span className="cmp-card-sub"> 台</span></span></div>
               <div className="card cmp-card"><span className="cmp-card-label">1 年以内に終了</span><span className="cmp-card-value" style={{ color: summary.eol.soon ? "var(--color-warning)" : undefined }}>{summary.eol.soon}<span className="cmp-card-sub"> 台</span></span></div>
             </div>
@@ -593,6 +799,7 @@ export default function VulnsPage() {
                   <span className={`sys-dot sys-dot-${s.last_error ? "warn" : s.last_ok_at ? "ok" : "unknown"}`} aria-hidden="true" />
                   {s.label}: {s.last_ok_at ? `最後の取得 ${fmt(s.last_ok_at)}${s.last_count !== null ? `（${s.last_count} 件）` : ""}` : "まだ取得していません"}
                   {s.skipped ? <span className="topo-muted">　範囲を読み取れなかった行 {s.skipped} 件</span> : null}
+                  {s.source === "fortinet" && summary.notices?.count ? <span className="topo-muted">　要確認の告知 {summary.notices.count} 件</span> : null}
                   {s.last_error && <span className="vuln-source-error">　失敗: {s.last_error}</span>}
                 </span>
               ))}
@@ -602,6 +809,9 @@ export default function VulnsPage() {
               )}
               <span className="topo-muted topo-small">毎日 {summary.fetch_hour} 時以降に取得します</span>
             </div>
+            <CoveragePanel coverage={summary.coverage ?? []} />
+            {summary.notices && <NoticesPanel notices={summary.notices} />}
+            {canFetch && (summary.coverage ?? []).some((x) => x.source === "fortinet") && <ImportPanel onDone={loadSummary} />}
             {(summary.range_unreadable.stale ?? 0) > 0 && (
               <p className="hist-note" data-testid="vuln-stale-note">
                 前回は該当だった勧告のうち {summary.range_unreadable.stale} 件は、機器の版が変わり、いまの版では判定できません（該当の件数からは外しています）。「判定できない機器」のタブで確認してください。
@@ -625,7 +835,7 @@ export default function VulnsPage() {
         </div>
         {tab === "matches" && (
           <MatchesTab groups={groups} canWrite={canWrite} deviceId={deviceId}
-            onDevice={(id) => setTab("matches", id)} />
+            onDevice={(id) => setTab("matches", id)} notListed={c?.candidate_not_listed ?? 0} />
         )}
         {tab === "devices" && <DevicesTab onOpen={(id) => setTab("matches", id)} />}
         {tab === "eol" && <EolTab canWrite={canWrite} />}

@@ -3,7 +3,7 @@
 VULN_ENABLED=false（既定）のときはすべて 404 を返す（画面のメニューも出さない。外部へも一切つながない）
 - 閲覧（VULN_READ）: 全ロール。要約・脆弱性の一覧（CSV 出力を含む）・機器別・判定できない機器・勧告・サポート終了日
 - 書き込み（VULN_WRITE）: オペレーター以上。「確認済み」（メモ必須）とその取り消し・サポート終了日の手入力と削除
-- 外部からの「いま取得」: 管理者（SYSTEM_READ）。間隔の制限つき
+- 外部からの「いま取得」・Fortinet の過去の勧告の取り込み: 管理者（SYSTEM_READ）。間隔の制限つき。API トークンでは使えない
 「該当」は、ベンダーの勧告の影響範囲（リリース系列ごとの「この版より前」）と機器の OS バージョンの照合の結果。
 機能の設定・構成までは見ない。勧告に載っていない脆弱性はありうる（services/vuln_service.py）
 """
@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, StringConstraints
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require
@@ -25,6 +25,7 @@ from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
 from app.models.user import User
 from app.models.vuln import EolDate, VulnAdvisory, VulnMatch, VulnSource
+from app.services import vuln_fetch as fetch
 from app.services import vuln_match as vm
 from app.services import vuln_service as svc
 from app.services.audit import Audit, get_audit
@@ -48,6 +49,7 @@ UNKNOWN_LABELS = {
     "unparseable": "OS バージョンの書き方を読み取れません",
     "unsupported": "対象外の機種です",
     "no_vuln_source": "脆弱性の情報源が未対応です（サポート期限だけ確認します）",
+    "fortios_6k7k": "FortiGate 6000 / 7000 系（勧告では FortiOS-6K7K という別の製品）は未対応です（サポート期限だけ確認します）",
 }
 _BRANCH = re.compile(r"^(?:[0-9A-Za-z][0-9A-Za-z.\-]{0,31}|\*)$")  # "*" はその機種のすべて（バージョンを分解できない機種など）
 CANDIDATE_REASON = vm.CANDIDATE_REASONS["panorama"]  # 理由を決められないときの既定（理由は照合をやり直して決める）
@@ -55,6 +57,10 @@ _SEV_RANK = case((VulnAdvisory.severity == "critical", 4), (VulnAdvisory.severit
                  (VulnAdvisory.severity == "medium", 2), (VulnAdvisory.severity == "low", 1), else_=0)
 
 Note = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=NOTE_MAX)]
+CandidateCode = Literal["not_listed", "newer_branch", "not_decided", "note", "model_unknown", "panorama", "platforms",
+                        "default_affected"]
+NOT_LISTED_CODES = ("not_listed", "newer_branch")  # 勧告に載っていない系列による候補（画面では既定で折りたたむ）
+NOTICE_ITEMS = 20
 
 
 def iso_utc(dt: datetime | None) -> str | None:
@@ -65,14 +71,19 @@ def _advisory_out(a: VulnAdvisory) -> dict:
     return {"id": a.id, "source": a.source, "ext_id": a.ext_id, "cve_ids": a.cve_ids or [], "title": a.title,
             "severity": a.severity, "cvss": a.cvss, "published_at": iso_utc(a.published_at),
             "modified_at": iso_utc(a.modified_at), "url": a.url, "kev": a.kev, "rejected": a.rejected,
-            "kev_due": a.kev_due.isoformat() if a.kev_due else None}
+            "kev_due": a.kev_due.isoformat() if a.kev_due else None,
+            # final でない文書（暫定の勧告）。画面で「暫定の勧告」と添える
+            "provisional": any(isinstance(x, dict) and x.get("provisional") for x in a.affected or [])}
 
 
 def _candidate_reason(m: VulnMatch, a: VulnAdvisory, platform: str | None, model: str | None) -> str | None:
-    """「候補」の理由（Panorama だけの勧告で機器の種類が分からない／記載のない系列も影響ありとする勧告）"""
+    """「候補」の理由（Panorama だけの勧告で機器の種類が分からない／記載のない系列も影響ありとする勧告／
+    勧告に載っていない系列（FortiOS）など）。照合をやり直して決め、決められなければ照合のときの理由の符号から"""
     if m.confidence != "candidate":
         return None
-    reason = vm.candidate_reason(platform or "", m.os_version, a.affected or [], model) if platform else None
+    reason = vm.candidate_reason(platform or "", m.os_version, a.affected or [], model, a.source) if platform else None
+    if reason is None and m.reason in vm.CANDIDATE_REASONS and m.reason not in ("platforms", "note"):
+        reason = vm.CANDIDATE_REASONS[m.reason]
     return reason or CANDIDATE_REASON
 
 
@@ -82,7 +93,8 @@ def _match_out(m: VulnMatch, a: VulnAdvisory, device_name: str, group_id: str | 
             "group_name": group_name, "os_version": m.os_version, "confidence": m.confidence, "state": m.state,
             "note": m.note, "acked_by": m.acked_by, "acked_at": iso_utc(m.acked_at), "first_seen": iso_utc(m.first_seen),
             "last_seen": iso_utc(m.last_seen), "advisory": _advisory_out(a),
-            "candidate_reason": _candidate_reason(m, a, platform, model)}
+            "candidate_reason": _candidate_reason(m, a, platform, model),
+            "candidate_code": m.reason if m.confidence == "candidate" else None}
 
 
 # ---------------------------------------------------------------- 要約
@@ -123,6 +135,10 @@ async def summary(db: AsyncSession = Depends(get_db)):
             kev += n
     acked = (await db.execute(select(func.count()).select_from(VulnMatch).join(Device, Device.id == VulnMatch.device_id)
                               .where(VulnMatch.state == "ack", VulnMatch.stale.is_(False)))).scalar_one()
+    not_listed = (await db.execute(select(func.count()).select_from(VulnMatch).join(Device, Device.id == VulnMatch.device_id)
+                                   .where(VulnMatch.state == "open", VulnMatch.stale.is_(False),
+                                          VulnMatch.confidence == "candidate",
+                                          VulnMatch.reason.in_(NOT_LISTED_CODES)))).scalar_one()
     stale = (await db.execute(select(func.count()).select_from(VulnMatch).join(Device, Device.id == VulnMatch.device_id)
                               .where(VulnMatch.stale.is_(True), VulnMatch.state.in_(("open", "ack"))))).scalar_one()
     devices = list((await db.execute(select(Device))).scalars())
@@ -135,10 +151,17 @@ async def summary(db: AsyncSession = Depends(get_db)):
         sources.append({"source": name, "label": svc.SOURCE_LABELS[name], "last_at": iso_utc(s.last_at) if s else None,
                         "last_ok_at": iso_utc(s.last_ok_at) if s else None, "last_error": s.last_error if s else None,
                         "last_count": s.last_count if s else None, "skipped": s.skipped if s else None})
-    advisories = list((await db.execute(select(VulnAdvisory).where(VulnAdvisory.source == "paloalto"))).scalars())
+    advisories = list((await db.execute(select(VulnAdvisory).where(VulnAdvisory.source.in_(svc.ADVISORY_SOURCES)))).scalars())
     unreadable = svc.unreadable_by_device(devices, advisories)
+    cov = await svc.coverage(db)
+    coverage = [{"source": src, "label": svc.SOURCE_LABELS[src], "count": cov[src]["count"],
+                 "documents": cov[src]["documents"], "pending": cov[src].get("pending", 0),
+                 "oldest": iso_utc(cov[src]["oldest"]), "newest": iso_utc(cov[src]["newest"])}
+                for src in svc.ADVISORY_SOURCES if src in svc.active_sources()]
+    notices = await _notices(db, now)
     return {
-        "counts": {**counts, "kev": kev, "candidate": candidate, "acked": acked},
+        "counts": {**counts, "kev": kev, "candidate": candidate, "acked": acked, "candidate_not_listed": not_listed},
+        "coverage": coverage, "notices": notices,
         "eol": _eol_counts(devices, eol_rows, today), "devices": len(devices), "unknown_devices": unknown,
         "range_unreadable": {"devices": len(unreadable), "pairs": sum(len(v) for v in unreadable.values()),
                              "advisories": len({x for v in unreadable.values() for x in v}), "stale": stale},
@@ -147,19 +170,42 @@ async def summary(db: AsyncSession = Depends(get_db)):
     }
 
 
+async def _notices(db: AsyncSession, now: datetime) -> dict:
+    """要確認の告知（製品の記載が無く、機器を特定できない勧告。Fortinet の NGINX・Java などの PSIRT の告知）
+
+    機器ごとの件数・一覧・ダッシュボード・通知・レポートには入れず、ここだけで返す（新しく増えたことが分かるよう、件数と
+    直近 30 日の件数も）
+    """
+    if "fortinet" not in svc.active_sources():
+        return {"count": 0, "recent": 0, "items": []}
+    rows = [a for a in (await db.execute(select(VulnAdvisory).where(
+        VulnAdvisory.source == "fortinet", VulnAdvisory.rejected.is_(False)))).scalars()
+        if any(isinstance(x, dict) and x.get("notice") for x in a.affected or [])]
+    rows.sort(key=lambda a: (a.published_at or datetime.min, a.ext_id), reverse=True)
+    recent = sum(1 for a in rows if a.published_at and (now - a.published_at).days <= 30)
+    return {"count": len(rows), "recent": recent,
+            "items": [{"ext_id": a.ext_id, "title": a.title, "published_at": iso_utc(a.published_at),
+                       "modified_at": iso_utc(a.modified_at), "url": a.url} for a in rows[:NOTICE_ITEMS]]}
+
+
 def _unknown_reason(d: Device) -> str | None:
-    """判定できない理由（脆弱性を判定できる機種で、バージョンが読めているなら None）"""
-    r = vm.unknown_reason(d.platform, d.os_version)
+    """判定できない理由（脆弱性を判定できる機種で、バージョンが読めていて、その機種の勧告の情報源を使っているなら None）"""
+    r = vm.unknown_reason(d.platform, d.os_version, d.model, vuln=True)
     if r:
         return r
-    return None if d.platform in vm.CONFIRMED_PLATFORMS else "no_vuln_source"
+    used = {vm.SOURCE_PLATFORM[s] for s in svc.active_sources() if s in vm.SOURCE_PLATFORM}
+    return None if d.platform in vm.CONFIRMED_PLATFORMS and d.platform in used else "no_vuln_source"
 
 
 # ---------------------------------------------------------------- 脆弱性の一覧
 
 
-def _filters(q, device_id, group_id, severity, confidence, state, kev):
+def _filters(q, device_id, group_id, severity, confidence, state, kev, reason=None, hide_reason=None):
     q = q.where(VulnMatch.stale.is_(False))  # 前回は該当・いまの版では判定できないものは「判定できない機器」に出す
+    if reason:
+        q = q.where(VulnMatch.confidence == "candidate", VulnMatch.reason.in_(reason))
+    if hide_reason:  # 候補のうち、これらの理由のものを除く（勧告に載っていない系列による候補を折りたたむ）
+        q = q.where(or_(VulnMatch.confidence != "candidate", VulnMatch.reason.is_(None), VulnMatch.reason.not_in(hide_reason)))
     if device_id:
         q = q.where(VulnMatch.device_id == device_id)
     if group_id:
@@ -192,15 +238,17 @@ async def list_matches(
     severity: Annotated[list[Literal["critical", "high", "medium", "low", "none"]] | None, Query()] = None,
     confidence: Literal["confirmed", "candidate"] | None = None,
     state: Literal["open", "ack", "fixed", "all"] = "open", kev: bool | None = None,
+    reason: Annotated[list[CandidateCode] | None, Query()] = None,
+    hide_reason: Annotated[list[CandidateCode] | None, Query()] = None,
     limit: int = Query(100, ge=1, le=LIST_MAX), offset: int = Query(0, ge=0, le=100_000),
     db: AsyncSession = Depends(get_db),
 ):
+    args = (device_id, group_id, severity, confidence, state, kev, reason, hide_reason)
     count_q = _filters(select(func.count()).select_from(VulnMatch)
                        .join(VulnAdvisory, VulnAdvisory.id == VulnMatch.advisory_id)
-                       .join(Device, Device.id == VulnMatch.device_id), device_id, group_id, severity, confidence, state, kev)
+                       .join(Device, Device.id == VulnMatch.device_id), *args)
     total = (await db.execute(count_q)).scalar_one()
-    rows = (await db.execute(_order(_filters(_base(), device_id, group_id, severity, confidence, state, kev))
-                             .limit(limit).offset(offset))).all()
+    rows = (await db.execute(_order(_filters(_base(), *args)).limit(limit).offset(offset))).all()
     return {"total": total, "limit": limit, "offset": offset, "items": [_match_out(*r) for r in rows]}
 
 
@@ -210,10 +258,12 @@ async def export_matches(
     severity: Annotated[list[Literal["critical", "high", "medium", "low", "none"]] | None, Query()] = None,
     confidence: Literal["confirmed", "candidate"] | None = None,
     state: Literal["open", "ack", "fixed", "all"] = "open", kev: bool | None = None,
+    reason: Annotated[list[CandidateCode] | None, Query()] = None,
+    hide_reason: Annotated[list[CandidateCode] | None, Query()] = None,
     db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit),
 ):
-    rows = (await db.execute(_order(_filters(_base(), device_id, group_id, severity, confidence, state, kev))
-                             .limit(MAX_EXPORT_ROWS))).all()
+    rows = (await db.execute(_order(_filters(_base(), device_id, group_id, severity, confidence, state, kev, reason,
+                                             hide_reason)).limit(MAX_EXPORT_ROWS))).all()
     header = ["機器", "グループ", "OS バージョン", "勧告 ID", "CVE", "題", "重大度", "CVSS", "悪用確認済み", "対応の期限（KEV）",
               "判定", "状態", "確認のメモ", "確認した人", "出典"]
     data = [[name, gname or "", m.os_version, a.ext_id, " ".join(a.cve_ids or []), a.title,
@@ -273,7 +323,7 @@ async def list_unknown(db: AsyncSession = Depends(get_db)):
                           "platform_label": PLATFORMS[d.platform].label if d.platform in PLATFORMS else d.platform,
                           "model": d.model, "os_version": d.os_version, "reason": reason, "reason_label": UNKNOWN_LABELS[reason]})
     # 脆弱性を判定できる機器のうち、範囲を読み取れない勧告がある機器（その勧告は該当・非該当のどちらにもしていない）
-    advisories = list((await db.execute(select(VulnAdvisory).where(VulnAdvisory.source == "paloalto"))).scalars())
+    advisories = list((await db.execute(select(VulnAdvisory).where(VulnAdvisory.source.in_(svc.ADVISORY_SOURCES)))).scalars())
     by_dev = svc.unreadable_by_device([d for d, _ in rows], advisories)
     # 前回は該当だったが、版が変わり、いまの版では判定できない勧告（state・メモは残してある）
     stale: dict[str, list[dict]] = {}
@@ -298,7 +348,7 @@ async def get_advisory(advisory_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="勧告が見つかりません")
     keys = ("status", "branch", "ge", "lt", "le", "open", "all", "none", "after_all", "fixes", "platforms", "platforms_bad",
             "unreadable", "broken", "entry", "lt_only", "kind",
-            "default", "raw", "src")
+            "default", "raw", "src", "fmt", "v", "eq", "fix", "upcoming", "cve")
     return {**_advisory_out(a), "products": a.products or [],
             "affected": [{k: v for k, v in it.items() if k in keys} for it in a.affected or []]}
 
@@ -456,3 +506,53 @@ async def fetch_now(db: AsyncSession = Depends(get_db), audit: Audit = Depends(g
     audit("vuln.fetch", detail={"task_id": task.id, "sources": svc.active_sources()})
     await db.commit()
     return {"queued": True, "task_id": task.id}
+
+
+# ---------------------------------------------------------------- Fortinet の過去の勧告の取り込み
+
+_FG_IR_TOKEN = re.compile(r"[\s,、]+")
+
+
+class ImportIn(BaseModel):
+    ids: str = Field(max_length=4000)  # 勧告の ID（FG-IR-YY-NNN）を改行・カンマ区切りで
+
+
+@router.post("/fortinet/import", status_code=202)
+async def fortinet_import(body: ImportIn, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit),
+                          user: User = Depends(require(Perm.SYSTEM_READ))):
+    """Fortinet の過去の勧告を ID で取り込む（管理者だけ・ログインのみ。worker で実行し、結果は GET で見る）
+
+    RSS は最新 50 件だけなので、それより前の勧告はここで足す。ID の形（FG-IR-YY-NNN）だけを受け付け、1 回に
+    svc.FORTINET_IMPORT_MAX 件まで。連続しては実行できない
+    """
+    from app.services import report  # 利用者ごとの間隔の制限（Redis）を使い回す
+    from app.worker import import_fortinet_advisories  # 循環 import を避ける
+
+    if "fortinet" not in svc.active_sources():
+        raise HTTPException(status_code=409, detail="Fortinet の勧告を使わない設定です（VULN_SOURCES に fortinet がありません）")
+    tokens = [t for t in _FG_IR_TOKEN.split(body.ids.strip()) if t]
+    ids = list(dict.fromkeys(t.upper() for t in tokens))
+    bad = [t for t in ids if not fetch.valid_fortinet_id(t)]
+    if not ids:
+        raise HTTPException(status_code=422, detail="勧告の ID を入力してください（例: FG-IR-24-015）")
+    if bad:
+        raise HTTPException(status_code=422,
+                            detail=f"勧告の ID の形が正しくありません（FG-IR-YY-NNN の形だけ）: {', '.join(bad[:5])[:200]}")
+    if len(ids) > svc.FORTINET_IMPORT_MAX:
+        raise HTTPException(status_code=422, detail=f"1 回に取り込める勧告は {svc.FORTINET_IMPORT_MAX} 件までです")
+    wait = await report.take_slot("all", "vuln-import", svc.MANUAL_IMPORT_INTERVAL_SEC)
+    if wait:
+        raise HTTPException(status_code=429, detail=f"続けて取り込めません。{wait} 秒ほど待ってからやり直してください",
+                            headers={"Retry-After": str(wait)})
+    await svc.set_import_state(db, {"status": "queued", "by": user.username, "ids": ids, "at": utcnow().isoformat()})
+    task = import_fortinet_advisories.delay(ids, user.username)
+    audit("vuln.import", detail={"task_id": task.id, "ids": ids})
+    await db.commit()
+    return {"queued": True, "ids": ids, "task_id": task.id}
+
+
+@router.get("/fortinet/import", dependencies=[Depends(require(Perm.SYSTEM_READ))])
+async def fortinet_import_state(db: AsyncSession = Depends(get_db)):
+    """最後の取り込みの状態と結果（管理者だけ・ログインのみ）"""
+    st = await svc.get_import_state(db)
+    return {"state": st, "max": svc.FORTINET_IMPORT_MAX}

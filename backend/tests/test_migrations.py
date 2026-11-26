@@ -44,7 +44,7 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0039_rule_remediation"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0040_vuln_notify"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols and "credential_profile_id" in cols
     # 既存の機器はプロファイルなし・ユーザー名はそのまま（今までどおり機器側の認証情報で接続する）
@@ -73,3 +73,32 @@ def test_empty_db_is_created(monkeypatch):
     con = sqlite3.connect(path)
     tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
     assert {"devices", "users", "jump_hosts", "schedules", "alembic_version"} <= tables
+
+
+def test_0040_marks_only_notifiable_existing_matches(monkeypatch):
+    """0040: 既存の照合結果のうち、通知の条件（確定で、重大度が高以上か悪用確認済み）に当たるものだけ「通知済み」にする。
+    候補・中以下は印を付けない（あとで確定・悪用確認済みになったときに通知されるように）"""
+    from alembic import command
+
+    path = f"{TMP}/m0040.db"
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    cfg = migrate._alembic_config()
+    command.upgrade(cfg, "0039_rule_remediation")
+    con = sqlite3.connect(path)
+    con.execute("insert into devices (id, name, hostname, platform, port, username, password, is_active, created_at, updated_at)"
+                " values ('d1','fw1','192.0.2.1','fortinet',22,'u','p',1,'2026-01-01','2026-01-01')")
+    for aid, sev, kev in (("a-crit", "critical", 0), ("a-med", "medium", 0), ("a-kev", "medium", 1), ("a-high", "high", 0)):
+        con.execute("insert into vuln_advisories (id, source, ext_id, cve_ids, title, severity, products, affected, kev, rejected,"
+                    " fetched_at) values (?, 'fortinet', ?, '[]', 't', ?, '[]', '[]', ?, 0, '2026-01-01')", (aid, aid, sev, kev))
+    for mid, aid, conf in (("m1", "a-crit", "confirmed"), ("m2", "a-med", "confirmed"), ("m3", "a-kev", "confirmed"),
+                           ("m4", "a-high", "candidate")):
+        con.execute("insert into vuln_matches (id, device_id, advisory_id, confidence, first_seen, last_seen, state, stale)"
+                    " values (?, 'd1', ?, ?, '2026-01-01', '2026-01-02', 'open', 0)", (mid, aid, conf))
+    con.commit()
+    con.close()
+    command.upgrade(cfg, "head")
+    con = sqlite3.connect(path)
+    got = dict(con.execute("select id, notified_at from vuln_matches").fetchall())
+    assert got["m1"] and got["m3"] and got["m2"] is None and got["m4"] is None
+    command.downgrade(cfg, "0039_rule_remediation")
+    command.upgrade(cfg, "head")

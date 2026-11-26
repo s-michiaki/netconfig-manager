@@ -149,12 +149,13 @@ class Settings(BaseSettings):
     SNMP_RETRIES: int = Field(default=1, ge=0, le=5)
 
     # --- 脆弱性（CVE）とサポート終了日（EOL）の管理（services/vuln_*.py。既定は無効） ---
-    # 有効にすると、毎日 1 回、外部（Palo Alto・CISA・endoflife.date）から製品単位の情報を取得して機器の OS バージョンと照合する。
-    # 機器名・IP・バージョンは外部へ送らない（取得する URL に含めない）。無効のあいだは外部へ一切つながない
+    # 有効にすると、毎日 1 回、外部（Palo Alto・Fortinet・CISA・endoflife.date）から製品単位の情報を取得して機器の OS バージョンと
+    # 照合する。機器名・IP・バージョンは外部へ送らない（取得する URL に含めない）。無効のあいだは外部へ一切つながない
     VULN_ENABLED: bool = False
     VULN_FETCH_HOUR: int = Field(default=4, ge=0, le=23)  # 毎日この時刻（TIMEZONE）以降の最初の判定で取得する
-    # 使う情報源（カンマ区切り）。paloalto=Palo Alto の勧告 / kev=CISA の悪用確認済み一覧 / eol=endoflife.date のサポート終了日
-    VULN_SOURCES: str = "paloalto,kev,eol"
+    # 使う情報源（カンマ区切り）。paloalto=Palo Alto の勧告 / fortinet=Fortinet の勧告（FortiOS）/
+    # kev=CISA の悪用確認済み一覧 / eol=endoflife.date のサポート終了日
+    VULN_SOURCES: str = "paloalto,fortinet,kev,eol"
 
     # --- 外部への接続（インターネットへの HTTP(S)。app/core/outbound.py） ---
     # 対象: Discord・Slack・Teams の Webhook、メールの OAuth 2.0 のトークンの取得、脆弱性情報の取得。

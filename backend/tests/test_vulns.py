@@ -886,8 +886,8 @@ def test_eol_partial_failure_keeps_fetched_products(net, enabled):
 
 def test_sources_setting_limits_fetch(net, enabled, monkeypatch):
     net.routes.update(standard_routes())
-    monkeypatch.setattr(settings, "VULN_SOURCES", "eol, FORTINET ,nvd")
-    assert vuln_service.active_sources() == ["eol"] and vuln_service.unknown_sources() == ["fortinet", "nvd"]
+    monkeypatch.setattr(settings, "VULN_SOURCES", "eol, NVD ,foo")
+    assert vuln_service.active_sources() == ["eol"] and vuln_service.unknown_sources() == ["nvd", "foo"]
     res = run(_fetch())
     assert list(res["sources"]) == ["eol"]
     assert all("endoflife.date" in u for u in net.urls)

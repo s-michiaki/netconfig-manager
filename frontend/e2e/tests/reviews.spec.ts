@@ -130,7 +130,7 @@ test("オペレーターが基準を指定し、ずれがタブ・ダッシュ�
     await expect(rows.first()).toContainText("+1");
     await expect(rows.first()).toContainText("2026 年度の見直しで承認");
     await expect(op.getByTestId("drift-counts")).toContainText("ずれている 1 台");
-    await expect(op.getByTestId("drift-counts")).toContainText("基準が未指定 5 台");
+    await expect(op.getByTestId("drift-counts")).toContainText("基準が未指定 8 台"); // 9 台（脆弱性の見本の Fortinet 3 台を含む）のうち SW-3F 以外
     await rows.first().getByRole("link", { name: "差分" }).click();
     await expect(op).toHaveURL(/\/history\?device=.+&drift=1/);
     await expect(op.locator(".diff-add")).toHaveText(["+snmp-server location rack-12"]);

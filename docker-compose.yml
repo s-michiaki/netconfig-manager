@@ -78,7 +78,7 @@ x-backend-env: &backend-env
   # 脆弱性・サポート終了日の管理（既定は無効。有効にすると worker が外部へ HTTPS で接続する）
   VULN_ENABLED: ${VULN_ENABLED:-false}
   VULN_FETCH_HOUR: ${VULN_FETCH_HOUR:-4}
-  VULN_SOURCES: ${VULN_SOURCES:-paloalto,kev,eol}
+  VULN_SOURCES: ${VULN_SOURCES:-paloalto,fortinet,kev,eol}
   # 外部への接続（Webhook・メールの OAuth のトークン・脆弱性情報）。プロキシ（http:// だけ）・プロキシを通さない宛先・
   # 追加で信頼する CA（ホストの certs-outbound/ に置いたファイルの名前。下の volumes で読み取り専用で渡す）
   OUTBOUND_PROXY: ${OUTBOUND_PROXY:-}

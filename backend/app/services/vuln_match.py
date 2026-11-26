@@ -35,8 +35,10 @@ PLATFORM_SCHEMES: dict[str, tuple[str, ...]] = {
 # endoflife.date などの「サポート終了日」の表で使う platform（体系 → platform）
 EOL_PLATFORM = {"panos": "paloalto_panos", "fortios": "fortinet", "iosxe": "cisco_xe"}
 
-# 脆弱性を、ベンダーの勧告の影響範囲で判定できる platform（confidence=confirmed）。J-1 は PAN-OS だけ
-CONFIRMED_PLATFORMS = frozenset({"paloalto_panos"})
+# 脆弱性を、ベンダーの勧告の影響範囲で判定できる platform（confidence=confirmed）。PAN-OS（J-1）と FortiOS（J-2）
+CONFIRMED_PLATFORMS = frozenset({"paloalto_panos", "fortinet"})
+# 勧告の情報源 → その勧告で判定する platform
+SOURCE_PLATFORM = {"paloalto": "paloalto_panos", "fortinet": "fortinet"}
 
 MAX_VERSION_LENGTH = 128
 
@@ -58,14 +60,16 @@ def _letter(s: str | None) -> int:
     return ord(s.lower()) - 96 if s else 0
 
 
-_PANOS = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-h(\d+))?$", re.I)
-_FORTIOS = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[ ,]+build\s*(\d+))?$", re.I)
-_IOSXE = re.compile(r"^(\d+)\.(\d+)\.(\d+)([a-z])?$", re.I)
-_IOS = re.compile(r"^(\d+)\.(\d+)\((\d+)([a-z]?)\)([A-Za-z]*)(\d*)([a-z]?)$")
-_NXOS = re.compile(r"^(\d+)\.(\d+)\((\d+)([a-z]?)\)([A-Za-z]*)(\d*)(?:\((\d+)([a-z]?)\))?$")
-_ASA = re.compile(r"^(\d+)\.(\d+)\((\d+)(?:\.(\d+))?\)(\d*)$")
-_JUNOS = re.compile(r"^(\d+)\.(\d+)([RFXBIS])(\d+)(?:-S(\d+))?(?:\.(\d+))?$")
-_EOS = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?([A-Za-z]*)$")
+_PANOS = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-h(\d+))?\Z", re.I | re.A)
+# FortiOS: "7.2.5 build1517"（台帳の読み取りの形）・"v7.2.5,build1517,230606 (GA.F)"（get system status の形）。
+# build・日付・(GA.F) は比べない。"(Interim)"・"(Beta)" などの GA でない版は読まない（判定できない）
+_FORTIOS = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[ ,]+build\s*(\d+)(?:,\d{6})?)?(?:\s*\(GA(?:\.[A-Z])?\))?\Z", re.I | re.A)
+_IOSXE = re.compile(r"^(\d+)\.(\d+)\.(\d+)([a-z])?\Z", re.I | re.A)
+_IOS = re.compile(r"^(\d+)\.(\d+)\((\d+)([a-z]?)\)([A-Za-z]*)(\d*)([a-z]?)\Z", re.A)
+_NXOS = re.compile(r"^(\d+)\.(\d+)\((\d+)([a-z]?)\)([A-Za-z]*)(\d*)(?:\((\d+)([a-z]?)\))?\Z", re.A)
+_ASA = re.compile(r"^(\d+)\.(\d+)\((\d+)(?:\.(\d+))?\)(\d*)\Z", re.A)
+_JUNOS = re.compile(r"^(\d+)\.(\d+)([RFXBIS])(\d+)(?:-S(\d+))?(?:\.(\d+))?\Z", re.A)
+_EOS = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?([A-Za-z]*)\Z", re.A)
 
 _JUNOS_RELEASE = {"I": 0, "B": 1, "X": 2, "F": 3, "S": 4, "R": 5}  # 同じ系列での並び（目安。通常は R だけ）
 
@@ -117,13 +121,28 @@ def parse_version(platform: str, text: str | None) -> Parsed | None:
     return None
 
 
-def unknown_reason(platform: str, os_version: str | None) -> str | None:
-    """「判定できない」理由（判定できるなら None）。no_version / unsupported / unparseable"""
+def unknown_reason(platform: str, os_version: str | None, model: str | None = None, *, vuln: bool = False) -> str | None:
+    """「判定できない」理由（判定できるなら None）。no_version / unsupported / unparseable / fortios_6k7k
+
+    vuln=True（脆弱性の照合）のときだけ、モデルも見る: FortiGate 6000 / 7000 系は別系統の FortiOS（勧告では
+    FortiOS-6K7K という別の製品）なので、FortiOS の勧告では判定しない（fortios_6k7k）。サポート終了日には使わない
+    """
     if not supported_platform(platform):
         return "unsupported"
     if not (os_version or "").strip():
         return "no_version"
-    return None if parse_version(platform, os_version) else "unparseable"
+    if parse_version(platform, os_version) is None:
+        return "unparseable"
+    if vuln and platform == "fortinet" and fortios_model_kind(model) == "6k7k":
+        return "fortios_6k7k"
+    return None
+
+
+def judgeable(platform: str, os_version: str | None, model: str | None) -> Parsed | None:
+    """脆弱性の照合に使える分解済みの版（照合できない機器は None）。対象の platform・読める版・6K7K でない"""
+    if platform not in CONFIRMED_PLATFORMS or unknown_reason(platform, os_version, model, vuln=True):
+        return None
+    return parse_version(platform, os_version)
 
 
 def compare(a: Parsed, b: Parsed) -> int:
@@ -170,6 +189,13 @@ CANDIDATE_REASONS = {
     "panorama": "Panorama だけに影響する勧告です。機器の種類（Panorama かファイアウォールか）を判別できませんでした",
     "default_affected": "勧告は、記載のない系列も影響ありとしています（この機器の系列は勧告の表に載っていません）",
     "platforms": "特定の機種だけに影響する勧告です（対象: {platforms}）。機種を確かめてください",
+    # FortiOS（Fortinet の CSAF）
+    "not_listed": "勧告のデータにこの系列が載っていません。勧告のページで確かめてください",
+    "newer_branch": "勧告より新しい系列です。勧告のデータに載っていません（勧告のページで確かめてください）",
+    "not_decided": "勧告のデータで、この版の扱いがはっきりしません（この系列の影響ありの範囲の外ですが、"
+                   "この版を影響なしとする記載がありません）。勧告のページで確かめてください",
+    "note": "勧告に注記があります（{note}）。勧告のページで確かめてください",
+    "model_unknown": "機器のモデルを読み取れず、FortiGate 6000 / 7000 系（別系統の FortiOS）かどうかを判別できません",
 }
 
 
@@ -225,7 +251,7 @@ def _gate(item: dict, model: str | None) -> str | None:
     return "platforms"  # PA-3200 などの機種の系列・決められない表記。機器のモデルとの対応は判別しない（README の限界）
 
 
-_BRANCH_TEXT = re.compile(r"^\d+\.\d+$")
+_BRANCH_TEXT = re.compile(r"^\d+\.\d+\Z", re.A)
 
 
 def _span(p: Parsed, item: dict) -> str:
@@ -432,25 +458,273 @@ def _judge(p: Parsed, affected, model) -> tuple[str, str | None, list[str]]:
     return "unaffected", None, []
 
 
-def judge_parsed(p: Parsed, affected: list[dict], model: str | None = None) -> str:
+def judge_parsed(p: Parsed, affected: list[dict], model: str | None = None, source: str = "paloalto") -> str:
     """分解済みのバージョンの判定: affected / candidate / unreadable / unaffected"""
-    return judge_detail(p, affected, model)[0]
+    return judge_source(source, p, affected, model)[0]
 
 
-def evaluate(platform: str, os_version: str | None, affected: list[dict], model: str | None = None) -> str:
+def judge_source(source: str, p: Parsed, affected, model: str | None = None) -> tuple[str, str | None, list[str]]:
+    """勧告の情報源ごとの判定（paloalto: CVE 5.0 の範囲 / fortinet: CSAF の FortiOS の行）。知らない情報源は判定できない"""
+    if source == "paloalto" and p.scheme == "panos":
+        return judge_explain(p, affected, model)
+    if source == "fortinet" and p.scheme == "fortios":
+        return judge_fortios(p, affected, model)
+    return "unreadable", None, []
+
+
+def evaluate(platform: str, os_version: str | None, affected: list[dict], model: str | None = None,
+             source: str | None = None) -> str:
     """影響範囲に対する機器の判定: affected / candidate / unaffected / unreadable（範囲を読めない）/ unknown（版が読めない）"""
     p = parse_version(platform, os_version)
     if p is None:
         return "unknown"
-    return judge_parsed(p, affected, model)
+    return judge_source(source or _source_of(platform), p, affected, model)[0]
 
 
-def candidate_reason(platform: str, os_version: str | None, affected: list[dict], model: str | None = None) -> str | None:
-    """「候補」の理由の文（候補でなければ None）"""
+def _source_of(platform: str) -> str:
+    return next((s for s, plat in SOURCE_PLATFORM.items() if plat == platform), "")
+
+
+def candidate_code(platform: str, os_version: str | None, affected: list[dict], model: str | None = None,
+                   source: str | None = None) -> tuple[str | None, list[str]]:
+    """「候補」の理由の符号と、特定の機種の候補の対象（候補でなければ (None, [])）"""
     p = parse_version(platform, os_version)
     if p is None:
+        return None, []
+    result, code, plats = judge_source(source or _source_of(platform), p, affected, model)
+    return (code, plats) if result == "candidate" else (None, [])
+
+
+def candidate_reason(platform: str, os_version: str | None, affected: list[dict], model: str | None = None,
+                     source: str | None = None) -> str | None:
+    """「候補」の理由の文（候補でなければ None）"""
+    code, plats = candidate_code(platform, os_version, affected, model, source)
+    if code not in CANDIDATE_REASONS:
         return None
-    result, code, plats = judge_explain(p, affected, model)
-    if result != "candidate" or code not in CANDIDATE_REASONS:
+    text = ", ".join(plats)[:200]
+    return CANDIDATE_REASONS[code].format(platforms=text, note=text)
+
+
+# ---------------------------------------------------------------- FortiOS（Fortinet の CSAF）との照合
+#
+# 影響範囲は、取得のときに services/vuln_fetch.py の parse_fortinet_csaf が、CSAF の vulnerabilities[].product_status の
+# FortiOS の文字列（本物の形は 2026-11 に確認。vuln_fetch.py の「Fortinet」の節）を次の形に直して保存する。
+# どれも "fmt": "fortios"。"v" は vulnerabilities[] の何番目か（CVE × 製品ごとの 1 件。判定は v ごと）、"raw" は元の文字列
+#   {"kind": "vuln", "v": 0, "cve": "CVE-…"}
+#        FortiOS の脆弱性の 1 件（行が 0 件でも、ここで数える）
+#   {"status": "affected", "branch": "7.4", "ge": "7.4.0", "le": "7.4.2"}
+#        known_affected の "FortiOS >=7.4.0|<=7.4.2"（範囲。両端を含む）
+#   {"status": "affected", "branch": "7.6", "eq": "7.6.0"}      known_affected の "FortiOS 7.6.0"（単独の版）
+#   {"status": "affected", "branch": "7.0", "all": true}        known_affected の "FortiOS 7.0 all versions"（修正版なし）
+#   {"status": "unaffected", "branch": "7.4", "fix": "7.4.3"}   known_not_affected の "FortiOS-7.4.3"（修正版。以上は影響なし）
+#   {"status": "unaffected", "branch": "8.0", "all": true}      known_not_affected の "FortiOS/ 8.0 all versions"（影響なし）
+#   {"upcoming": "7.2.14", "branch": "7.2"}                     known_not_affected の "FortiOS-upcoming  7.2.14"（未公開）
+#   {"unreadable": true, "v": 0 | null}   読めない行（v が null なら勧告の全体。どの系列にも当たりうる）
+# 方針（PAN-OS と同じ）: はっきり認識できた形だけで該当・非該当を決め、それ以外は必ず「判定できない」か「候補」に落とす。
+#   非該当を返すのは 2 か所だけ（_fortios_group の「非該当の根拠」）。勧告に載っていない系列は非該当にしない（候補）:
+#   本物の FG-IR-26-193 で、勧告のページの表にある系列（7.0・6.4）が CSAF に無いことを確かめたため
+
+# FortiGate 6000 / 7000 系（FortiOS-6K7K。勧告では別の製品）。FortiGate-6500F・FortiGate-7121F のほか、後ろに何が付いても
+# （FortiGate-6500F-DC・FortiGate-7121F-2・FortiGate-7060E-8 など）6K7K とする。短い表記（FG-6500F・FGT6500F・FG6500F）も同じ。
+# 台帳の読み取り（inventory.parse_fortinet）は get system status の「Version:」の先頭の語（FortiGate-60F の形）を入れる。
+# モデル名の全体の形は実機で未確認（README の限界）
+FORTIOS_6K7K_MODEL = re.compile(r"^(?:FortiGate|FGT|FG)-?[67]\d{3}", re.I | re.A)
+# ふつうの FortiOS の機器と言えるモデル（FortiGate-60F・FortiGate-VM64-KVM・FortiWiFi-60E・FortiGateRugged-60F など）
+FORTIOS_STD_MODEL = re.compile(r"^Forti(?:Gate|WiFi)(?:Rugged)?-[0-9A-Za-z][0-9A-Za-z\-]{0,40}\Z", re.I | re.A)
+
+
+def fortios_model_kind(model: str | None) -> str | None:
+    """FortiGate のモデルの種類: "6k7k"（FortiOS-6K7K）/ "std"（ふつうの FortiOS）/ None（空・判別できない）"""
+    m = model.strip() if isinstance(model, str) else ""
+    if not m:
         return None
-    return CANDIDATE_REASONS[code].format(platforms=", ".join(plats)[:200])
+    if FORTIOS_6K7K_MODEL.match(m):
+        return "6k7k"
+    return "std" if FORTIOS_STD_MODEL.match(m) else None
+
+
+def _fos(text) -> Parsed | None:
+    return parse_scheme("fortios", text) if isinstance(text, str) and re.fullmatch(r"\d+\.\d+\.\d+", text, re.A) else None
+
+
+class _FosGroup:
+    """1 つの脆弱性（v）の、機器の系列についての状況"""
+
+    def __init__(self) -> None:
+        self.hit = False  # 影響ありの行（範囲・単独の版・all versions）がこの版を含む
+        self.clear_all = False  # 影響なしの "FortiOS/ A.B all versions"（この系列）
+        self.fixes: list[Parsed] = []  # この系列の修正版（FortiOS-X）
+        self.fix_le = False  # この版以下の修正版がある（影響ありの行と重なれば食い違い）
+        self.tops: list[Parsed] = []  # この系列の影響ありの行の上限（範囲の終わり・単独の版）
+        self.affected_rows = False  # この系列に影響ありの行がある
+        self.listed = False  # この系列の行（影響あり・影響なし・修正版・未公開の修正版）がある
+        self.unread = False  # この系列（または系列を決められない）読めない行がある
+        self.notes: list[str] = []  # この版を含む、注記つきの影響ありの行の注記（「候補」にする）
+
+
+def _fortios_group(p: Parsed, items: list[dict], newest: tuple | None = None) -> tuple[str, str | None]:
+    """1 つの脆弱性の判定: (affected / candidate / unreadable / unaffected, 理由の符号)
+
+    newest は勧告に載っている系列の最大（機器の系列がそれより新しく、行が無ければ newer_branch の候補）
+    """
+    g = _FosGroup()
+    for it in items:
+        if it.get("kind") == "vuln":
+            continue
+        if it.get("unreadable"):
+            # 読めない行: 系列を読み取れた行（"FortiOS 6.0 …" の形）はその系列だけ、それ以外はどの系列にも当たりうる
+            ub = it.get("branch")
+            if isinstance(ub, str) and _BRANCH_TEXT.match(ub) and ub != p.branch:
+                continue  # 根拠なしに非該当にはしない: 別の系列の版のことだけを書いた読めない行（その系列だけ判定できない）
+            g.unread = True
+            continue
+        branch = it.get("branch")
+        if not (isinstance(branch, str) and _BRANCH_TEXT.match(branch)):
+            g.unread = True
+            continue
+        if branch != p.branch:
+            continue  # 別の系列の行（その系列の版のことだけを書いている。この版の判定には使わない）
+        g.listed = True
+        if "upcoming" in it:
+            x = _fos(it.get("upcoming"))
+            if x is None or x.branch != branch:
+                g.unread = True
+            elif compare(p, x) >= 0:
+                g.unread = True  # 修正版が未公開なのに、その版以上: 勧告のデータでは決められない
+            continue
+        status = it.get("status")
+        if status == "affected":
+            g.affected_rows = True
+            note = it.get("note")
+            if note is not None and not (isinstance(note, str) and note):
+                g.unread = True
+                continue
+            if it.get("all") is True and not any(k in it for k in ("ge", "le", "eq", "fix")):
+                _hit(g, note)
+            elif "eq" in it and not any(k in it for k in ("ge", "le", "fix", "all")):
+                x = _fos(it.get("eq"))
+                if x is None or x.branch != branch:
+                    g.unread = True
+                else:
+                    g.tops.append(x)
+                    if compare(p, x) == 0:
+                        _hit(g, note)
+            elif "ge" in it and "le" in it and not any(k in it for k in ("eq", "fix", "all")):
+                lo, hi = _fos(it.get("ge")), _fos(it.get("le"))
+                if lo is None or hi is None or lo.branch != branch or hi.branch != branch or compare(lo, hi) > 0:
+                    g.unread = True
+                else:
+                    g.tops.append(hi)
+                    if compare(lo, p) <= 0 <= compare(hi, p):
+                        _hit(g, note)
+            else:
+                g.unread = True
+        elif status == "unaffected":
+            if it.get("all") is True and not any(k in it for k in ("ge", "le", "eq", "fix")):
+                g.clear_all = True
+            elif "fix" in it and not any(k in it for k in ("ge", "le", "eq", "all")):
+                x = _fos(it.get("fix"))
+                if x is None or x.branch != branch:
+                    g.unread = True
+                else:
+                    g.fixes.append(x)
+                    g.fix_le |= compare(p, x) >= 0
+            else:
+                g.unread = True
+        else:
+            g.unread = True
+    if g.hit and (g.clear_all or g.fix_le):
+        return "unreadable", "conflict"  # 影響ありの行と影響なしの行（修正版以上）が同じ版に重なる: データの食い違い
+    if g.hit:
+        return "affected", None
+    if g.notes:
+        # 注記つきの影響ありの行がこの版を含む: 候補（注記の文を理由に出す）。影響なしの行と重なっても非該当にしない
+        return "candidate", "note:" + "／".join(dict.fromkeys(g.notes))[:200]
+    if g.unread:
+        return "unreadable", None
+    if g.clear_all and g.affected_rows:
+        return "unreadable", "conflict"  # 系列は影響なしと言いながら、同じ系列に影響ありの行がある
+    if g.clear_all:
+        # 非該当の根拠 1: known_not_affected が「FortiOS/ A.B all versions」でこの系列の全体を影響なしとしている
+        # （勧告のページの表の「Not affected / Not Applicable」。FG-IR-23-097・26-195 で突き合わせ済み）。
+        # この系列に読めない行・影響ありの行は無い
+        return "unaffected", None
+    top_fix = max(g.fixes, key=lambda f: f.key) if g.fixes else None
+    if top_fix is not None and compare(p, top_fix) >= 0 and all(compare(top_fix, t) > 0 for t in g.tops):
+        # 非該当の根拠 2: この版は、この系列の修正版（known_not_affected の「FortiOS-X」＝表の「Upgrade to X or above」）の
+        # 最大以上で、その最大の修正版は、この系列の影響ありの行（範囲の終わり・単独の版）のどれよりも後。
+        # この系列に all versions の影響ありの行・読めない行は無く、この版はどの影響ありの行にも入らない
+        # （修正版が複数ある・修正版の後にまた影響ありの範囲がある、の形では、最大でない修正版を根拠にしない）
+        return "unaffected", None
+    if not g.listed:
+        if newest is not None and tuple(int(x) for x in p.branch.split(".")) > newest:
+            return "candidate", "newer_branch"  # 勧告に載っているどの系列よりも新しい系列（判定は候補のまま）
+        return "candidate", "not_listed"  # この系列の行が無い（載っていない系列は非該当にしない。FG-IR-26-193 の実例）
+    return "candidate", "not_decided"  # 系列の行はあるが、どの行もこの版を決めない（範囲の外で、修正版の記載が無い など）
+
+
+def _hit(g: _FosGroup, note) -> None:
+    """影響ありの行がこの版を含む。注記つきの行（"FortiOS 7.0 all versions (except 7.0.5)" など）は、注記が限定の
+    ことがあるので「該当」にせず「候補」（理由 note）にする"""
+    if note:
+        g.notes.append(note)
+    else:
+        g.hit = True
+
+
+_FOS_RANK = {"affected": 3, "candidate": 2, "unreadable": 1, "unaffected": 0}
+
+
+def judge_fortios(p: Parsed, affected, model: str | None = None) -> tuple[str, str | None, list[str]]:
+    """FortiOS の勧告の判定: (affected / candidate / unreadable / unaffected, 理由の符号, [])。例外は出さない
+
+    脆弱性（v）ごとに判定し、強いほうを採る（該当 ＞ 候補 ＞ 判定できない ＞ 非該当）。勧告の全体の読めない行があれば、
+    非該当にはしない（判定できない）。機器のモデルが 6000 / 7000 系なら判定できない、モデルを判別できなければ
+    「該当」は候補、「非該当」は判定できないにする（別系統の FortiOS-6K7K の可能性を残すため）
+    """
+    try:
+        return _judge_fortios(p, affected, model)
+    except Exception:  # noqa: BLE001 - 想定外の形でも落ちずに「判定できない」
+        return "unreadable", None, []
+
+
+def _judge_fortios(p: Parsed, affected, model) -> tuple[str, str | None, list[str]]:
+    if p.scheme != "fortios" or not isinstance(affected, list):
+        return "unreadable", None, []
+    kind = fortios_model_kind(model)
+    if kind == "6k7k":
+        return "unreadable", "6k7k", []
+    groups: dict[int, list[dict]] = {}
+    whole_unread = False
+    for it in affected:
+        if not isinstance(it, dict) or it.get("fmt") != "fortios":
+            whole_unread = True
+            continue
+        v = it.get("v")
+        if v is None and it.get("unreadable"):
+            whole_unread = True
+            continue
+        if not isinstance(v, int) or isinstance(v, bool):
+            whole_unread = True
+            continue
+        groups.setdefault(v, []).append(it)
+    branches = [tuple(int(x) for x in b.split(".")) for items in groups.values() for it in items
+                if isinstance(b := it.get("branch"), str) and _BRANCH_TEXT.match(b) and not it.get("unreadable")]
+    newest = max(branches) if branches else None
+    results = [_fortios_group(p, items, newest) for items in groups.values()]
+    if whole_unread:
+        results.append(("unreadable", None))
+    if not results:
+        # 非該当の根拠（勧告の全体）: 改訂で FortiOS の行が無くなった勧告（取得のときに読めた文書で、
+        # どの脆弱性も FortiOS 以外の製品のもの）。影響範囲が空のまま保存してある
+        return "unaffected", None, []
+    result, code = max(results, key=lambda r: _FOS_RANK[r[0]])
+    extra: list[str] = []
+    if code and code.startswith("note:"):
+        code, extra = "note", [code[5:]]  # 注記の文（理由の文に入れる）
+    if kind is None:
+        if result == "affected":
+            return "candidate", "model_unknown", []
+        if result == "unaffected":
+            return "unreadable", "model_unknown", []
+    return result, code, extra

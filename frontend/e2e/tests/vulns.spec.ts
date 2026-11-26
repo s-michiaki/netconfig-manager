@@ -2,10 +2,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { expandNav, login, openNav, USERS } from "./helpers";
 
 // 脆弱性・サポート期限（VULN_ENABLED=true で起動。見本のデータは seed.py。外部へは何もつながない）
-// 未確認の一覧は 7 行: 確定 4（FW-Edge01 は 0001・0002・0003、FW-Edge02 は 0003）＋ 候補 3（0005 は FW-Edge01、0006 は両方）。
+// 未確認の一覧は既定で 9 行: 確定 6（FW-Edge01 は 0001・0002・0003、FW-Edge02 は 0003、FG-Branch01 は FG-IR-99-101・102）＋
+// 候補 3（0005 は FW-Edge01、0006 は両方）。FG-Branch02（FortiOS 7.0）の候補 2 件（勧告に載っていない系列）は既定で折りたたむ。
 // stale（0004）と取り下げ（0007）の行は出ない。環境変数 E2E_SHOT_DIR があるときだけ、確かめた画面の写真をそこへ保存する
 
-const OPEN_ROWS = 7;
+const OPEN_ROWS = 9;
+const NOT_LISTED = 2;
 const shot = async (page: Page, name: string, target?: Locator) => {
   const dir = process.env.E2E_SHOT_DIR;
   if (!dir) return;
@@ -24,12 +26,12 @@ test("脆弱性の一覧を見て、確認済みにして、取り消せる", as
   // 注意書きと出典
   await expect(page.locator(".vuln-notice")).toContainText("載っていない脆弱性がありえます");
   await expect(page.locator(".vuln-notice")).toContainText("Palo Alto Networks Security Advisories");
-  // 要約（重大 1・高 1・悪用確認済み 1・候補 3・サポート終了済み 2 台・1 年以内に終了 1 台）と、情報源ごとの最後の取得
+  // 要約（重大 2・高 2・悪用確認済み 1・候補 5・サポート終了済み 2 台・1 年以内に終了 2 台）と、情報源ごとの最後の取得
   const sum = page.getByTestId("vuln-summary");
-  await expect(sum.locator(".cmp-card", { hasText: "重大" }).locator(".cmp-card-value")).toHaveText("1");
+  await expect(sum.locator(".cmp-card", { hasText: "重大" }).locator(".cmp-card-value")).toHaveText("2");
   await expect(sum.locator(".cmp-card", { hasText: "悪用確認済み" }).locator(".cmp-card-value")).toHaveText("1");
   await expect(sum.locator(".cmp-card", { hasText: "サポート終了済み" })).toContainText("2");
-  await expect(sum.locator(".cmp-card", { hasText: "1 年以内に終了" })).toContainText("1");
+  await expect(sum.locator(".cmp-card", { hasText: "1 年以内に終了" })).toContainText("2");
   await expect(page.getByTestId("vuln-sources")).toContainText("Palo Alto の勧告");
   await expect(page.getByTestId("vuln-sources")).toContainText("最後の取得");
 
@@ -48,7 +50,7 @@ test("脆弱性の一覧を見て、確認済みにして、取り消せる", as
 
   // 絞り込み
   await page.getByLabel("重大度").selectOption("critical");
-  await expect(rows).toHaveCount(1);
+  await expect(rows).toHaveCount(2);
   await page.getByLabel("重大度").selectOption("");
   await expect(rows).toHaveCount(OPEN_ROWS);
   await page.getByLabel("悪用確認済みだけ").check();
@@ -188,10 +190,10 @@ test("システム状態に脆弱性情報の取得の項目が出る", async ({
 test("候補の行に、候補になった理由が出る", async ({ page }) => {
   await login(page);
   await openNav(page, "/vulns");
-  // 候補は 3 件（0005 が FW-Edge01 の 1 件、0006 が両方の機器の 2 件）。確定の件数には数えない
+  // 候補は 5 件（0005 が FW-Edge01 の 1 件、0006 が両方の機器の 2 件、FG-Branch02 の 2 件）。確定の件数には数えない
   const sum = page.getByTestId("vuln-summary");
-  await expect(sum.locator(".cmp-card", { hasText: "候補" }).locator(".cmp-card-value")).toHaveText("3");
-  await expect(sum.locator(".cmp-card", { hasText: "高" }).first().locator(".cmp-card-value")).toHaveText("1");
+  await expect(sum.locator(".cmp-card", { hasText: "候補" }).locator(".cmp-card-value")).toHaveText("5");
+  await expect(sum.locator(".cmp-card", { hasText: "高" }).first().locator(".cmp-card-value")).toHaveText("2");
   const rows = page.locator(".vuln-row");
   await expect(rows).toHaveCount(OPEN_ROWS);
 
@@ -226,9 +228,9 @@ test("取り下げられた勧告は、該当の一覧にも件数にも出な�
   await page.getByRole("tab", { name: "確認済み" }).click();
   await expect(page.getByText("該当する記録はありません。")).toBeVisible();
   await expect(rows).toHaveCount(0);
-  // 要約の「高」は、取り下げの勧告（高）を数えない（高は 0002 の 1 件だけ）
+  // 要約の「高」は、取り下げの勧告（高）を数えない（高は 0002 と FG-IR-99-102 の 2 件だけ）
   const sum = page.getByTestId("vuln-summary");
-  await expect(sum.locator(".cmp-card", { hasText: "高" }).first().locator(".cmp-card-value")).toHaveText("1");
+  await expect(sum.locator(".cmp-card", { hasText: "高" }).first().locator(".cmp-card-value")).toHaveText("2");
 });
 
 test("解消・すべての一覧では、取り下げで解消になった行に「取り下げ」と出る", async ({ page }) => {
@@ -317,4 +319,158 @@ test("機器の行が無く stale の行だけのとき、「判定できない�
   await page.reload();
   await expect(page.getByText("判定できない機器はありません。")).toBeVisible();
   await expect(page.getByTestId("vuln-range-unreadable")).toHaveCount(0);
+});
+
+// ================================================================ Fortinet（FortiOS）・取得済みの範囲・過去の勧告の取り込み
+
+test("Fortinet の勧告: 該当・出典のリンク・載っていない系列の候補を折りたたみ、表示できる", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await login(page);
+  await openNav(page, "/vulns");
+  await expect(page.locator(".vuln-notice")).toContainText("Fortinet PSIRT Advisories");
+  await expect(page.getByTestId("vuln-sources")).toContainText("Fortinet の勧告（FortiOS）");
+  // 取得済みの範囲と注意書き
+  const cov = page.getByTestId("vuln-coverage");
+  await expect(cov).toContainText("Fortinet の勧告（FortiOS）: 2 件");
+  await expect(cov).toContainText("ほかの製品の勧告 1 件");
+  // 要確認の告知（製品の記載が無い勧告）は機器ごとの件数に入れず、上部に 1 か所だけ出す
+  const notices = page.getByTestId("vuln-notices");
+  await expect(notices).toContainText("要確認の告知（製品の記載が無く、機器を特定できない勧告）が 1 件あります");
+  await notices.getByRole("button", { name: "一覧を見る" }).click();
+  const nlink = notices.locator("a", { hasText: "FG-IR-99-103" });
+  await expect(nlink).toHaveAttribute("href", "https://www.fortiguard.com/psirt/FG-IR-99-103");
+  await expect(nlink).toHaveAttribute("rel", /noopener noreferrer/);
+  await expect(page.getByTestId("vuln-sources")).toContainText("要確認の告知 1 件");
+  await expect(page.locator(".vuln-table")).not.toContainText("FG-IR-99-103");
+  await shot(page, "vulns-fortinet-top.png", page.locator(".page-body"));
+  await expect(cov).toContainText("勧告が見つからないことは、安全であることを意味しません");
+  const rows = page.locator(".vuln-row");
+  await expect(rows).toHaveCount(OPEN_ROWS);
+  const fg = rows.filter({ hasText: "FG-Branch01" });
+  await expect(fg).toHaveCount(2);
+  await expect(fg.filter({ hasText: "FG-IR-99-101" })).toContainText("該当");
+  const link = fg.filter({ hasText: "FG-IR-99-101" }).locator("a").first();
+  await expect(link).toHaveAttribute("href", "https://www.fortiguard.com/psirt/FG-IR-99-101");
+  // 確定版でない文書（102）は「暫定の勧告」と添える
+  await expect(fg.filter({ hasText: "FG-IR-99-102" }).getByTestId("vuln-provisional")).toHaveText("暫定の勧告");
+  await expect(fg.filter({ hasText: "FG-IR-99-101" }).getByTestId("vuln-provisional")).toHaveCount(0);
+  await expect(link).toHaveAttribute("rel", /noopener/);
+  await expect(link).toHaveAttribute("rel", /noreferrer/);
+  // 勧告に載っていない系列（FG-Branch02 の FortiOS 7.0）の候補は既定で折りたたむ
+  await expect(rows.filter({ hasText: "FG-Branch02" })).toHaveCount(0);
+  const folded = page.getByTestId("vuln-not-listed-folded");
+  await expect(folded).toContainText(`「候補」${NOT_LISTED} 件を折りたたんでいます`);
+  await folded.getByRole("button", { name: "表示する" }).click();
+  await expect(rows).toHaveCount(OPEN_ROWS + NOT_LISTED);
+  const nl = rows.filter({ hasText: "FG-Branch02" });
+  await expect(nl).toHaveCount(NOT_LISTED);
+  for (const r of await nl.all()) {
+    await expect(r).toContainText("候補");
+    await expect(r).toContainText("勧告のデータにこの系列が載っていません。勧告のページで確かめてください");
+  }
+  // 判定の絞り込み: 載っていない系列による候補だけ
+  await page.getByLabel("判定").selectOption("not_listed");
+  await expect(rows).toHaveCount(NOT_LISTED);
+  await page.getByLabel("判定").selectOption("confirmed");
+  await expect(rows).toHaveCount(6);
+  await page.getByLabel("判定").selectOption("");
+  await expect(rows).toHaveCount(OPEN_ROWS + NOT_LISTED);
+  // 長い文で表が崩れない（1440px と 1024px。ページ全体が横にはみ出さない・理由の列が潰れない）
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 900 });
+    const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(over, `${width}px で横にはみ出す`).toBeLessThanOrEqual(1);
+    const reason = nl.first().locator(".topo-small", { hasText: "載っていません" });
+    expect((await reason.boundingBox())!.width).toBeGreaterThan(120);
+    const table = page.locator(".table-scroll");
+    await table.scrollIntoViewIfNeeded();
+    await shot(page, width === 1440 ? "vulns-fortinet.png" : "vulns-fortinet-1024.png", table);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // 6000 / 7000 系は判定できない機器
+  await page.getByRole("tab", { name: /判定できない機器/ }).click();
+  await expect(page.locator("tbody tr", { hasText: "FG-DC7121" })).toContainText("FortiGate 6000 / 7000 系");
+  expect(errors).toEqual([]);
+});
+
+test("過去の勧告の取り込み（管理者だけ）: ID を入れて依頼し、結果が出る", async ({ page }) => {
+  let posted: unknown = null;
+  let state: unknown = null;
+  // worker（Redis）が無い画面テストなので、取り込みの API の応答を差し替える（入力の検査は本物の API で確かめる）
+  await page.route("**/api/vulns/fortinet/import", async (route) => {
+    const req = route.request();
+    if (req.method() === "POST") {
+      const body = req.postDataJSON() as { ids: string };
+      if (!/^FG-IR-/.test(body.ids.trim())) return route.fallback();
+      posted = body;
+      state = { status: "done", by: "admin", ids: ["FG-IR-24-015", "FG-IR-18-384"], at: new Date().toISOString(),
+        finished_at: new Date().toISOString(), results: [
+          { ext_id: "FG-IR-24-015", ok: true, result: "fortios", message: "取り込みました（FortiOS の勧告）" },
+          { ext_id: "FG-IR-18-384", ok: false, result: "no_csaf", message: "機械で読める形式（CSAF）の文書がありません（2021 年以前の勧告か、題名が後から変わった勧告の可能性があります。勧告のページで確かめてください）" },
+        ] };
+      return route.fulfill({ status: 202, json: { queued: true, ids: ["FG-IR-24-015", "FG-IR-18-384"], task_id: "t" } });
+    }
+    return route.fulfill({ json: { state, max: 20 } });
+  });
+  await login(page);
+  await openNav(page, "/vulns");
+  await page.getByRole("button", { name: /Fortinet の過去の勧告を取り込む/ }).click();
+  const panel = page.getByTestId("vuln-import");
+  await expect(panel).toContainText("1 回に 20 件まで");
+  // 形の違う ID は本物の API が断る
+  await panel.getByLabel("勧告の ID").fill("CVE-2024-0001");
+  await panel.getByRole("button", { name: "取り込む" }).click();
+  await expect(panel.locator(".form-error")).toContainText("FG-IR-YY-NNN");
+  await panel.getByLabel("勧告の ID").fill("FG-IR-24-015\nFG-IR-18-384");
+  await expect(panel).toContainText("2 件");
+  await panel.getByRole("button", { name: "取り込む" }).click();
+  const st = page.getByTestId("vuln-import-state");
+  await expect(st).toContainText("取り込みが終わりました");
+  await expect(st.locator("tbody tr")).toHaveCount(2);
+  await expect(st.locator("tbody tr", { hasText: "FG-IR-18-384" })).toContainText("CSAF");
+  expect(posted).toEqual({ ids: "FG-IR-24-015\nFG-IR-18-384" });
+  await shot(page, "vulns-import.png", panel);
+});
+
+test("閲覧者・オペレーターには過去の勧告の取り込みが出ない", async ({ page }) => {
+  await login(page, USERS.op);
+  await openNav(page, "/vulns");
+  await expect(page.getByTestId("vuln-coverage")).toBeVisible();
+  await expect(page.getByRole("button", { name: /過去の勧告を取り込む/ })).toHaveCount(0);
+});
+
+test("ダッシュボードに脆弱性のタイルが出て、押すと脆弱性の画面へ", async ({ page }) => {
+  await login(page);
+  await page.goto("/dashboard");
+  const tile = page.locator(".dash-tile", { hasText: "脆弱性" });
+  // 未確認の該当（確定）6 件・うち悪用確認済み 1 件。サポート終了まで 90 日以内は 3 台（終了済み 2 台・FortiOS 7.0 が約 60 日後）
+  await expect(tile.locator(".dash-tile-value")).toHaveText("6");
+  await expect(tile).toContainText("うち悪用確認済み 1 件");
+  await expect(tile).toContainText("サポート終了まで 90 日以内: 3 台（終了済み 2 台）");
+  await shot(page, "dashboard-vuln.png", page.locator(".dash-tiles"));
+  await tile.click();
+  await expect(page).toHaveURL(/\/vulns$/);
+});
+
+test("無効のときはダッシュボードに脆弱性のタイルを出さない", async ({ page }) => {
+  await page.route("**/api/dashboard", async (route) => {
+    const res = await route.fetch();
+    await route.fulfill({ response: res, json: { ...(await res.json()), vuln: null } });
+  });
+  await login(page);
+  await page.goto("/dashboard");
+  await expect(page.locator(".dash-tile").first()).toBeVisible();
+  await expect(page.locator(".dash-tile", { hasText: "脆弱性" })).toHaveCount(0);
+});
+
+test("通知設定に「脆弱性・サポート期限」がある（既定は無効）", async ({ page }) => {
+  await login(page);
+  await openNav(page, "/notifications");
+  // 自分の通知を「個別に設定する」にすると、通知する内容に出る（保存はしない）
+  await page.locator("label.ntf-mode", { hasText: "個別に設定する" }).locator("input").check();
+  const item = page.locator("label.form-check", { hasText: "脆弱性・サポート期限" });
+  await expect(item).toBeVisible();
+  await expect(item.locator("input")).not.toBeChecked();
+  await expect(item).toContainText("候補・判定できないは通知しません");
 });

@@ -3,7 +3,7 @@
 コンフィグの変更・違反の発生・収集の失敗・機器情報の変化・基準のずれ・保存し忘れ
 
 通知する内容は通知設定ごとに選ぶ（on_change / on_violation / on_failure / on_system / on_inventory / on_ping / on_drift /
-on_unsaved）。
+on_unsaved / on_vuln）。
 on_system（システムの異常）は機器に結び付かないため、対象の機器グループに関係なく送る。
 
 通知先の決め方（機器のコンフィグに変更があったとき）
@@ -59,14 +59,16 @@ TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収�
 EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
                 "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知",
-                "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知", "report": "定期レポート"}
+                "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知", "report": "定期レポート",
+                "vuln": "脆弱性・サポート期限の通知"}
 SENT_MESSAGES = {"change": "変更を通知しました", "violation": "コンプライアンス違反を通知しました",
                  "failure": "収集の失敗を通知しました", "system": "システムの状態を通知しました",
                  "inventory": "機器情報の変化を通知しました",
                  "ping": "Ping監視の応答なし・復旧を通知しました",
                  "profile": "認証情報プロファイルへの操作を所有者に通知しました",
                  "drift": "基準からのずれを通知しました", "unsaved": "保存し忘れを通知しました",
-                 "report": "定期レポートを送信しました"}
+                 "report": "定期レポートを送信しました",
+                 "vuln": "脆弱性・サポート期限を通知しました"}
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
 MAX_LIST = 20  # 1通に載せる機器・ルールの数
 
@@ -582,6 +584,122 @@ async def notify_violations(db: AsyncSession, items: list[tuple[str, list[tuple[
                                0xF87171, body)
             sends.append((d, payload, None))
     return await _deliver(db, "violation", sends, ref)
+
+
+VULN_SEVERITY_LABELS = {"critical": "重大", "high": "高", "medium": "中", "low": "低", "none": "不明"}
+
+
+def _vuln_line(item: list) -> str:
+    """勧告 1 件の 1 行: ID（重大度・CVSS・悪用確認済み）題。ID・題は外から来た文字列（無害化は _message が行う）"""
+    ext_id, title, sev, cvss, kev = (list(item) + [None] * 5)[:5]
+    tags = [VULN_SEVERITY_LABELS.get(sev, str(sev))] + ([f"CVSS {cvss:g}"] if isinstance(cvss, (int, float)) else [])
+    if kev:
+        tags.append("悪用確認済み")
+    t = " ".join(str(title or "").split())[:60]
+    return f"{ext_id}（{'・'.join(tags)}）" + (f" {t}" if t and t != ext_id else "")
+
+
+async def notify_vulns(db: AsyncSession, items: list) -> dict:
+    """新しく脆弱性に該当した機器と勧告を通知する（1 回の照合ぶんを、通知先ごとに 1 通）
+
+    items: [[機器ID, [[勧告 ID, 題, 重大度, CVSS, KEV]…]]]
+
+    対象の機器の範囲（通知設定の機器グループ）は、ほかの通知と同じ。候補・判定できないはここに来ない（vuln_service が選ぶ）。
+    直し方・勧告の本文は載せない（ID・題・重大度だけ。詳しくは画面と勧告のページで）
+    """
+    if not settings.VULN_ENABLED:
+        return {"sent": 0, "failed": 0}
+    ids = [i for i, _ in items]
+    devices = {d.id: d for d in (await db.execute(select(Device).where(Device.id.in_(ids)))).scalars()} if ids else {}
+    groups = {g.id: g.name for g in (await db.execute(select(DeviceGroup))).scalars()}
+    per_dest: dict[tuple[str, str], tuple[Destination, list[tuple[Device, list]]]] = {}
+    by_group: dict[str | None, list[Destination]] = {}
+    for device_id, advs in items:
+        device = devices.get(device_id)
+        if device is None or not advs:
+            continue
+        if device.group_id not in by_group:
+            by_group[device.group_id] = await resolve_destinations(db, device.group_id, "vuln")
+        for d in by_group[device.group_id]:
+            per_dest.setdefault((d.kind, d.url), (d, []))[1].append((device, advs))
+    sends = []
+    url = _page_url("/vulns")
+    note = "勧告の影響範囲と機器の OS バージョンの照合の結果です（機能の設定までは見ていません）"
+    for d, entries in per_dest.values():
+        entries.sort(key=lambda e: e[0].name)
+        if len(entries) == 1:
+            device, advs = entries[0]
+            facts = [("機器", f"{device.name}（{device.hostname}）"),
+                     ("グループ", groups.get(device.group_id, "未分類") if device.group_id else "未分類"),
+                     ("OS バージョン", device.os_version or "不明"),
+                     ("該当した勧告", "\n".join(f"・{_vuln_line(a)}" for a in advs[:MAX_LIST])
+                      + (f"\n…ほか {len(advs) - MAX_LIST} 件" if len(advs) > MAX_LIST else ""))]
+            payload = _message(d.kind, f"脆弱性に該当: {device.name}", facts, url, "脆弱性の一覧を画面で確認", 0xEF4444, note)
+            sends.append((d, payload, device))
+            continue
+        total = sum(len(a) for _, a in entries)
+        body = "\n".join(f"・{dev.name}: {'、'.join(str(a[0]) for a in advs[:3])}"
+                         + (f" ほか {len(advs) - 3} 件" if len(advs) > 3 else "") for dev, advs in entries[:MAX_LIST])
+        if len(entries) > MAX_LIST:
+            body += f"\n…ほか {len(entries) - MAX_LIST} 台"
+        payload = _message(d.kind, f"脆弱性に該当: {len(entries)} 台・{total} 件", [("判定", note)], url,
+                           "脆弱性の一覧を画面で確認", 0xEF4444, body)
+        sends.append((d, payload, None))
+    return await _deliver(db, "vuln", sends, None)
+
+
+def _eol_label(g: dict) -> str:
+    from app.services.config_service import PLATFORMS  # 循環 import を避ける
+
+    plat = PLATFORMS[g["platform"]].label if g["platform"] in PLATFORMS else g["platform"]
+    if g["kind"] == "hardware":
+        return f"{plat} {g.get('model') or ''} のハードウェア"
+    branch = g.get("branch") or ""
+    return f"{plat} {'（すべての版）' if branch == '*' else branch} の OS"
+
+
+def _eol_when(g: dict) -> str:
+    d = g["days_left"]
+    day = g["eol_date"].replace("-", "/")
+    if d > 0:
+        return f"あと {d} 日（{day}）"
+    return f"サポート終了日になりました（{day}）" if d == 0 else f"サポートが終了しています（{day}・{-d} 日前）"
+
+
+async def notify_eol(db: AsyncSession, groups_in: list[dict]) -> dict:
+    """サポート終了日が近い（180・90・30 日前・当日）ことを、機種・系列（またはモデル）ごとにまとめて 1 通で通知する
+
+    groups_in は vuln_service.collect_eol_notices の戻り値。台数は通知先の範囲（機器グループ）の機器だけで数える
+    """
+    if not settings.VULN_ENABLED or not groups_in:
+        return {"sent": 0, "failed": 0}
+    ids = sorted({i for g in groups_in for i in g["devices"]})
+    devices = {d.id: d for d in (await db.execute(select(Device).where(Device.id.in_(ids)))).scalars()}
+    per_dest: dict[tuple[str, str], tuple[Destination, dict[str, int]]] = {}
+    by_group: dict[str | None, list[Destination]] = {}
+    for g in groups_in:
+        for dev_id in g["devices"]:
+            device = devices.get(dev_id)
+            if device is None:
+                continue
+            if device.group_id not in by_group:
+                by_group[device.group_id] = await resolve_destinations(db, device.group_id, "vuln")
+            for d in by_group[device.group_id]:
+                counts = per_dest.setdefault((d.kind, d.url), (d, {}))[1]
+                counts[g["key"]] = counts.get(g["key"], 0) + 1
+    by_key = {g["key"]: g for g in groups_in}
+    sends = []
+    url = _page_url("/vulns?tab=eol")
+    for d, counts in per_dest.values():
+        shown = [by_key[k] for k in by_key if k in counts]
+        lines = [f"・{_eol_label(g)}: {_eol_when(g)}・{counts[g['key']]} 台" for g in shown[:MAX_LIST]]
+        if len(shown) > MAX_LIST:
+            lines.append(f"…ほか {len(shown) - MAX_LIST} 件")
+        title = (f"サポート終了が近い: {_eol_label(shown[0])}" if len(shown) == 1
+                 else f"サポート終了が近い OS・機種: {len(shown)} 件")
+        facts = [("知らせる時期", "サポート終了日の 180・90・30 日前と当日（同じ時期は 1 回だけ）")]
+        sends.append((d, _message(d.kind, title, facts, url, "サポート期限を画面で確認", 0xFBBF24, "\n".join(lines)), None))
+    return await _deliver(db, "vuln", sends, None)
 
 
 async def notify_failure(db: AsyncSession, device_id: str, error: str, triggered_by: str,

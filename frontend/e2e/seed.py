@@ -58,6 +58,10 @@ def main() -> None:
             "version": detail["version"],
             "data": {"nodes": nodes, "edges": [{"id": f"e{i}", "source": "n0", "target": f"n{i}"} for i in (1, 2)]},
         })
+        # 脆弱性（Fortinet）の見本の機器 3 台（未分類。構成図には載せない）。OS バージョン・モデルは下の vulns で入れる
+        for name, host in [("FG-Branch01", "10.0.4.1"), ("FG-Branch02", "10.0.4.2"), ("FG-DC7121", "10.0.4.3")]:
+            devs[name] = call("POST", "/devices/", h, json={"name": name, "hostname": host, "platform": "fortinet",
+                                                            "username": "admin", "password": "pw"})
     # 機器台帳（実際は収集のときに読み取る）。Core-SW01 だけ取得済みにしておく
     import asyncio
 
@@ -135,7 +139,10 @@ async def vulns(devs: dict) -> None:
 
     now = utcnow()
     async with AsyncSessionLocal() as db:
-        for name, model, version in [("FW-Edge01", "PA-440", "10.2.5-h1"), ("FW-Edge02", "PA-440", "10.2.9")]:
+        for name, model, version in [("FW-Edge01", "PA-440", "10.2.5-h1"), ("FW-Edge02", "PA-440", "10.2.9"),
+                                     ("FG-Branch01", "FortiGate-60F", "7.4.2 build2571"),
+                                     ("FG-Branch02", "FortiGate-100F", "7.0.15 build0632"),
+                                     ("FG-DC7121", "FortiGate-7121F", "7.4.1 build2463")]:
             await db.execute(update(Device).where(Device.name == name).values(model=model, os_version=version, inventory_at=now))
 
         def adv(ext_id, title, severity, cvss, affected, kev=False):
@@ -158,14 +165,42 @@ async def vulns(devs: dict) -> None:
             [{"branch": "10.1", "ge": "10.1.0", "lt": "10.1.9"}, {"kind": "default", "default": "affected"}])
         # あとで取り下げる勧告（最初は該当にして、下で rejected にして照合し直すと解消になる。実際の流れと同じ）
         adv("CVE-2099-0007", "（見本）取り下げられた勧告", "high", 8.0, [{"branch": "10.2", "ge": "10.2.0", "lt": "10.2.99"}])
-        for name, ok_days in (("kev", 0), ("paloalto", 0), ("eol", 0)):
-            db.add(VulnSource(source=name, last_at=now, last_ok_at=now - timedelta(days=ok_days), last_count={"kev": 1800, "paloalto": 3, "eol": 6}[name]))
+        # Fortinet（FortiOS）の勧告の見本（作り物の ID。行の形は本物の CSAF を取得のときと同じ解析にかけたもの）
+        from app.services import vuln_fetch
+
+        def fos(ext_id, title, score, affected, not_affected, status="final", sev="HIGH", vulns=True):
+            doc = {"document": {"title": title, "tracking": {"id": ext_id, "status": status,
+                                                             "initial_release_date": (now - timedelta(days=17)).isoformat(),
+                                                             "current_release_date": (now - timedelta(days=16)).isoformat()}},
+                   "vulnerabilities": [{"cve": f"CVE-2099-{ext_id[-3:]}1", "title": f"FortiOS - {sev} - {ext_id}",
+                                        "scores": [{"products": ["FortiOS"], "cvss_v3": {"baseScore": score}}],
+                                        "product_status": {"known_affected": affected, "known_not_affected": not_affected}}]}
+            if not vulns:
+                del doc["vulnerabilities"]
+            a = vuln_fetch.parse_fortinet_csaf(doc, ext_id)
+            db.add(VulnAdvisory(fetched_at=now, checked_at=now, **{k: a[k] for k in (
+                "source", "ext_id", "cve_ids", "title", "severity", "cvss", "published_at", "modified_at", "url", "products",
+                "affected")}))
+        fos("FG-IR-99-101", "（見本）SSL-VPN のヒープの範囲外への書き込み", 9.6,
+            ["FortiOS >=7.4.0|<=7.4.2", "FortiOS >=7.2.0|<=7.2.6"], ["FortiOS-7.4.3", "FortiOS-7.2.7"], sev="CRITICAL")
+        # 102 は確定版でない文書（暫定の勧告）の見本
+        fos("FG-IR-99-102", "（見本）証明書の検証の不備（修正版が未公開の系列あり）", 7.7,
+            ["FortiOS >=7.6.0|<=7.6.4", "FortiOS >=7.4.0|<=7.4.9", "FortiOS >=7.2.0|<=7.2.13"],
+            ["FortiOS/ 8.0 all versions", "FortiOS-7.6.5", "FortiOS-7.4.10", "FortiOS-upcoming  7.2.14"], status="interim")
+        # 製品の記載が無い告知（要確認の告知。機器ごとの件数には数えない）
+        fos("FG-IR-99-103", "（見本）外部のライブラリの脆弱性についての告知", 8.1, [], [], vulns=False)
+        for name, ok_days in (("kev", 0), ("paloalto", 0), ("fortinet", 0), ("eol", 0)):
+            db.add(VulnSource(source=name, last_at=now, last_ok_at=now - timedelta(days=ok_days),
+                              last_count={"kev": 1800, "paloalto": 3, "fortinet": 2, "eol": 6}[name]))
         today = now.date()
         # サポート終了日（自動取得の見本）: PAN-OS 10.2 は終了済み、Core-SW01 の IOS XE 17.6 は約 200 日後
         db.add(EolDate(platform="paloalto_panos", kind="os", branch="10.2", model="", eol_date=today - timedelta(days=400),
                        source="endoflife.date", url="https://endoflife.date/panos", updated_at=now))
         db.add(EolDate(platform="cisco_xe", kind="os", branch="17.6", model="", eol_date=today + timedelta(days=200),
                        source="endoflife.date", url="https://endoflife.date/cisco-ios-xe", updated_at=now))
+        # FortiOS 7.0 は約 60 日後に終了（ダッシュボードの「サポート終了まで 90 日以内」に入る）
+        db.add(EolDate(platform="fortinet", kind="os", branch="7.0", model="", eol_date=today + timedelta(days=60),
+                       source="endoflife.date", url="https://endoflife.date/fortios", updated_at=now))
         await db.flush()
         await vuln_service.reconcile(db)
         # 取り下げ: CVE-2099-0007 を rejected にして照合し直す（該当の判定は解消になり、未確認の一覧には出ない）

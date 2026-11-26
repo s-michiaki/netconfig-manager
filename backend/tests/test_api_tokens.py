@@ -193,6 +193,8 @@ ROUTES = {
     "DELETE /api/vulns/eol/{eol_id}": S,
     "GET /api/vulns/eol/devices": T,
     "POST /api/vulns/fetch": S,
+    "POST /api/vulns/fortinet/import": S,
+    "GET /api/vulns/fortinet/import": S,
     # 通知の設定（送信先・Webhook の URL を含む）
     "GET /api/notifications/me": S,
     "PUT /api/notifications/me": S,

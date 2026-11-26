@@ -1105,7 +1105,18 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .vuln-notice p { margin: 0 0 4px; }
 .vuln-sources { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; margin-bottom: 12px; align-items: center; }
 .vuln-source { display: inline-flex; align-items: center; gap: 6px; }
-.vuln-source-error { color: var(--color-danger); }
-.vuln-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding-bottom: 6px; }
+.vuln-source-error { color: var(--color-danger); overflow-wrap: anywhere; }
+.vuln-coverage { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; margin-bottom: 10px; align-items: center; }
+.vuln-coverage .form-label { margin: 0; }
+.vuln-import { margin-bottom: 12px; }
+.vuln-import-body { margin-top: 8px; padding: 12px 14px; max-width: 760px; }
+.vuln-import-body textarea { width: 100%; }
+.vuln-import-msg { overflow-wrap: anywhere; }
+.vuln-import-state { margin-top: 12px; }
+.vuln-notices { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; border-left: 3px solid var(--color-warning); padding-left: 8px; }
+.vuln-notice-list { flex-basis: 100%; margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.vuln-notice-title { overflow-wrap: anywhere; }
+.vuln-folded { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.vuln-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding-bottom: 6px; white-space: nowrap; }
 .vuln-table .vuln-title { max-width: 420px; word-break: break-word; }
 .vuln-table .vuln-title a { color: var(--color-accent); }

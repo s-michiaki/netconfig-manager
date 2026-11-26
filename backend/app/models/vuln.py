@@ -1,6 +1,6 @@
 """ファームウェアの脆弱性（CVE）とサポート終了日（EOL）の管理（services/vuln_*.py）
 
-- VulnAdvisory: 外部から取得した勧告（source ごと。いまは Palo Alto の勧告）。更新で上書きし、消さない
+- VulnAdvisory: 外部から取得した勧告（source ごと。Palo Alto・Fortinet の勧告）。更新で上書きし、消さない
 - VulnMatch: 機器 × 勧告の照合結果。機器が消えたら一緒に消える
 - EolDate: サポート終了日。自動取得（endoflife.date）と手入力（manual）を同じ表に持ち、手入力を優先する
 - VulnSource: 情報源ごとの最後の取得の結果
@@ -20,8 +20,8 @@ class VulnAdvisory(Base):
     __table_args__ = (UniqueConstraint("source", "ext_id", name="uq_vuln_advisories_source_ext"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    source: Mapped[str] = mapped_column(String(16), nullable=False)  # paloalto（J-2 で fortinet / nvd）
-    ext_id: Mapped[str] = mapped_column(String(64), nullable=False)  # CVE-… または PAN-SA-…
+    source: Mapped[str] = mapped_column(String(16), nullable=False)  # paloalto / fortinet
+    ext_id: Mapped[str] = mapped_column(String(64), nullable=False)  # CVE-…・PAN-SA-…（paloalto）/ FG-IR-…（fortinet）
     cve_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     severity: Mapped[str] = mapped_column(String(16), nullable=False, default="none")  # critical/high/medium/low/none
@@ -40,6 +40,11 @@ class VulnAdvisory(Base):
     rejected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     kev_due: Mapped[date | None] = mapped_column(Date, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    # Fortinet（J-2）: 勧告 1 件ずつ取る文書（CSAF）の URL と、条件つき GET の条件（ETag・Last-Modified）、最後に確かめた時刻
+    doc_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    last_modified: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class VulnMatch(Base):
@@ -69,6 +74,10 @@ class VulnMatch(Base):
     # 前回（os_version の版で）は該当だったが、機器の版が変わり、いまの版では勧告の範囲を読み取れず判定できない。
     # 該当の件数・一覧からは外し、「判定できない機器」に出す（state・メモはそのまま残す）。版が戻るか判定できれば外す
     stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    # 「候補」の理由の符号（vuln_match.CANDIDATE_REASONS のキー。not_listed＝勧告に載っていない系列 など）。候補でなければ NULL
+    reason: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # 通知した時刻（新しく該当したときに 1 回だけ通知する。通知しない設定のときも、通知の条件に当たった時点で入れる）
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class EolDate(Base):
@@ -102,4 +111,7 @@ class VulnSource(Base):
     last_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 取得したが範囲を読み取れなかった行の数（Palo Alto。該当・非該当のどちらにもせず「判定できない」に数える）
     skipped: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    cursor: Mapped[str | None] = mapped_column(Text, nullable=True)  # 次回の起点（kev は CVE → 期限の JSON）
+    # 次回の起点（kev は CVE → 期限の JSON。fortinet はまだ取っていない勧告の一覧の JSON。eol_notice は通知済みの印の JSON）
+    cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(256), nullable=True)  # 一覧（RSS）の条件つき GET の条件
+    last_modified: Mapped[str | None] = mapped_column(String(64), nullable=True)
