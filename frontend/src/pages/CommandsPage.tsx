@@ -450,6 +450,9 @@ export default function CommandsPage() {
             <div className="progress-wrap" style={{ margin: "8px 0 12px" }}>
               <div className="progress-bar" style={{ width: `${run.total ? Math.round(((run.total - run.counts.queued - run.counts.running) / run.total) * 100) : 0}%` }} />
             </div>
+            {!run.finished && (
+              <p className="topo-muted topo-small" style={{ margin: "0 0 10px" }}>機器への接続に時間がかかる機種では 1 分ほどかかることがあります</p>
+            )}
             <p className="topo-muted topo-small mono">{run.commands.join("  /  ")}</p>
             {!run.finished && (
               <div>

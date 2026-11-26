@@ -6,6 +6,7 @@
 #   - 証明書と秘密鍵の組み合わせ・有効期限・ルート CA での検証をチェックしてから配置する
 #   - 配置先: <INSTALL_DIR>/certs/server.crt, server.key, ca.crt（Git 管理外）
 #   - nginx（frontend コンテナ）を再起動して HTTPS を有効にし、HTTP は HTTPS へ転送する
+#   - .env の HTTPS_PORT・PUBLIC_URL を変える前に、/root/netconfig-manager-backup/env-<日時> へ控えを取る（setup.sh と同じ）
 #
 # 使い方（一般ユーザー + sudo、または root で実行）:
 #   bash scripts/import_cert.sh        # [ ] 内は Enter でそのまま採用
@@ -47,7 +48,8 @@ LOGIN_USER="$(logname 2>/dev/null || id -un)"
 SEARCH_HOMES=("$HOME")
 LOGIN_HOME=$(eval echo ~"$LOGIN_USER")
 [ "$LOGIN_HOME" != "$HOME" ] && SEARCH_HOMES+=("$LOGIN_HOME")
-ENV_BACKUP_DIR="/root/netconfig-manager-backup"
+# テスト用の差し替え（本番では設定しない。tests/test_setup_script.py が実際の /root に触れずに通すために使う）
+ENV_BACKUP_DIR="${NCM_ENV_BACKUP_DIR:-/root/netconfig-manager-backup}"
 TS=$(date +%Y%m%d-%H%M%S)
 
 # 証明書: ~/certs の .crt のうち一番新しいもの（setup_step-ca.sh が作る短期の server.crt は除く）
@@ -72,11 +74,30 @@ read -r -p "INSTALL_DIR Please Enter [${INSTALL_DIR}]: " Red_INSTALL_DIR
 if [ -n "${Red_INSTALL_DIR}" ]; then INSTALL_DIR="${Red_INSTALL_DIR}" ; fi
 [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || { echo "$INSTALL_DIR/$COMPOSE_FILE が見つかりません（先に setup.sh で導入してください）"; exit 1; }
 
+# OS ごとの違い（パッケージ・ファイアウォール）と .env の読み書きは scripts/lib/os.sh にまとめてある。
+# .env を読む前に読み込む（スクリプトだけが新しく lib が古い組み合わせなら、.env に触れる前にここで止める）
+OS_LIB=""
+# リポジトリの外に置いたスクリプトは、$INSTALL_DIR の lib だけを見る
+if [ -f "$SCRIPT_DIR/../docker-compose.prod.yml" ]; then LIB_CAND="$SCRIPT_DIR/lib/os.sh"; else LIB_CAND="$INSTALL_DIR/scripts/lib/os.sh"; fi
+if [ -f "$LIB_CAND" ]; then OS_LIB="$LIB_CAND"; fi
+[ -n "$OS_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）"; exit 1; }
+# shellcheck source=lib/os.sh
+. "$OS_LIB"
+for fn in ncm_env_get ncm_backup_env ncm_env_append; do
+  declare -F "$fn" >/dev/null \
+    || { echo "❌ $OS_LIB が古く、$fn がありません（リポジトリを更新して scripts/ ごと同じ版にそろえてください。.env には触れていません）"; exit 1; }
+done
+
 HTTPS_PORT="443"
 HTTP_PORT="80"
+CUR_URL=""
 if sudo test -f "$INSTALL_DIR/.env"; then
-  v=$(sudo sed -n 's/^HTTPS_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTPS_PORT="$v"
-  v=$(sudo sed -n 's/^HTTP_PORT=//p' "$INSTALL_DIR/.env" | tail -1); [ -n "$v" ] && HTTP_PORT="$v"
+  # setup.sh と同じ読み方（前後の引用符と CR を除く）。片方だけの引用符は不正として止める（.env は書き換えない）
+  v=$(ncm_env_get HTTPS_PORT "$INSTALL_DIR/.env") || { echo "❌ .env の HTTPS_PORT の引用符が片方だけです。直してから再実行してください"; exit 1; }
+  [ -n "$v" ] && HTTPS_PORT="$v"
+  v=$(ncm_env_get HTTP_PORT "$INSTALL_DIR/.env") || { echo "❌ .env の HTTP_PORT の引用符が片方だけです。直してから再実行してください"; exit 1; }
+  [ -n "$v" ] && HTTP_PORT="$v"
+  CUR_URL=$(ncm_env_get PUBLIC_URL "$INSTALL_DIR/.env") || { echo "❌ .env の PUBLIC_URL の引用符が片方だけです。直してから再実行してください"; exit 1; }
 fi
 
 read -r -p "CERT_FILE (サーバー証明書) Please Enter [${CERT_FILE}]: " Red_CERT_FILE
@@ -102,14 +123,6 @@ if [ -n "${Red_HTTPS_PORT}" ]; then HTTPS_PORT="${Red_HTTPS_PORT}" ; fi
 # 依存チェック
 # =========================
 command -v sudo >/dev/null || { echo "sudo required"; exit 1; }
-# OS ごとの違い（パッケージ・ファイアウォール）は scripts/lib/os.sh にまとめてある
-OS_LIB=""
-# リポジトリの外に置いたスクリプトは、$INSTALL_DIR の lib だけを見る
-if [ -f "$SCRIPT_DIR/../docker-compose.prod.yml" ]; then LIB_CAND="$SCRIPT_DIR/lib/os.sh"; else LIB_CAND="$INSTALL_DIR/scripts/lib/os.sh"; fi
-if [ -f "$LIB_CAND" ]; then OS_LIB="$LIB_CAND"; fi
-[ -n "$OS_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）"; exit 1; }
-# shellcheck source=lib/os.sh
-. "$OS_LIB"
 if ! command -v openssl >/dev/null; then
   echo "[INFO] Installing openssl..."
   ncm_require_pkg_manager || exit 1
@@ -230,9 +243,11 @@ else
 fi
 
 # =========================
-# .env に HTTPS_PORT を反映
+# .env に HTTPS_PORT を反映（変える前に、まずバックアップを取る。setup.sh と同じ保存先）
 # =========================
 if sudo test -f "$INSTALL_DIR/.env"; then
+  ncm_backup_env "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR" "$TS"
+  echo "       → $ENV_BACKUP_DIR/env-$TS"
   if sudo grep -q '^HTTPS_PORT=' "$INSTALL_DIR/.env"; then
     sudo sed -i "s/^HTTPS_PORT=.*/HTTPS_PORT=${HTTPS_PORT}/" "$INSTALL_DIR/.env"
   else
@@ -244,7 +259,6 @@ fi
 PUBLIC_URL_CHANGED=0
 if sudo test -f "$INSTALL_DIR/.env"; then
   if [ "$HTTPS_PORT" = "443" ]; then NEW_URL="https://${IPADD}"; else NEW_URL="https://${IPADD}:${HTTPS_PORT}"; fi
-  CUR_URL=$(sudo sed -n 's/^PUBLIC_URL=//p' "$INSTALL_DIR/.env" | tail -1)
   if [ -z "$CUR_URL" ] || [[ "$CUR_URL" == http://* ]]; then
     if sudo grep -q '^PUBLIC_URL=' "$INSTALL_DIR/.env"; then
       sudo sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=${NEW_URL}|" "$INSTALL_DIR/.env"

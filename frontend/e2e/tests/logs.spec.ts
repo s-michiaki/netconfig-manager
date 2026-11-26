@@ -13,6 +13,22 @@ test("監査ログに操作が残り、CSV で出力できる", async ({ page })
   expect(text).toContain("機器登録");
 });
 
+test("監査ログ: 再検査の詳細の項目名が日本語で表示される", async ({ page }) => {
+  await login(page);
+  const row = {
+    id: "audit-e2e-1", at: "2026-11-26T01:00:00", username: "admin", action: "compliance.run", target_type: null,
+    target_id: null, target_name: null, ip: "192.0.2.10", success: true,
+    detail: JSON.stringify({ devices: 2, rules: 3, checked: 6, new_violations: 1, resolved: 2 }),
+  };
+  await page.route("**/api/audit/logs?*", (route) => route.fulfill({ json: { items: [row], total: 1 } }));
+  await page.goto("/audit");
+  const detail = page.locator(".audit-table tbody tr").first().locator(".audit-detail");
+  await expect(detail).toContainText("新しい違反: 1");
+  await expect(detail).toContainText("解消: 2");
+  await expect(detail).not.toContainText("new_violations");
+  await expect(detail).not.toContainText("resolved");
+});
+
 test("アクティビティに違反の発生が残る", async ({ page }) => {
   await login(page);
   await page.goto("/activity");

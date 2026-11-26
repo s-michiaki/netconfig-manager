@@ -322,14 +322,30 @@ def clip_output(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit], True
 
 
+def trim_blank_lines(text: str) -> str:
+    """出力の先頭・末尾の空行（空白だけの行）を取り除く。最初・最後の文字のある行の中（インデントなど）と、間の空行は残す"""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    first = len(text) - len(text.lstrip())  # 最初の文字のある位置
+    last = len(text.rstrip())  # 最後の文字のある位置の次
+    start = text.rfind("\n", 0, first) + 1
+    start = max(start, text.rfind("\r", 0, first) + 1)
+    end_candidates = [i for i in (text.find("\n", last), text.find("\r", last)) if i != -1]
+    end = min(end_candidates) if end_candidates else len(text)
+    return text[start:end]
+
+
 def build_outputs(commands: list[str], raw: list[str], run_budget: int) -> tuple[list[dict], int]:
     """機器の出力を、1 コマンドの上限（COMMAND_RUN_MAX_OUTPUT）と、実行全体の残りの枠（run_budget）で切る
+
+    先頭・末尾の空行は、切る前に取り除く（上限・枠・chars・「切り捨て」の判定は、取り除いたあとの文字数で行う）
 
     戻り値: (コマンドごとの {command, output, truncated, chars}、保存した文字数の合計)
     """
     items, used = [], 0
     for cmd, text in zip(commands, raw, strict=False):
-        text = text or ""
+        text = trim_blank_lines(text or "")
         remaining = max(run_budget - used, 0)
         clipped, cut = clip_output(text, min(settings.COMMAND_RUN_MAX_OUTPUT, remaining))
         used += len(clipped)

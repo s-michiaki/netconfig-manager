@@ -148,6 +148,28 @@ ncm_env_append() {
   printf '%s\n' "$2" | sudo tee -a "$1" >/dev/null
 }
 
+# .env の値を 1 つ読む（引数: キー ファイル）。前後の引用符と CR は取り除く。.env 自体は書き換えない
+#   引用符が両方そろっているときは、setup.sh の env_get と同じ出力（setup.sh は lib を読む前にも使うので、同じ処理を
+#   setup.sh にも置いている。tests/test_setup_script.py が確かめる）。片方だけの引用符（HTTP_PORT="80 や 80"、"80'）・
+#   閉じ引用符のあとに文字が続く値では、env_get は引用符を外して続行し、ncm_env_get は何も出さずに 1 を返す（呼び出し側が止める）
+ncm_env_get() {
+  local raw
+  raw=$(sudo sed -n "s/^$1=//p" "$2" | tail -1 | tr -d '\r')
+  case "$raw" in
+    \"?*\"|\'?*\'|\"\"|\'\') ;;
+    \"*|*\"|\'*|*\') return 1 ;;
+  esac
+  printf '%s\n' "$raw" | sed -e "s/^[\"']//" -e "s/[\"']\$//"
+}
+
+# .env のバックアップ（引数: .env 保存先ディレクトリ 名前に付ける時刻）。root のみ読める場所へ（setup.sh と import_cert.sh が共通で使う）
+ncm_backup_env() {
+  echo "[INFO] Backing up .env..."
+  sudo mkdir -p "$2"
+  sudo chmod 700 "$2"
+  sudo install -m 600 "$1" "$2/env-$3"
+}
+
 # ポートを開ける（引数: ポート番号...）。ファイアウォールが動いていなければ何もしない
 #   RHEL 系: firewalld が動いているとき（80・443 は service、それ以外は port で許可）
 #   Ubuntu : ufw が有効（ufw status が active）のときだけ ufw allow

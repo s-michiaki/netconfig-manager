@@ -347,7 +347,7 @@ export default function SystemPage() {
             </div>
             <p className="topo-muted topo-small sys-note" style={{ marginTop: 14 }}>
               {data.settings.watchdog
-                ? <>異常は <Link to="/notifications">通知設定</Link> で「システムの異常」を選んだ通知先（Discord / Slack / Teams）へ送ります。
+                ? <>異常は <Link to="/notifications">通知設定</Link> で「システムの異常」を選んだ通知先（Discord / Slack / Teams / メール）へ送ります。
                   worker・スケジューラー・Redis の停止は {data.settings.alert_after_min} 分続いたとき、
                   {data.settings.stale_days > 0 ? `${data.settings.stale_days} 日以上収集できていない機器・` : ""}ディスク・証明書は見つけたときに1回通知し、復旧したときにも通知します。
                   バックアップは失敗するたびに通知し{data.settings.backup_stale_hours > 0 ? `、${data.settings.backup_stale_hours} 時間成功していないときも通知し` : ""}ます（記録の無い環境では確認しません）。</>

@@ -212,6 +212,35 @@ async def resolve_destinations(db: AsyncSession, device_group_id: str | None,
     return list(dests.values())
 
 
+# ---------------------------------------------------------------- 無害化（利用者・機器が決められる文字列）
+
+
+def break_md(s: str) -> str:
+    """Markdown のリンク・画像 `[x](url)` を偽のリンクとして出させない（`](` のあいだにゼロ幅スペースを入れる）。
+
+    機器名・ルール名・Ping の名前・機器情報の値・エラー文などは利用者・機器が決められる。
+    正当なリンク（画面への URL）は呼び出し側が自分で組み立てるので、この関数は通さない
+    """
+    while "](" in s:  # 1 回の置換で `](` が残らないようにする（連続・入れ子でも）
+        s = s.replace("](", "]\u200b(")
+    return s
+
+
+def slack_escape(s: str) -> str:
+    """Slack の mrkdwn で `<url|text>`・`<!channel>`・`<@U…>` が働かないよう &・<・> を置き換える（Slack の公式のエスケープ）。
+
+    `&` を先に置き換える（二重には置き換わらない）。入力にすでに `&amp;` があれば `&amp;amp;` になり、
+    画面には入力どおりの `&amp;` の文字が見える（これが正しい）
+    """
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _discord(payload: dict) -> dict:
+    """Discord へ送る JSON に allowed_mentions を付ける（@everyone・@here・<@id> で通知が飛ばないようにする）"""
+    payload["allowed_mentions"] = {"parse": []}
+    return payload
+
+
 # ---------------------------------------------------------------- メッセージ
 
 
@@ -256,16 +285,16 @@ def build_payload(kind: str, ev: ChangeEvent) -> dict:
         return _message(kind, title, facts, url, "差分を画面で確認", 0x4F8EF7)
     if kind == "discord":
         embed = {
-            "title": title,
+            "title": break_md(title),
             "color": 0x4F8EF7,
-            "fields": [{"name": k, "value": v, "inline": k != "機器"} for k, v in facts],
+            "fields": [{"name": k, "value": break_md(v), "inline": k != "機器"} for k, v in facts],
             "footer": {"text": "NetConfig Manager"},
         }
         if url:
             embed["url"] = url
             embed["description"] = f"[差分を画面で確認]({url})"
-        return {"username": "NetConfig Manager", "embeds": [embed]}
-    lines = [f"*{title}*"] + [f"{k}: {v}" for k, v in facts]
+        return _discord({"username": "NetConfig Manager", "embeds": [embed]})
+    lines = [f"*{slack_escape(title)}*"] + [f"{k}: {slack_escape(v)}" for k, v in facts]
     if url:
         lines.append(f"<{url}|差分を画面で確認>")
     return {"text": "\n".join(lines)}
@@ -277,10 +306,10 @@ def build_test_payload(kind: str, owner_label: str) -> dict:
         return {"title": "テスト通知", "body": text, "facts": [], "url": _page_url("/notifications"),
                 "link_text": "通知設定を画面で確認"}
     if kind == "discord":
-        return {"username": "NetConfig Manager", "content": text}
+        return _discord({"username": "NetConfig Manager", "content": break_md(text)})
     if kind == "teams":
         return _teams_card("テスト通知", text, [], None, "", None)
-    return {"text": text}
+    return {"text": slack_escape(text)}
 
 
 # ---------------------------------------------------------------- 送信
@@ -429,18 +458,19 @@ def _message(kind: str, title: str, facts: list[tuple[str, str]], url: str | Non
         return _teams_card(title, body, facts, url, link_text, color)
     if kind == "discord":
         embed: dict = {
-            "title": title, "color": color,
-            "fields": [{"name": k, "value": v[:1000], "inline": len(v) < 40} for k, v in facts],
+            "title": break_md(title), "color": color,
+            "fields": [{"name": k, "value": break_md(v)[:1000], "inline": len(v) < 40} for k, v in facts],
             "footer": {"text": "NetConfig Manager"},
         }
-        desc = [body] if body else []
+        desc = [break_md(body)] if body else []
         if url:
             embed["url"] = url
-            desc.append(f"[{link_text}]({url})")
+            desc.append(f"[{link_text}]({url})")  # 自分で組み立てる正当なリンク
         if desc:
             embed["description"] = "\n".join(desc)[:4000]
-        return {"username": "NetConfig Manager", "embeds": [embed]}
-    lines = [f"*{title}*"] + ([body] if body else []) + [f"{k}: {v}" for k, v in facts]
+        return _discord({"username": "NetConfig Manager", "embeds": [embed]})
+    lines = ([f"*{slack_escape(title)}*"] + ([slack_escape(body)] if body else [])
+             + [f"{k}: {slack_escape(v)}" for k, v in facts])
     if url:
         lines.append(f"<{url}|{link_text}>")
     return {"text": "\n".join(lines)}
@@ -458,10 +488,7 @@ def _teams_text(s: str) -> str:
       カードの中で偽のリンクとして出せないよう、`](` の間にゼロ幅スペースを入れて構文を壊す
       （正当なリンクは Action.OpenUrl だけ）
     """
-    s = s.replace("\r\n", "\n").replace("\n", "\n\n")
-    while "](" in s:  # 1 回の置換で `](` が残らないようにする（連続・入れ子でも）
-        s = s.replace("](", "]\u200b(")
-    return s
+    return break_md(s.replace("\r\n", "\n").replace("\n", "\n\n"))
 
 
 TEAMS_MAX_BYTES = 24_000  # カードの大きさの上限（Teams のメッセージは 28KB 程度まで。余裕を見る）

@@ -57,7 +57,9 @@ case "$name" in
   podman)
     case "$1" in
       volume) [ "$2" = exists ] && [ -n "${FAKE_VOLUME_EXISTS:-}" ] && exit 0 || exit 1 ;;
-      ps) if [ "$2" = -q ]; then [ -n "${FAKE_NO_BACKEND:-}" ] || echo backendct; else echo "ncm_backend_1	Up"; fi ;;
+      ps) if [ "$2" = -q ]; then [ -n "${FAKE_NO_BACKEND:-}" ] || echo backendct; else echo "${FAKE_PS_NAME:-ncm_backend_1	Up}"; fi ;;
+      inspect) echo "${FAKE_PODMAN_MOUNTS:-}" ;;
+      port) echo "${FAKE_PODMAN_PORT:-}" ;;
       image) [ "$2" = inspect ] && echo "2026-11-20T00:00:00Z" ;;
       exec) [[ "$*" == *selfcheck* ]] && exit "${FAKE_SELFCHECK_RC:-0}" ;;
     esac ;;
@@ -834,3 +836,220 @@ def test_no_override_warning_without_overrides(alma):
                  FAKE_SUDO_V_FAIL="1")
     assert r.returncode != 0 and "テスト用の差し替え" not in r.stdout
     assert alma.calls() == ["sudo -v"]  # sudo -v の先へは進んでいない（実際の /root・/etc には触れていない）
+
+
+# ------------------------------------------------------------------ import_cert.sh（証明書の取り込み）
+# 証明書の中身の検査は偽の openssl が返す決まった値で通す（ここで確かめるのは、スクリプトの流れと .env の扱い）
+OPENSSL = r"""#!/bin/bash
+printf 'openssl %s\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+  x509)
+    case "$*" in
+      *-pubkey*) echo PUBKEY ;;
+      *-checkend*) [ -n "${FAKE_CERT_EXPIRED:-}" ] && exit 1; exit 0 ;;
+      *-subject*) echo "subject= CN=example.test" ;;
+      *-issuer*) echo "issuer= CN=Example CA" ;;
+      *-enddate*) echo "notAfter=Dec 31 00:00:00 2099 GMT" ;;
+      *-ext*) printf 'X509v3 Subject Alternative Name: \n    IP Address:192.0.2.10, DNS:example.test\n' ;;
+      *-fingerprint*) echo "sha256 Fingerprint=AA:BB:CC" ;;
+      *) [ -z "${FAKE_CERT_BAD:-}" ] || exit 1 ;;
+    esac ;;
+  pkey) if [[ "$*" == *-pubin* ]]; then cat >/dev/null; fi; [[ "$*" != *-noout* ]] || [[ "$*" == *-pubout* ]] || exit 0; echo DER ;;
+  verify) exit 0 ;;
+esac
+exit 0
+"""
+# 偽の sudo に足す: ルート CA の探索（/etc/step-ca は本物のパスなので、記録に VIOLATION を残さず「無い」と答える）
+IMPORT_SUDO = SUDO.replace('[ $# -gt 0 ] || exit 0\n', '[ $# -gt 0 ] || exit 0\n'
+                           '[ "$1 $2 $3" = "test -f /etc/step-ca/certs/root_ca.crt" ] && exit 1\n', 1)
+assert IMPORT_SUDO != SUDO
+CERT_PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n"
+HTTPS_ENV = OLD_ENV.replace("PUBLIC_URL=http://192.0.2.10", "PUBLIC_URL=https://192.0.2.10")
+
+
+def import_box(tmp, os_name="alma", env=OLD_ENV):
+    """import_cert.sh を通せる導入先（証明書・鍵は $HOME/certs。.env が揃っていて導入済みの状態）"""
+    b = Box(tmp, os_name)
+    all_installed(b)
+    b.preinstall("openssl", "podman-compose")
+    stub(b.installed / "openssl", OPENSSL)
+    stub(b.stubs / "sudo", IMPORT_SUDO)
+    (b.stubs / "logname").write_text("#!/bin/bash\necho nosuchuser\n")  # 実在しないユーザー（本物のホームを探しに行かない）
+    (b.stubs / "logname").chmod(0o755)
+    certs = tmp / "home" / "certs"
+    certs.mkdir(parents=True)
+    (certs / "example.test.crt").write_text(CERT_PEM)
+    (certs / "example.test.key").write_text(KEY_PEM)
+    if env is not None:
+        b.env_file(env)
+    return b
+
+
+def run_import(b, stdin="\n" * 6, script=None, **extra):
+    extra.setdefault("FAKE_PS_NAME", "ncm_frontend_1")
+    return b.run(stdin=stdin, script=script or b.install / "scripts" / "import_cert.sh", **extra)
+
+
+def import_calls(b):
+    """import_cert.sh が呼んだコマンドの記録（実行のたびに変わる時刻・一時ディレクトリを伏せる）"""
+    out = []
+    for c in b.calls():
+        c = c.replace(str(b.tmp), "<TMP>")
+        c = re.sub(r"env-\d{8}-\d{6}", "env-<TS>", c)
+        c = re.sub(r"certs-\d{8}-\d{6}", "certs-<TS>", c)
+        out.append(re.sub(r"/tmp\.\w+", "/tmp.<X>", c))
+    return out
+
+
+def test_import_cert_backs_up_env_before_changing_it(alma_import):
+    b = alma_import
+    r = run_import(b)
+    assert r.returncode == 0, r.stdout + r.stderr
+    env_after = (b.install / ".env").read_text()
+    assert "PUBLIC_URL=https://192.0.2.10" in env_after  # http のままだった PUBLIC_URL は HTTPS に変わる
+    backups = list(b.backup_dir.glob("env-*"))
+    assert [p.read_bytes() for p in backups] == [OLD_ENV.encode()]  # 変える前の内容がそのまま残る
+    assert (b.backup_dir.stat().st_mode & 0o777) == 0o700 and (backups[0].stat().st_mode & 0o777) == 0o600
+    calls = b.calls()
+    backup = next(i for i, c in enumerate(calls) if c.startswith("sudo install -m 600 ") and "/env-" in c)
+    first_change = next(i for i, c in enumerate(calls) if c.startswith(("sudo sed -i", "sudo tee -a")))
+    assert backup < first_change
+    assert not [c for c in calls if c.startswith("VIOLATION")]
+
+
+def test_import_cert_normal_run_commands_are_only_the_backup_beyond_before(alma_import):
+    """.env が揃っている通常の実行（証明書の更新）。実行されるコマンドは、控え（mkdir・chmod・install）以外は変わらない"""
+    b = alma_import
+    b.env_file(HTTPS_ENV)
+    r = run_import(b, FAKE_PODMAN_MOUNTS="/etc/nginx/certs ", FAKE_PODMAN_PORT="443/tcp -> 0.0.0.0:443")
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = import_calls(b)
+    assert "sudo podman restart ncm_frontend_1" in calls  # PUBLIC_URL が変わらなければ、再起動だけで済む
+    assert not [c for c in calls if "podman-compose" in c]
+    assert (b.install / ".env").read_text() == HTTPS_ENV  # 同じ値なので .env は変わらない（控えは取る）
+    backup_calls = [c for c in calls if "netconfig-manager-backup" in c or "rootbackup" in c]
+    assert [c.split()[1] for c in backup_calls if c.startswith("sudo")] == ["mkdir", "chmod", "install"]
+
+
+@pytest.mark.parametrize("name", ["HTTP_PORT", "HTTPS_PORT", "PUBLIC_URL"])
+@pytest.mark.parametrize("bad", ['"{v}', "{v}'", "{v}\"", "'{v}\""])
+def test_import_cert_stops_on_half_quoted_env_value(alma_import, name, bad):
+    """片方だけの引用符（HTTP_PORT="80 など）は不正として、何も変えずに止まる（.env・証明書・控えに触れない）"""
+    b = alma_import
+    cur = {"HTTP_PORT": "80", "HTTPS_PORT": "443", "PUBLIC_URL": "http://192.0.2.10"}[name]
+    text = OLD_ENV.replace(f"{name}={cur}", f"{name}={bad.format(v=cur)}")
+    b.env_file(text)
+    r = run_import(b)
+    assert r.returncode == 1 and f"{name} の引用符が片方だけです" in r.stdout
+    assert (b.install / ".env").read_bytes() == text.encode()
+    assert not (b.install / "certs").exists() and not b.backup_dir.exists()
+    assert b.count("sudo install") == 0 and b.count("sudo podman") == 0
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+@pytest.mark.parametrize("crlf", [False, True])
+def test_import_cert_reads_quoted_and_crlf_env_like_setup(alma_import, quote, crlf):
+    """引用符で囲んだ値・CRLF の .env は、setup.sh と同じ読み方（前後の引用符と CR を除く）で、HTTP_PORT・HTTPS_PORT・PUBLIC_URL を読む"""
+    b = alma_import
+    text = (OLD_ENV.replace("HTTP_PORT=80", f"HTTP_PORT={quote}8080{quote}").replace("HTTPS_PORT=443", f"HTTPS_PORT={quote}8443{quote}")
+            .replace("PUBLIC_URL=http://192.0.2.10", f"PUBLIC_URL={quote}https://192.0.2.10:8443{quote}"))
+    if crlf:
+        text = text.replace("\n", "\r\n")
+    b.env_file(text)
+    r = run_import(b, stdin="\n" * 5 + "\n")  # HTTPS_PORT の既定値は .env の 8443
+    assert r.returncode == 0, r.stdout + r.stderr
+    # 既定値（Enter だけ）で .env の HTTPS_PORT・HTTP_PORT を使う（プロンプトは端末でないと表示されないので、完了の案内で確かめる）
+    assert "https://192.0.2.10:8443/" in r.stdout and "http://192.0.2.10:8080/ は HTTPS へ転送されます" in r.stdout
+    # PUBLIC_URL はすでに https なので変わらない。HTTPS_PORT の行だけは、従来どおり sed で書き直される（値は同じ）
+    expect = re.sub(rb"^HTTPS_PORT=.*$", b"HTTPS_PORT=8443", text.encode(), flags=re.M)
+    assert (b.install / ".env").read_bytes() == expect
+    assert not [c for c in b.calls() if c.startswith("VIOLATION")]
+
+
+def test_import_cert_stops_before_touching_env_when_lib_is_old(alma_import):
+    """スクリプトだけが新しく lib が古い組み合わせ: .env・証明書に触れる前に止まる"""
+    b = alma_import
+    lib = b.install / "scripts" / "lib" / "os.sh"
+    text = (b.install / ".env").read_bytes()
+    lib.write_text(LIB.read_text().replace("ncm_backup_env()", "ncm_backup_env_old()"))
+    r = run_import(b)
+    assert r.returncode == 1 and "が古く、ncm_backup_env がありません" in r.stdout and ".env には触れていません" in r.stdout
+    assert (b.install / ".env").read_bytes() == text
+    assert not b.backup_dir.exists() and not (b.install / "certs").exists()
+    assert b.count("sudo sed") == 0 and b.count("sudo install") == 0 and b.count("sudo podman") == 0
+
+
+def test_import_cert_stops_when_lib_has_no_env_get(alma_import):
+    b = alma_import
+    text = (b.install / ".env").read_bytes()
+    lib = b.install / "scripts" / "lib" / "os.sh"
+    lib.write_text(LIB.read_text().replace("ncm_env_get()", "ncm_env_get_old()"))
+    r = run_import(b)
+    assert r.returncode == 1 and "ncm_env_get がありません" in r.stdout
+    assert (b.install / ".env").read_bytes() == text and not b.backup_dir.exists()
+
+
+def test_import_cert_without_env_changes_nothing_in_env(alma_import):
+    """.env が無い導入先: 控えも取らず、.env も作らない"""
+    b = alma_import
+    (b.install / ".env").unlink()
+    r = run_import(b)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (b.install / ".env").exists() and not b.backup_dir.exists()
+
+
+def test_import_cert_rejects_expired_cert_before_touching_env(alma_import):
+    b = alma_import
+    r = run_import(b, FAKE_CERT_EXPIRED="1")
+    assert r.returncode == 1 and "有効期限が切れています" in r.stdout
+    assert (b.install / ".env").read_text() == OLD_ENV and not b.backup_dir.exists()
+
+
+def test_env_get_in_lib_matches_setup_env_get(alma):
+    """lib の ncm_env_get は setup.sh の env_get と同じ値を返す（引用符で囲んだ値・CR・末尾の改行なし・同じキーが複数）"""
+    setup_text = (REPO / "scripts" / "setup.sh").read_text(encoding="utf-8")
+    m = re.search(r"^env_get\(\) \{.*?^\}", setup_text, re.M | re.S)
+    assert m, "setup.sh の env_get が見つかりません"
+    cases = {**_env_variants(), "dup-keys": "HTTP_PORT=1\nHTTP_PORT=2\n", "empty": "", "empty-value": "HTTP_PORT=\n",
+             "quoted-empty": 'HTTP_PORT=""\n', "url": "PUBLIC_URL='http://192.0.2.10:8080'\r\n"}
+    f = alma.tmp / "e"
+    for name, text in cases.items():
+        f.write_bytes(text.encode())
+        for key in ("HTTP_PORT", "HTTPS_PORT", "PUBLIC_URL", "ADMIN_PASSWORD", "NOPE"):
+            script = f'set -euo pipefail; . "{LIB}"; {m.group(0)}\nsudo() {{ "$@"; }}\nprintf "%s|%s" "$(env_get {key} "{f}")" "$(ncm_env_get {key} "{f}")"'
+            r = subprocess.run(["bash", "-c", script], env=alma.env(), capture_output=True, text=True)
+            if r.returncode != 0:  # 引用符が片方だけ（ADMIN_PASSWORD の例など）は、lib だけが不正として 1 を返す
+                continue
+            a, b = r.stdout.split("|", 1)
+            assert a == b, (name, key, r.stdout)
+
+
+@pytest.mark.parametrize("raw,ok", [
+    ("80", True), ('"80"', True), ("'80'", True), ('""', True), ("", True), ('"80', False), ('80"', False),
+    ("'80", False), ("80'", False), ("\"80'", False), ("'80\"", False), ('"', False),
+])
+def test_lib_env_get_rejects_only_half_quoted_values(alma, raw, ok):
+    f = alma.tmp / "e"
+    f.write_bytes(f"HTTP_PORT={raw}\r\n".encode())
+    r = subprocess.run(["bash", "-c", f'. "{LIB}"; sudo() {{ "$@"; }}; ncm_env_get HTTP_PORT "{f}"'], env=alma.env(),
+                       capture_output=True, text=True)
+    assert (r.returncode == 0) == ok, (raw, r.returncode, r.stdout)
+    if ok:
+        assert r.stdout.strip() == raw.strip("\"'")
+
+
+@pytest.fixture
+def alma_import(tmp_path):
+    return import_box(tmp_path, "alma")
+
+
+def test_first_install_backs_up_env_even_when_lib_has_no_ncm_backup_env(alma):
+    """リポジトリの外の新しい setup.sh を、古い lib（ncm_backup_env なし）のチェックアウトに対して実行しても、従来の手順で控えを取る"""
+    lib = alma.install / "scripts" / "lib" / "os.sh"
+    lib.write_text(lib.read_text().replace("ncm_backup_env()", "ncm_backup_env_old()"))
+    r = alma.run(stdin="\n" * 8)
+    assert r.returncode == 0, r.stdout + r.stderr
+    backups = list(alma.backup_dir.glob("env-*"))
+    assert len(backups) == 1 and "DEVICE_ENCRYPTION_KEY=" in backups[0].read_text()  # 作った直後の .env（PUBLIC_URL は後で入る）
+    assert (alma.backup_dir.stat().st_mode & 0o777) == 0o700 and (backups[0].stat().st_mode & 0o777) == 0o600

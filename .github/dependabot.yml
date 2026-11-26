@@ -8,6 +8,8 @@
 #     （奇数のマイナー版 = mainline を避けるため。安定版の切り替え 1.30 → 1.32 は年 1 回ほど手で行う。README）
 #   - python・node・postgres・redis はメジャー版を上げない（postgres はデータの移行が要る）。
 #     python は 3.12 → 3.13 のようなマイナー版も上げない（依存のロックと CI を 3.12 で固定しているため）
+#   - npm の typescript・react・react-dom・@types/react・@types/react-dom はメジャー版を上げない（画面の改修とセットで
+#     人が上げる。マイナー・パッチはこれまでどおり提案する）
 #   - 取り込んだあとサーバーで scripts/setup.sh を実行する（イメージの取り直し・再ビルド）
 version: 2
 updates:
@@ -80,3 +82,15 @@ updates:
       npm-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # メジャー版は、画面側の改修（型・ビルドの確認）とセットで手で上げる（PR #23・#24 は見送った）
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]

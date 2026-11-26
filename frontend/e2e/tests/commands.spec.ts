@@ -148,8 +148,10 @@ test("送れないコマンドは入力中に理由が出て実行できず、�
   const panel = page.getByLabel("実行結果");
   await expect(panel).toContainText("実行中");
   await expect(panel).toContainText("完了 1 / 失敗 0 / 対象外 0 / 実行中・待機中 2");
+  await expect(panel).toContainText("機器への接続に時間がかかる機種では 1 分ほどかかることがあります"); // 実行中だけ
   await expect(panel.getByText("実行結果", { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(panel.getByRole("status")).toHaveText("完了 3 / 失敗 0 / 対象外 0");
+  await expect(panel).not.toContainText("1 分ほどかかることがあります");
 
   // 機器ごと: 折りたたみ。3 台なので開いている
   const devs = panel.locator("details.cmd-device");

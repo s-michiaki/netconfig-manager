@@ -40,9 +40,10 @@ from dataclasses import dataclass, field
 
 import git
 import regex
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.safe_regex import PatternTooHeavy, PatternUnavailable, safe_compile
@@ -420,7 +421,8 @@ async def run_checks(
 
     無効なルール・対象外のプラットフォームの結果は削除する。commit は呼び出し側で行う。
     照合を先に全部済ませてから、結果の書き換えを最後に短く行う（途中で例外・キャンセルになっても以前の結果が残る）。
-    違反の発生（pass → fail、または初めての fail）と解消（fail → pass）はアクティビティログに記録する
+    違反の発生（pass → fail、または初めての fail）と解消（fail → pass）はアクティビティログに記録する。
+    違反の通知は commit が成功したあとに投入される（_enqueue_violation_notice。呼び出し側は commit するだけでよい）
     """
     dq = select(Device)
     if device_ids is not None:
@@ -507,8 +509,17 @@ async def run_checks(
             "resolved": sum(1 for t in transitions if t[0] == "resolved")}
 
 
+_PENDING_NOTICES = "compliance_pending_notices"  # Session.info のキー。commit が成功したあとに投入する通知
+
+
 async def _enqueue_violation_notice(db: AsyncSession, transitions: list[tuple], rules: dict, ref: str | None) -> None:
-    """新しく違反になったものを通知する（通知する設定がある場合だけ、送信は worker のタスクで）"""
+    """新しく違反になったものの通知を、投入待ちとしてセッションに積む（通知する設定がある場合だけ）。
+
+    ここでは Celery（Redis）へ投入しない。アドバイザリロック（lock_result_writes）を持ったままの通信を避け、
+    保存に失敗したのに通知だけが出るのを防ぐため、呼び出し側の commit が成功した直後に
+    _flush_pending_notices（Session の after_commit）が投入する。rollback されたら破棄する。
+    呼び出し元（API・worker）は何もしなくてよい（commit さえすればよい）
+    """
     by_device: dict[str, list[tuple[str, str]]] = {}
     for kind, d, rid, _ in transitions:
         if kind == "violation" and rid in rules:
@@ -519,10 +530,36 @@ async def _enqueue_violation_notice(db: AsyncSession, transitions: list[tuple], 
     try:
         if not await wants_any(db, "violation"):
             return
+        db.sync_session.info.setdefault(_PENDING_NOTICES, []).append(([[k, v] for k, v in by_device.items()], ref))
+    except Exception:  # noqa: BLE001 - 通知の準備に失敗しても検査は続ける
+        logger.exception("違反の通知を準備できませんでした")
+
+
+@event.listens_for(Session, "after_commit")
+def _flush_pending_notices(session: Session) -> None:
+    """commit が成功したあとに、積んでおいた違反の通知を Celery へ投入する（run_checks 1 回につき 1 件）"""
+    if session.in_nested_transaction():  # SAVEPOINT の解放では投入しない（外側の commit を待つ）
+        return
+    pending = session.info.pop(_PENDING_NOTICES, None)
+    if not pending:
+        return
+    try:
         from app.worker import send_violation_notification
-        send_violation_notification.delay([[k, v] for k, v in by_device.items()], ref)
-    except Exception:  # noqa: BLE001 - 通知の投入に失敗しても検査は続ける
+        for items, ref in pending:
+            send_violation_notification.delay(items, ref)
+    except Exception:  # noqa: BLE001 - 通知の投入に失敗しても、保存済みの検査結果には影響させない
         logger.exception("違反の通知を投入できませんでした")
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _drop_pending_notices(session: Session, transaction) -> None:
+    """一番外側のトランザクションが終わったら、積んでおいた通知を捨てる（commit のあとに呼ばれるので、投入済みなら残っていない）。
+
+    rollback・close のどちらでも消えるので、保存されなかった違反は通知されず、close 後に同じセッションを使い回しても
+    古い通知は投入されない。SAVEPOINT の中で積んで SAVEPOINT だけ rollback した場合は破棄されない（この形は使わない）
+    """
+    if transaction.parent is None:
+        session.info.pop(_PENDING_NOTICES, None)
 
 
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}

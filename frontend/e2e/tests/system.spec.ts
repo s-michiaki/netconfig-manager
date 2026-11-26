@@ -8,6 +8,7 @@ test("システム状態: 項目メニューで状態を確認し、画面に表
   const cards = page.locator(".sys-grid .sys-card");
   await expect(cards.filter({ hasText: "ディスクの空き" })).toHaveCount(1);
   const total = await cards.count();
+  await expect(page.locator(".sys-note")).toContainText("通知先（Discord / Slack / Teams / メール）");
 
   // 項目メニュー: 選ぶと状態（詳細）を表示
   await page.getByRole("button", { name: /^項目/ }).click();

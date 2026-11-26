@@ -1526,3 +1526,17 @@ def test_model_and_migration_agree_on_report_sends(ctx):
     assert "sending" in str(cols["status"]["default"]) and "1" in str(cols["attempts"]["default"])
     assert ReportSend.__table__.c.claimed_at.nullable is False
     assert ReportSend.__table__.c.status.server_default is not None and ReportSend.__table__.c.attempts.server_default is not None
+
+
+def test_discord_field_length_is_judged_after_breaking_links(monkeypatch):
+    """`](` が多い値は、ゼロ幅スペースを足した分だけ長くなる。無害化のあとの長さで判定し、項目の上限で黙って切れない"""
+    big = "](" * 480  # 960 文字。無害化のあとは 1440 文字
+    steps = []
+
+    def facts(rep, n):
+        steps.append(n)
+        return [("項目", big if n > 0 else "短い")]
+    monkeypatch.setattr(report, "_facts", facts)
+    dc = report.build_payload("discord", fake_report())
+    assert steps[0] == report.TOP_STEPS[0] and steps[-1] == 0  # 上位の件数を減らして収めた
+    assert dc["embeds"][0]["fields"][0]["value"] == "短い"

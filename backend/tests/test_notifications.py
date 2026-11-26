@@ -1,6 +1,7 @@
 """コンフィグ変更の通知のテスト（送信は差し替えて、宛先の決まり方と内容を確認する）"""
 import asyncio
 import json
+import re
 import uuid
 from unittest import mock
 
@@ -863,3 +864,517 @@ def test_teams_card_is_shrunk_when_too_big():
     assert card["body"][0]["text"] == "題" and card["actions"]  # 題とリンクは残る
     small = notify._message("teams", "題", [("a", "b")], None, "", None, "本文")
     assert notify._teams_size(small) < 1000 and small["attachments"][0]["content"]["body"][2]["text"] == "本文"
+
+
+# ---------------------------------------------------------------- Discord・Slack: 偽のリンク・メンションの無害化
+HOSTILE = ("[再ログイン](https://evil.example/login) ![x](https://evil.example/a.png) <!channel> <!here> <@U123ABC|x> "
+           "<https://evil.example|link> @everyone @here <@123456789012345678> &amp; & < >")
+NAME_HOSTILE = "<!channel> @everyone [x](https://evil.example/l) <@U1|x> &amp; &"  # 名前の長さの上限（128）に収まる形
+LEGIT_LINK = re.compile(r"\[[^\]\n]*\]\(https://ncm\.example\.local[^)]*\)")  # 自分で組み立てる正当なリンク（Discord）
+LEGIT_SLACK_LINK = re.compile(r"<https://ncm\.example\.local[^>|]*\|[^>]*>")  # 同（Slack）
+
+
+def test_break_md_and_slack_escape():
+    assert notify.break_md(LINKS) == "[再ログインはこちら]​(https://evil.example/login)"
+    assert notify.break_md("a\nb") == "a\nb" and notify.break_md("") == ""
+    for src in ("](](](", "]]((", "[[a](u1)](u2)"):
+        assert "](" not in notify.break_md(src), src
+    assert notify.break_md(notify.break_md(LINKS)) == notify.break_md(LINKS)  # 2 回かけても同じ
+    esc = notify.slack_escape
+    assert esc("<!channel> <@U1|x> <https://e.example|l>") == "&lt;!channel&gt; &lt;@U1|x&gt; &lt;https://e.example|l&gt;"
+    assert esc("a & b") == "a &amp; b"
+    assert esc("&amp;") == "&amp;amp;"  # 入力にすでにある &amp; は、そのままの文字として見えるように置き換える
+    assert esc("&lt;") == "&amp;lt;" and esc("あ→い ＜ ＞") == "あ→い ＜ ＞"
+    # 定期レポートも同じ関数を使う
+    from app.services import report
+    assert report.notify.slack_escape is notify.slack_escape and not hasattr(report, "_break_md")
+
+
+def test_discord_and_slack_payload_shape_is_unchanged_for_plain_text(monkeypatch):
+    """利用者が決められる文字列に特別な文字が無ければ、見た目（文言・リンク・絵文字・改行）はこれまでどおり"""
+    monkeypatch.setattr(notify.settings, "PUBLIC_URL", "https://ncm.example.local")
+    d = notify._message("discord", "収集失敗: Core-SW01", [("機器", "Core-SW01（192.0.2.1）"), ("エラー", "timeout")],
+                        "https://ncm.example.local/activity", "アクティビティを画面で確認", 0xFB923C, "本文\n2行目")
+    e = d["embeds"][0]
+    assert e["title"] == "収集失敗: Core-SW01" and e["description"] == "本文\n2行目\n[アクティビティを画面で確認](https://ncm.example.local/activity)"
+    assert e["fields"] == [{"name": "機器", "value": "Core-SW01（192.0.2.1）", "inline": True},
+                           {"name": "エラー", "value": "timeout", "inline": True}]
+    assert d["allowed_mentions"] == {"parse": []} and d["username"] == "NetConfig Manager"
+    s = notify._message("slack", "収集失敗: Core-SW01", [("機器", "Core-SW01（192.0.2.1）")],
+                        "https://ncm.example.local/activity?device=1&level=error", "開く", 0xFB923C, "🔴 a\n🟢 b")
+    assert s == {"text": "*収集失敗: Core-SW01*\n🔴 a\n🟢 b\n機器: Core-SW01（192.0.2.1）\n"
+                         "<https://ncm.example.local/activity?device=1&level=error|開く>"}  # 正当なリンクの & は置き換えない
+    ev = notify.ChangeEvent("id1", "Core-SW01", "192.0.2.1", "本社", 3, 1, "manual", "a" * 40, notify.utcnow())
+    dd, ss = notify.build_payload("discord", ev), notify.build_payload("slack", ev)
+    assert dd["allowed_mentions"] == {"parse": []} and dd["embeds"][0]["title"] == "コンフィグ変更: Core-SW01"
+    assert ss["text"].startswith("*コンフィグ変更: Core-SW01*\n機器: Core-SW01（192.0.2.1）\nグループ: 本社\n変更: +3 行 / -1 行\n")
+
+
+def test_every_discord_message_carries_allowed_mentions():
+    for payload in (notify.build_test_payload("discord", "admin"),
+                    notify._message("discord", "題", [], None, "", 0, "本文")):
+        assert payload["allowed_mentions"] == {"parse": []}
+    # 本文（content）のテスト通知: 名前に入れたメンション・リンクは働かない
+    t = notify.build_test_payload("discord", f"@everyone {LINKS}")
+    assert "](" not in t["content"] and "@everyone" in t["content"]  # 文字は残り、通知は飛ばない（allowed_mentions）
+    assert notify.build_test_payload("slack", "<!channel>")["text"].count("<") == 0
+    assert "](" not in json.dumps(notify.build_test_payload("teams", LINKS), ensure_ascii=False)
+
+
+def test_email_escapes_html():
+    """メールは、機器名などに HTML・リンクが入っても、HTML では文字として出る（既存の html.escape を確かめる）"""
+    from app.services import mail
+    msg = mail.build_message(mail.MailConfig(from_address="ncm@example.test"), "ops@example.test",
+                             f"違反: {HOSTILE}", [(HOSTILE, HOSTILE)], HOSTILE, "https://ncm.example.local/x?a=1&b=2", "開く")
+    html_part = msg.get_body(("html",)).get_content()
+    assert "<!channel>" not in html_part and "<https://evil" not in html_part and "<@U123ABC" not in html_part
+    assert html_part.count("<a ") == 1 and 'href="https://ncm.example.local/x?a=1&amp;b=2"' in html_part
+    assert "&lt;!channel&gt;" in html_part
+
+
+def test_every_event_neutralizes_links_and_mentions_for_discord_and_slack(ctx, monkeypatch):
+    """全てのイベントで、利用者・機器が決められる文字列（機器名・グループ名・ルール名・Ping の名前・機器情報の値・エラー文・
+    プロファイル名・利用者名）のリンクの構文・メンションは、Discord・Slack の本文で働かない。自分で組み立てるリンクは残る"""
+    c, admin = ctx["c"], ctx["admin"]
+    monkeypatch.setattr(notify.settings, "PUBLIC_URL", "https://ncm.example.local")
+    got: list[tuple[str, dict]] = []
+
+    def fake_send(kind, url, payload, cfg=None):
+        got.append((kind, payload))
+        return None
+
+    monkeypatch.setattr(notify, "_send", fake_send)
+    u = _new_user(c, admin)
+    hooks = {"discord": D.format(777, uid()), "slack": S.format(7, uid())}
+    r = c.put("/api/notifications/me", json={
+        "mode": "custom", "discord_webhook": hooks["discord"], "slack_webhook": hooks["slack"], "all_devices": True,
+        "on_change": True, "on_violation": True, "on_failure": True, "on_system": True, "on_inventory": True,
+        "on_ping": True, "on_drift": True, "on_unsaved": True}, headers=u["h"])
+    assert r.status_code == 200, r.text
+    grp = c.post("/api/device-groups/", json={"name": f"g-{uid()} {NAME_HOSTILE}"}, headers=admin).json()
+    devs = [c.post("/api/devices/", json=dict(name=f"tm-{uid()} {NAME_HOSTILE}", hostname=f"192.0.2.{i}", platform="cisco_ios",
+                                              username="u", password="p", group_id=grp["id"] if i == 21 else None),
+                   headers=admin).json() for i in (21, 22)]
+    d1, d2 = devs
+    assert d1.get("id") and d2.get("id"), devs
+
+    async def run():
+        out = {}
+
+        def step(name):
+            out[name] = [(k, p) for k, p in got if k in ("discord", "slack")]
+            got.clear()
+
+        async with AsyncSessionLocal() as db:
+            await notify.notify_change(db, d1["id"], "a" * 40, 2, 1, "manual"); step("change")
+            await notify.notify_violations(db, [(d1["id"], [(f"HTTP禁止 {HOSTILE}", "high")])]); step("v1")
+            await notify.notify_violations(db, [(d1["id"], [(f"HTTP禁止 {HOSTILE}", "high")]),
+                                                (d2["id"], [(f"NTP必須 {HOSTILE}", "low"), ("SSH", "medium")])]); step("v2")
+            await notify.notify_failure(db, d1["id"], f"認証に失敗しました {HOSTILE}", "manual"); step("f1")
+            await notify.notify_failures(db, [
+                {"device_id": d1["id"], "error": f"timeout {HOSTILE}", "triggered_by": "schedule", "ref": None, "at": 1},
+                {"device_id": d2["id"], "error": f"認証に失敗しました {HOSTILE}", "triggered_by": "schedule", "ref": None, "at": 2}])
+            step("f2")
+            await notify.notify_inventory(db, d1["id"], [["os_version", "15.1", HOSTILE], ["serial_number", HOSTILE, "BBB"]])
+            step("inv")
+            await notify.notify_inventory(db, d1["id"], [["os_version", "15.1", HOSTILE]]); step("inv1")
+            await notify.notify_drift(db, d1["id"], 3, 2, "b" * 40, "c" * 40); step("drift")
+            await notify.notify_unsaved(db, d1["id"], 1, 0); step("unsaved")
+            await notify.notify_ping(
+                db, [{"name": f"core-sw01 {HOSTILE}", "address": f"192.0.2.1 {HOSTILE}", "group_id": None,
+                      "since": "2026-11-25T01:00:00"}],
+                [{"name": f"core-sw02 {HOSTILE}", "address": "192.0.2.2", "group_id": None}]); step("ping")
+            await notify.notify_system(db, f"worker が止まっています {HOSTILE}", f"本文\n2行目 {HOSTILE}",
+                                       [("機器", HOSTILE)]); step("system")
+        await notify.notify_profile_owner(u["id"], f"プロファイル「{HOSTILE}」を編集", f"{HOSTILE} さんが編集",
+                                          [("操作した人", HOSTILE), ("機器", HOSTILE)]); step("profile")
+        return out
+
+    try:
+        out = asyncio.run(run())
+        for name, items in out.items():
+            kinds = sorted(k for k, _ in items)
+            assert kinds == ["discord", "slack"], (name, kinds)  # どのイベントも、Discord・Slack に 1 通ずつ
+            for kind, payload in items:
+                text = json.dumps(payload, ensure_ascii=False)
+                if kind == "discord":
+                    assert payload["allowed_mentions"] == {"parse": []}, name
+                    assert "](" not in LEGIT_LINK.sub("", text), (name, "リンクの構文が残っている")
+                else:
+                    body = payload["text"]
+                    rest = LEGIT_SLACK_LINK.sub("", body)
+                    assert "<" not in rest and ">" not in rest, (name, rest)  # <url|text>・<!channel>・<@U…> が働かない
+        # 文字そのものは見える（Slack: & は &amp; として送る = 画面には & と見える）
+        slack = {n: next(p for k, p in items if k == "slack")["text"] for n, items in out.items()}
+        assert "&lt;!channel&gt;" in slack["change"] and "&amp;amp;" in slack["change"]
+        assert "&lt;!channel&gt;" in slack["f1"] and "&lt;!channel&gt;" in slack["ping"] and "&lt;!channel&gt;" in slack["profile"]
+        assert "https://evil.example/login" in slack["inv"]  # リンクの URL の文字は残る（働かないだけ）
+        discord = {n: next(p for k, p in items if k == "discord") for n, items in out.items()}
+        flat = json.dumps(discord["f1"], ensure_ascii=False)
+        assert "[再ログイン]​(https://evil.example/login)" in flat  # 見た目の文字は残り、リンクにならない
+        # 自分で組み立てる正当なリンクは、どのイベントでも壊れていない
+        for name, p in discord.items():
+            assert "](https://ncm.example.local" in p["embeds"][0]["description"], name
+            assert p["embeds"][0]["url"].startswith("https://ncm.example.local"), name
+        for name, text in slack.items():
+            assert LEGIT_SLACK_LINK.search(text), name
+    finally:
+        for d in devs:
+            c.delete(f"/api/devices/{d['id']}", headers=admin)
+        c.delete(f"/api/device-groups/{grp['id']}", headers=admin)
+        c.put("/api/notifications/me", json={"mode": "inherit", "discord_webhook": "", "slack_webhook": ""}, headers=u["h"])
+        c.delete(f"/api/users/{u['id']}", headers=admin)
+
+
+# ---------------------------------------------------------------- 違反の通知は、保存（commit）が成功したあとにだけ投入する
+HTTP_OFF = "hostname X\n"
+HTTP_ON = "hostname X\nip http server\n"
+
+
+@pytest.fixture
+def viol(ctx):
+    """違反の通知を受ける利用者と、違反しうる機器 2 台・ルール 1 つ（終わったら片付ける）"""
+    c, admin = ctx["c"], ctx["admin"]
+    u = _new_user(c, admin)
+    r = c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": D.format(888, uid()), "all_devices": True,
+                                              "on_change": False, "on_violation": True}, headers=u["h"])
+    assert r.status_code == 200, r.text
+    devs = []
+    for i in (31, 32):
+        d = c.post("/api/devices/", json=dict(name=f"cm-{uid()}", hostname=f"192.0.2.{i}", platform="arista_eos",
+                                              username="u", password="p"), headers=admin).json()
+        cs.save_config(d["id"], HTTP_OFF, "test")
+        devs.append(d)
+    with mock.patch.object(worker.send_violation_notification, "delay") as dl:
+        rule = c.post("/api/compliance/rules", json={"name": f"HTTP禁止-{uid()}", "match_type": "contains", "expect": "absent",
+                                                     "pattern": "ip http server", "severity": "high",
+                                                     "platforms": ["arista_eos"]}, headers=admin).json()
+        # 全台が合格 → 通知しない（共有の DB に、ほかのテストの機器・ルールが残っていても、このルールの通知は出ない）
+        assert not [1 for c in dl.call_args_list for i in c.args[0] if any(r[0] == rule["name"] for r in i[1])]
+        dl.reset_mock()
+        yield {"c": c, "admin": admin, "devs": devs, "rule": rule, "delay": dl, "user": u}
+    c.delete(f"/api/compliance/rules/{rule['id']}", headers=admin)
+    for d in devs:
+        c.delete(f"/api/devices/{d['id']}", headers=admin)
+    _drop_user(c, admin, u)
+    c.put("/api/notifications/me", json={"mode": "inherit", "discord_webhook": ""}, headers=u["h"])
+
+
+def _make_pass(v):
+    """全台を合格の状態にする（再検査のあと、通知の記録も消す）"""
+    from app.services import compliance as svc
+
+    for d in v["devs"]:
+        cs.save_config(d["id"], HTTP_OFF, "test")
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d["id"] for d in v["devs"]], rule_ids=[v["rule"]["id"]])
+            await db.commit()
+    asyncio.run(run())
+    v["delay"].reset_mock()
+
+
+def _mine(v):
+    """投入された通知のうち、このテストの機器・ルールの分（機器の ID の並び）。共有の DB のほかの機器・ルールの分は数えない"""
+    ids = {d["id"] for d in v["devs"]}
+    return sorted(i[0] for c in v["delay"].call_args_list for i in c.args[0]
+                  if i[0] in ids and any(r[0] == v["rule"]["name"] for r in i[1]))
+
+
+def _ids(*devs):
+    return sorted(d["id"] for d in devs)
+
+
+def _notice_of(v, *devs):
+    return [[d["id"], [(v["rule"]["name"], "high")]] for d in devs]  # ルールは (名前, 重要度) の組のまま渡される（従来どおり）
+
+
+def test_violation_notice_is_enqueued_only_after_commit(viol):
+    """通知は commit の成功のあとに 1 回だけ投入される（run_checks の中・commit の前には投入しない）。内容は従来どおり"""
+    from app.services import compliance as svc
+
+    v = viol
+    d1, d2 = v["devs"]
+    cs.save_config(d1["id"], HTTP_ON, "test")
+    cs.save_config(d2["id"], HTTP_ON, "test")
+    dl = v["delay"]
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            r = await svc.run_checks(db, device_ids=[d1["id"], d2["id"]], rule_ids=[v["rule"]["id"]], actor="admin", ref="ref-1")
+            assert r["new_violations"] == 2 and "notices" not in r  # 戻り値の形は変わらない
+            assert not dl.called  # commit の前は、Redis へ何も送らない（アドバイザリロックを持っている間も）
+            await db.commit()
+            return r
+    asyncio.run(run())
+    assert dl.call_count == 1  # 2 台でも、run_checks 1 回につき 1 件（通知先ごとのまとめは notify_violations が行う）
+    items, ref = dl.call_args.args
+    assert sorted(items) == sorted(_notice_of(v, d1, d2)) and ref == "ref-1"
+
+    # すでに違反のものは、再検査しても通知しない
+    dl.reset_mock()
+
+    async def again():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            await db.commit()
+    asyncio.run(again())
+    assert not dl.called
+
+
+def test_violation_notice_is_dropped_on_rollback_or_failed_commit(viol):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.device import Device
+    from app.services import compliance as svc
+
+    v = viol
+    d1 = v["devs"][0]
+    dl = v["delay"]
+
+    async def rollback_case():
+        cs.save_config(d1["id"], HTTP_ON, "test")
+        async with AsyncSessionLocal() as db:
+            r = await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            assert r["new_violations"] == 1
+            await db.rollback()  # 呼び出し側の例外処理
+            await db.commit()  # 同じセッションで、あとから別の commit をしても、投入されない
+        async with AsyncSessionLocal() as db:  # 結果も保存されていない（まだ合格のまま）
+            await db.commit()
+    asyncio.run(rollback_case())
+    assert not dl.called
+
+    async def failed_commit_case():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            # 同じ名前の機器を足して、commit を一意制約の違反で失敗させる
+            db.add(Device(name=d1["name"], hostname="192.0.2.99", platform="cisco_ios", username="u"))
+            with pytest.raises(IntegrityError):
+                await db.commit()
+            await db.rollback()
+            await db.commit()
+    asyncio.run(failed_commit_case())
+    assert not dl.called
+
+    async def exception_case():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            raise_after = RuntimeError("呼び出し側の例外")
+        raise raise_after  # セッションを commit せずに閉じた
+    with pytest.raises(RuntimeError):
+        asyncio.run(exception_case())
+    assert not dl.called
+
+    # 保存されなかった違反は、次の再検査で「新しい違反」として通知される（通知が失われたままにならない）
+    async def retry():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            await db.commit()
+    asyncio.run(retry())
+    assert dl.call_count == 1 and dl.call_args.args[0] == _notice_of(v, d1)
+
+
+def test_violation_notice_is_not_enqueued_by_commit_after_close_and_reuse(viol):
+    """close() で捨てたセッションを使い回して commit しても、古い通知は投入されない"""
+    from app.services import compliance as svc
+
+    v = viol
+    d1 = v["devs"][0]
+    cs.save_config(d1["id"], HTTP_ON, "test")
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            await db.close()
+            await db.commit()
+    asyncio.run(run())
+    assert not v["delay"].called
+
+
+def test_violation_notice_waits_for_the_outer_transaction_not_a_savepoint(viol):
+    from app.services import compliance as svc
+
+    v = viol
+    d1, d2 = v["devs"]
+    dl = v["delay"]
+    cs.save_config(d1["id"], HTTP_ON, "test")
+    cs.save_config(d2["id"], HTTP_ON, "test")
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            async with db.begin_nested():
+                await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            assert not dl.called  # SAVEPOINT を解放しただけでは投入しない
+            await svc.run_checks(db, device_ids=[d2["id"]], rule_ids=[v["rule"]["id"]])  # 同じトランザクションで 2 回目
+            await db.commit()
+    asyncio.run(run())
+    assert dl.call_count == 2  # run_checks ごとに 1 件（従来と同じ件数）
+    assert sorted(c.args[0][0][0] for c in dl.call_args_list) == sorted([d1["id"], d2["id"]])
+
+
+def test_no_notice_when_nobody_wants_violation(viol, monkeypatch):
+    """通知する設定が 1 つも無ければ、これまでどおり投入しない"""
+    from app.services import compliance as svc
+    from app.services import notify as n
+
+    v = viol
+    d1 = v["devs"][0]
+    cs.save_config(d1["id"], HTTP_ON, "test")
+
+    async def no(db, event):
+        return False
+    monkeypatch.setattr(n, "wants_any", no)
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await svc.run_checks(db, device_ids=[d1["id"]], rule_ids=[v["rule"]["id"]])
+            await db.commit()
+    asyncio.run(run())
+    assert not v["delay"].called
+
+
+def _fail_commit_with_notice(monkeypatch):
+    """違反の通知を積んだセッションの commit を失敗させる（保存に失敗した状況）"""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    real = AsyncSession.commit
+
+    async def commit(self):
+        if self.sync_session.info.get("compliance_pending_notices"):
+            raise RuntimeError("commit の失敗")
+        return await real(self)
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+
+
+def test_api_paths_enqueue_after_commit_and_not_when_commit_fails(viol, monkeypatch):
+    """API の呼び出し元（全機器の再検査・ルールの変更・例外の登録と削除）: commit のあとに投入し、commit に失敗したら投入しない"""
+    c, admin, dl = viol["c"], viol["admin"], viol["delay"]
+    d1, d2 = viol["devs"]
+    rule = viol["rule"]
+    cs.save_config(d1["id"], HTTP_ON, "test")
+    cs.save_config(d2["id"], HTTP_ON, "test")
+
+    # 1) POST /compliance/run が commit に失敗 → 通知なし（結果も保存されない）
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            c.post("/api/compliance/run", headers=admin)
+    assert not _mine(viol)
+    res = c.get("/api/compliance/results", params={"rule_id": rule["id"]}, headers=admin).json()
+    assert {x["status"] for x in res} == {"pass"}
+
+    # 2) 成功すれば、リクエストの中の commit のあとに 1 件
+    assert c.post("/api/compliance/run", headers=admin).status_code == 200
+    assert _mine(viol) == _ids(d1, d2)  # 2 台とも、1 回ずつ
+
+    # 3) ルールの変更（PUT）: 一度合格に戻してから、パターンを変えて再び違反にする
+    for d in (d1, d2):
+        cs.save_config(d["id"], HTTP_OFF, "test")
+    assert c.post("/api/compliance/run", headers=admin).status_code == 200
+    dl.reset_mock()
+    for d in (d1, d2):
+        cs.save_config(d["id"], HTTP_ON, "test")
+    body = {"name": rule["name"], "match_type": "contains", "expect": "absent", "pattern": "ip http server",
+            "severity": "high", "platforms": ["arista_eos"], "description": "変更", "enabled": True}
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            c.put(f"/api/compliance/rules/{rule['id']}", json=body, headers=admin)
+    assert not _mine(viol)
+    r = c.put(f"/api/compliance/rules/{rule['id']}", json=body, headers=admin)
+    assert r.status_code == 200, r.text
+    assert _mine(viol) == _ids(d1, d2)
+
+    # 4) 例外の削除: 除外が外れて違反に戻る → commit のあとに通知
+    ex = c.post("/api/compliance/exceptions", json={"rule_id": rule["id"], "device_id": d1["id"], "reason": "更改予定"},
+                headers=admin)
+    assert ex.status_code == 201, ex.text
+    dl.reset_mock()
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            c.delete(f"/api/compliance/exceptions/{ex.json()['id']}", headers=admin)
+    assert not _mine(viol)  # 例外の削除そのものは先に保存済み。再検査の保存に失敗したので、結果は「除外」のまま・通知なし
+    res = c.get("/api/compliance/results", params={"rule_id": rule["id"], "device_id": d1["id"]}, headers=admin).json()
+    assert [x["status"] for x in res] == ["exempt"]
+    # 次の再検査で違反に戻り、そのとき初めて通知される（通知が失われたままにならない）
+    assert c.post("/api/compliance/run", headers=admin).status_code == 200
+    assert _mine(viol) == _ids(d1)
+    dl.reset_mock()
+    # 例外の登録（POST）は、除外になる → 通知なし
+    ex2 = c.post("/api/compliance/exceptions", json={"rule_id": rule["id"], "device_id": d1["id"], "reason": "更改予定"},
+                 headers=admin)
+    assert ex2.status_code == 201 and not _mine(viol)
+    assert c.delete(f"/api/compliance/exceptions/{ex2.json()['id']}", headers=admin).status_code == 204
+    assert _mine(viol) == _ids(d1)  # 削除の再検査 → 違反に戻る → commit のあとに通知
+
+
+def test_worker_paths_enqueue_after_commit_and_recheck_expired(viol, monkeypatch):
+    """worker の呼び出し元（収集後の検査・スケジュールの検査・期限切れの例外の再検査）も、commit のあとにだけ投入する"""
+    from datetime import timedelta
+
+    from app.core.timeutil import utcnow
+    from app.models.compliance import ComplianceException
+    from app.services import compliance as svc
+
+    c, admin, dl, rule = viol["c"], viol["admin"], viol["delay"], viol["rule"]
+    d1, d2 = viol["devs"]
+
+    # 収集後の検査（_check_compliance）
+    cs.save_config(d1["id"], HTTP_ON, "test")
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            asyncio.run(worker._check_compliance(d1["id"], "admin", "ref-w1"))
+    assert not _mine(viol)
+    asyncio.run(worker._check_compliance(d1["id"], "admin", "ref-w1"))
+    assert _mine(viol) == _ids(d1) and dl.call_args.args[1] == "ref-w1"
+
+    # スケジュールの検査（_scheduled_compliance）
+    _make_pass(viol)
+    cs.save_config(d2["id"], HTTP_ON, "test")
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            asyncio.run(worker._scheduled_compliance([d1["id"], d2["id"]], "schedule:x", "ref-w2", ""))
+    assert not _mine(viol)
+    res = asyncio.run(worker._scheduled_compliance([d1["id"], d2["id"]], "schedule:x", "ref-w2", ""))
+    assert "new_violations" in res and "notices" not in res  # 活動記録（detail）に入る戻り値の形は従来どおり
+    assert _mine(viol) == _ids(d2) and dl.call_args.args[1] == "ref-w2"
+
+    # 期限切れの例外の再検査（recheck_expired_exceptions）: 例外が切れて違反に戻る
+    _make_pass(viol)
+    cs.save_config(d1["id"], HTTP_ON, "test")
+    ex = c.post("/api/compliance/exceptions", json={"rule_id": rule["id"], "device_id": d1["id"], "reason": "更改予定"},
+                headers=admin).json()
+    assert not _mine(viol)  # 例外で除外 → 違反として通知しない
+
+    async def expire():
+        async with AsyncSessionLocal() as db:
+            x = await db.get(ComplianceException, ex["id"])
+            x.expires_at = utcnow() - timedelta(minutes=1)
+            await db.commit()
+    asyncio.run(expire())
+
+    async def recheck():
+        async with AsyncSessionLocal() as db:
+            return await svc.recheck_expired_exceptions(db)
+    with monkeypatch.context() as m:
+        _fail_commit_with_notice(m)
+        with pytest.raises(RuntimeError):
+            asyncio.run(recheck())
+    assert not _mine(viol)  # 再検査の commit に失敗 → 通知なし
+    c.delete(f"/api/compliance/exceptions/{ex['id']}", headers=admin)
+
+    # 成功する場合（別の例外で）: ルールごとの commit のあとに 1 件
+    _make_pass(viol)
+    cs.save_config(d2["id"], HTTP_ON, "test")
+    ex2 = c.post("/api/compliance/exceptions", json={"rule_id": rule["id"], "device_id": d2["id"], "reason": "更改予定"},
+                 headers=admin).json()
+    assert not _mine(viol)
+    ex = ex2
+    asyncio.run(expire())
+    assert asyncio.run(recheck()) == 1
+    assert _mine(viol) == _ids(d2)
+    c.delete(f"/api/compliance/exceptions/{ex2['id']}", headers=admin)

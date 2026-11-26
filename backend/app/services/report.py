@@ -457,18 +457,6 @@ async def build_report(db: AsyncSession, kind: str, start: datetime, end: dateti
 # ---------------------------------------------------------------- 通知手段ごとの本文
 
 
-def _break_md(s: str) -> str:
-    """Markdown のリンク `[x](url)` を偽のリンクとして出させない（機器名・ルール名は利用者・機器が決められる）"""
-    while "](" in s:
-        s = s.replace("](", "]​(")
-    return s
-
-
-def _slack_escape(s: str) -> str:
-    """Slack の mrkdwn で `<!channel>` などが働かないよう &・<・> を置き換える（Slack の公式のエスケープ）"""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
 def _section_lines(sec: Section, n: int) -> list[str]:
     shown = sec.top[:n]
     out = list(sec.lines)
@@ -498,7 +486,7 @@ def _slack_text(title: str, body: str, facts: list[tuple[str, str]], url: str | 
                 cut: bool = False) -> str:
     """Slack の本文。エスケープした本文のあとにリンクを付ける。cut なら、リンクを含めて SLACK_MAX に収まるよう本文を切る
     （エスケープ（&amp; など）の途中では切らない）"""
-    text = _slack_escape("\n".join([f"*{title}*", body] + [f"*{k}*\n{v}" for k, v in facts]))
+    text = notify.slack_escape("\n".join([f"*{title}*", body] + [f"*{k}*\n{v}" for k, v in facts]))
     link = f"\n<{url}|{link_text}>" if url else ""
     if cut and len(text) + len(link) > SLACK_MAX:
         head = text[:SLACK_MAX - len(link) - 1]
@@ -523,11 +511,10 @@ def build_payload(kind: str, report: Report) -> dict:
             if len(payload["text"]) <= SLACK_MAX:
                 return payload
         elif kind == "discord":
-            facts = [(k, _break_md(v)) for k, v in facts]
-            payload = notify._message("discord", title, facts, url, link_text, COLOR, _break_md(body))
+            payload = notify._message("discord", title, facts, url, link_text, COLOR, body)  # リンクの無害化は _message が行う
             e = payload["embeds"][0]
             total = len(title) + len(e.get("description", "")) + sum(len(f["name"]) + len(f["value"]) for f in e["fields"])
-            if total <= DISCORD_TOTAL and all(len(v) <= DISCORD_FIELD for _, v in facts):
+            if total <= DISCORD_TOTAL and all(len(notify.break_md(v)) <= DISCORD_FIELD for _, v in facts):
                 return payload
         else:  # teams（長さの保険は notify._teams_card の中）
             payload = notify._message("teams", title, facts, url, link_text, COLOR, body)

@@ -96,6 +96,7 @@ pull_source() { # $1 = リポジトリ
   PULLED_DIR="$1"
 }
 # .env の値を 1 つ読む（前後の引用符と CR は取り除く。.env 自体は書き換えない）
+# lib/os.sh の ncm_env_get（import_cert.sh が使う）と同じ出力。lib を読む前にも使うので、ここにも置いている
 env_get() { # $1 = キー, $2 = .env
   sudo sed -n "s/^$1=//p" "$2" | tail -1 | tr -d '\r' | sed -e "s/^[\"']//" -e "s/[\"']\$//"
 }
@@ -314,10 +315,15 @@ fi
 PROJECT_NAME=$(basename "$INSTALL_DIR")
 # .env のバックアップ（root のみ読める場所へ）。.env を作った直後、または更新で最初に変える前に取る
 backup_env() {
-  echo "[INFO] Backing up .env..."
-  sudo mkdir -p "$ENV_BACKUP_DIR"
-  sudo chmod 700 "$ENV_BACKUP_DIR"
-  sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
+  if declare -F ncm_backup_env >/dev/null; then
+    ncm_backup_env "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR" "$TS"  # lib/os.sh（import_cert.sh と共通）
+  else
+    # lib が古い（リポジトリの外に置いた新しい setup.sh を、古いチェックアウトに対して実行した場合）: 従来の手順
+    echo "[INFO] Backing up .env..."
+    sudo mkdir -p "$ENV_BACKUP_DIR"
+    sudo chmod 700 "$ENV_BACKUP_DIR"
+    sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
+  fi
 }
 if [ "$FIRST_INSTALL" -eq 1 ] && sudo podman volume exists "${PROJECT_NAME}_postgres_data" 2>/dev/null; then
   echo ""

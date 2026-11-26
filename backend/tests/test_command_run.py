@@ -363,6 +363,45 @@ def test_validate_for_platform_reports_position():
     assert svc.validate_for_platform("cisco_ios", [" show clock "]) == ["show clock"]
 
 
+@pytest.mark.parametrize("raw,expect", [
+    ("\n\n  \nshow clock\n12:00\n\n\n", "show clock\n12:00"),  # 先頭・末尾の空行を取り除く
+    ("a\n\nb", "a\n\nb"),  # 中の空行は残す
+    ("  indented\n    more\n \t\n", "  indented\n    more"),  # 最初・最後の行のインデントは残す
+    ("\r\n\r\nabc\r\n\r\n", "abc"),  # CRLF
+    ("abc  \n", "abc  "), ("\n\n   \n", ""), ("", ""), ("x", "x"),
+])
+def test_trim_blank_lines(raw, expect):
+    assert svc.trim_blank_lines(raw) == expect
+
+
+def test_blank_lines_are_trimmed_before_clip_and_do_not_change_limits_or_grouping():
+    """保存時（build_outputs）に先頭・末尾の空行を取り除く。上限・「切り捨て」の判定・chars は、取り除いたあとの文字数で行い、
+    同じ出力ごとのまとめ（group_outputs）は、空行の有無で分かれない"""
+    with mock.patch.object(settings, "COMMAND_RUN_MAX_OUTPUT", 4):
+        # 空行を入れて 4 文字を超えていても、中身が 4 文字なら切らない
+        items, used = svc.build_outputs(["a"], ["\n\nabcd\n\n\n"], run_budget=1000)
+        assert items[0] == {"command": "a", "output": "abcd", "truncated": False, "chars": 4} and used == 4
+        items, used = svc.build_outputs(["a"], ["\n\nabcdefgh\n\n"], run_budget=1000)
+        assert items[0]["output"] == "abcd" and items[0]["truncated"] and items[0]["chars"] == 8 and used == 4
+    # 実行全体の枠も、取り除いたあとの文字数で数える
+    items, used = svc.build_outputs(["a", "b"], ["\n\n" + "x" * 10 + "\n\n", "\n" + "y" * 10], run_budget=15)
+    assert [i["output"] for i in items] == ["x" * 10, "y" * 5] and used == 15 and [i["truncated"] for i in items] == [False, True]
+    # 空行だけの出力は空になる（切り捨てにならない）
+    items, used = svc.build_outputs(["a"], ["\n\n  \n"], run_budget=0)
+    assert items[0]["output"] == "" and not items[0]["truncated"] and used == 0
+    # 中の空行は残る
+    assert svc.build_outputs(["a"], ["\na\n\nb\n"], 100)[0][0]["output"] == "a\n\nb"
+    # まとめ: 先頭・末尾の空行だけが違う出力は同じ組になる（保存済みの古い結果は、従来どおり末尾の空行だけを無視する）
+    stored = [svc.build_outputs(["c"], [raw], 100)[0] for raw in ("\nok\n\n", "ok", "\n\nok", "ok2")]
+    res = [{"result_id": f"r{i}", "device_id": str(i), "device_name": f"Core-SW0{i}", "outputs": it}
+           for i, it in enumerate(stored, 1)]
+    groups = svc.group_outputs(["c"], res)[0]["groups"]
+    assert [g["count"] for g in groups] == [3, 1] and groups[0]["truncated"] is False
+    old = [{"result_id": "o1", "device_id": "1", "device_name": "A", "outputs": [{"output": "ok\n\n", "truncated": False}]},
+           {"result_id": "o2", "device_id": "2", "device_name": "B", "outputs": [{"output": "ok", "truncated": False}]}]
+    assert svc.group_outputs(["c"], old)[0]["groups"][0]["count"] == 2
+
+
 def test_output_clip_and_group():
     items, used = svc.build_outputs(["a", "b"], ["x" * 10, "y" * 10], run_budget=15)
     assert [i["output"] for i in items] == ["x" * 10, "y" * 5] and used == 15
