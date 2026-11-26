@@ -27,7 +27,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"  # 本番のコンテナ（python:3.12-slim）と合わせる
@@ -61,7 +61,7 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://unused:unused@127.0.0.1:5432/unused
       REDIS_URL: redis://127.0.0.1:6379/0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"  # 本番のコンテナ（python:3.12-slim）と合わせる
@@ -87,7 +87,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -107,7 +107,7 @@ jobs:
       TRIVY_SHA256: c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
       TRIVY_DISABLE_VEX_NOTICE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Trivy のインストール（ハッシュを確認）
         run: |
           f="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"

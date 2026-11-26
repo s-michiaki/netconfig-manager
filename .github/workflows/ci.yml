@@ -25,7 +25,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"  # 本番のコンテナ（python:3.12-slim）と合わせる
@@ -65,7 +65,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"  # 本番のコンテナ（node:22-alpine）と合わせる
@@ -88,7 +88,7 @@ jobs:
       IMAGE: docker.io/library/nginx:1.30-alpine  # frontend/Dockerfile の prod ステージと合わせる
       NGINX_MIN: 1.30.7  # 2026-11-18 公開の脆弱性（HTTP/2・TLS 1.3 など）の修正版（#17）
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Dockerfile と同じイメージか・修正済みの版か
         run: |
           grep -qx "FROM $IMAGE AS prod" frontend/Dockerfile || { echo "frontend/Dockerfile の prod ステージと IMAGE が違います"; exit 1; }
@@ -150,7 +150,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
