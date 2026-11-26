@@ -36,7 +36,7 @@ def env(monkeypatch):
     with TestClient(app) as c:
         admin = login(c, "admin", "initial-pass-123")
         t = uid()
-        c.post("/api/users/", json={"username": f"fb-{t}", "password": "password-1234", "role": "viewer"}, headers=admin)
+        user = c.post("/api/users/", json={"username": f"fb-{t}", "password": "password-1234", "role": "viewer"}, headers=admin).json()
         h = login(c, f"fb-{t}", "password-1234")
         hook = HOOK.format(950, t)
         assert c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook, "on_change": False,
@@ -49,6 +49,9 @@ def env(monkeypatch):
         yield {"c": c, "admin": admin, "sent": sent, "hook": hook, "r": r, "scheduled": scheduled, "devs": devs}
         for d in devs:
             c.delete(f"/api/devices/{d['id']}", headers=admin)
+        # テスト用の DB はファイル間で共有される。「すべての機器」が対象の通知設定が残ると、あとのテストの件数に混ざる
+        # （ユーザーを消すと、そのユーザーの通知設定も消える）
+        c.delete(f"/api/users/{user['id']}", headers=admin)
 
 
 def mine(env):
@@ -135,19 +138,22 @@ def test_destinations_by_device_group(env):
     c, admin, devs = env["c"], env["admin"], env["devs"]
     t = uid()
     g = c.post("/api/device-groups/", json={"name": f"fb-g-{t}"}, headers=admin).json()
-    c.post("/api/users/", json={"username": f"fbg-{t}", "password": "password-1234", "role": "viewer"}, headers=admin)
-    h = login(c, f"fbg-{t}", "password-1234")
-    hook2 = HOOK.format(951, t)
-    assert c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook2, "on_change": False,
-                                                 "on_failure": True, "on_system": False, "all_devices": False,
-                                                 "device_group_ids": [g["id"]]},
-                 headers=h).status_code == 200
-    c.put(f"/api/devices/{devs[0]['id']}", json={"group_id": g["id"]}, headers=admin)
-    for d in devs[:3]:
-        worker.queue_failure_notification(d["id"], "e", "manual", None)
-    worker.flush_failure_notifications()
-    assert mine(env)[0]["embeds"][0]["title"] == "収集失敗: 3 台"  # すべての機器を受け取る通知先
-    other = [p for _, u, p in env["sent"] if u == hook2]
-    assert len(other) == 1 and other[0]["embeds"][0]["title"] == f"収集失敗: {devs[0]['name']}"  # グループの 1 台だけ
-    c.put(f"/api/devices/{devs[0]['id']}", json={"group_id": None}, headers=admin)
-    c.delete(f"/api/device-groups/{g['id']}", headers=admin)
+    user = c.post("/api/users/", json={"username": f"fbg-{t}", "password": "password-1234", "role": "viewer"}, headers=admin).json()
+    try:
+        h = login(c, f"fbg-{t}", "password-1234")
+        hook2 = HOOK.format(951, t)
+        assert c.put("/api/notifications/me", json={"mode": "custom", "discord_webhook": hook2, "on_change": False,
+                                                     "on_failure": True, "on_system": False, "all_devices": False,
+                                                     "device_group_ids": [g["id"]]},
+                     headers=h).status_code == 200
+        c.put(f"/api/devices/{devs[0]['id']}", json={"group_id": g["id"]}, headers=admin)
+        for d in devs[:3]:
+            worker.queue_failure_notification(d["id"], "e", "manual", None)
+        worker.flush_failure_notifications()
+        assert mine(env)[0]["embeds"][0]["title"] == "収集失敗: 3 台"  # すべての機器を受け取る通知先
+        other = [p for _, u, p in env["sent"] if u == hook2]
+        assert len(other) == 1 and other[0]["embeds"][0]["title"] == f"収集失敗: {devs[0]['name']}"  # グループの 1 台だけ
+    finally:  # 途中で落ちても、作ったユーザー・通知設定・グループを残さない
+        c.put(f"/api/devices/{devs[0]['id']}", json={"group_id": None}, headers=admin)
+        c.delete(f"/api/users/{user['id']}", headers=admin)  # 通知設定も一緒に消える
+        c.delete(f"/api/device-groups/{g['id']}", headers=admin)

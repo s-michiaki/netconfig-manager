@@ -86,8 +86,17 @@ export default function MailServerTab() {
   const [pasted, setPasted] = useState("");
 
   const apply = (s: MailServer) => { setData(s); setForm(toForm(s)); };
-  const load = useCallback(async () => apply((await api.get<MailServer>("/mail/server")).data), []);
-  useEffect(() => { load().catch((e) => setError(errorMessage(e))); }, [load]);
+  // alive: 画面を開いたときの読み込みが、閉じた（または 2 重に走った）あとに届いても、入力中の値を上書きしない
+  // （開発サーバーの React.StrictMode は、画面を開いたときの読み込みを 2 回走らせる）
+  const load = useCallback(async (alive: () => boolean = () => true) => {
+    const s = (await api.get<MailServer>("/mail/server")).data;
+    if (alive()) apply(s);
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    load(() => alive).catch((e) => { if (alive) setError(errorMessage(e)); });
+    return () => { alive = false; };
+  }, [load]);
 
   if (!form || !data) return <p className="ntf-muted">{error || "読み込み中..."}</p>;
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setForm({ ...form, [k]: v });

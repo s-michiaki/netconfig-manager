@@ -532,6 +532,25 @@ def test_invalid_value_in_env_file_stops_before_containers_are_recreated(box, li
     no_leak(box, r)
 
 
+@pytest.mark.parametrize("line,reason", [
+    ("OUTBOUND_PROXY=http://proxy.example.test:3128 # 社内のプロキシ", "パスなどを付けないでください"),
+    ("OUTBOUND_PROXY=HTTP://proxy.example.test:3128", "http:// は小文字で書いてください（HTTP:// のような"),
+    (f"OUTBOUND_PROXY=Http://user01:{PASSWORD}@proxy.example.test:3128", "http:// は小文字で書いてください"),
+])
+def test_env_file_proxy_error_adds_common_causes(alma, line, reason):
+    """アプリより厳しい検査（行末のコメント・大文字のスキーム）で止まるとき、よくある原因を添える（値は出さない）"""
+    all_installed(alma)
+    text = OLD_ENV + line + "\n"
+    alma.env_file(text)
+    r = run(alma, stdin="")
+    assert r.returncode == 1 and reason in r.stdout, r.stdout + r.stderr
+    assert "行末にコメントを書けません" in r.stdout and "http:// は小文字で書いてください" in r.stdout
+    assert "proxy.example.test" not in r.stdout and "社内のプロキシ" not in r.stdout  # 値は出さない
+    no_leak(alma, r)
+    assert alma.count("podman-compose") == 0 and alma.count("git -C") == 0
+    assert (alma.install / ".env").read_bytes() == text.encode()
+
+
 def test_invalid_proxy_in_env_file_stops_update(alma):
     all_installed(alma)
     text = OLD_ENV + f"OUTBOUND_PROXY=socks5://user01:{PASSWORD}@proxy.example.test:1080\n"
@@ -680,6 +699,45 @@ def test_ca_with_private_key_is_rejected(alma):
     assert r.returncode == 1 and "秘密鍵が入っています。証明書だけのファイルにしてください" in r.stdout
     assert "MIIEsecret" not in r.stdout
     assert alma.count("podman") == 0 and not (alma.install / "backend" / "build-ca").exists()
+
+
+def test_ca_size_limit_is_the_same_as_the_app():
+    """setup.sh の CA の大きさの上限は、アプリ（起動時の検査）の値と同じ"""
+    from app.core import outbound
+
+    r = sh_lib('echo "$NCM_PROXY_CA_MAX_BYTES"')
+    assert r.returncode == 0 and int(r.stdout) == outbound.CA_MAX_BYTES == 5 * 1024 * 1024
+
+
+def _ca_of_size(n):
+    """CA_PEM の前に、説明の行（証明書のブロックの外）を足して、ちょうど n バイトにする"""
+    pad = n - len(CA_PEM.encode())
+    return "#" * (pad - 1) + "\n" + CA_PEM
+
+
+def test_ca_over_size_limit_stops_before_containers_are_recreated(alma):
+    all_installed(alma)
+    from app.core import outbound
+
+    make_ca(alma, text=_ca_of_size(outbound.CA_MAX_BYTES + 1))
+    env_text = OLD_ENV + "OUTBOUND_CA_FILE=outbound-ca.pem\n"
+    alma.env_file(env_text)
+    r = run(alma, stdin="")
+    assert r.returncode == 1 and "CA のファイルが大きすぎます（上限 5MB" in r.stdout, r.stdout + r.stderr
+    assert alma.count("git -C") == 0 and alma.count("podman") == 0
+    assert (alma.install / ".env").read_bytes() == env_text.encode()
+    assert not (alma.install / "backend" / "build-ca").exists()
+
+
+def test_ca_at_size_limit_is_accepted(alma):
+    all_installed(alma)
+    from app.core import outbound
+
+    make_ca(alma, text=_ca_of_size(outbound.CA_MAX_BYTES))
+    alma.env_file(OLD_ENV + "OUTBOUND_CA_FILE=outbound-ca.pem\n")
+    r = run(alma, stdin="", NCM_OS_CA_BUNDLE=str(os_bundle(alma, OTHER_PEM)))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "大きすぎます" not in r.stdout
 
 
 def test_ca_build_copy_has_certificate_blocks_only_and_openssl_checks_each(alma):

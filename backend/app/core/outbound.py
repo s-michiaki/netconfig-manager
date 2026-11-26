@@ -39,6 +39,10 @@ from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
+# CA のファイルの大きさの上限（バイト）。超えると起動時エラー。
+# scripts/lib/proxy.sh の NCM_PROXY_CA_MAX_BYTES と同じ値にする（tests/test_proxy_scripts.py が一致を確かめる）
+CA_MAX_BYTES = 5 * 1024 * 1024
+
 # 追加で信頼する CA の置き場所（コンテナの中）。ホストの certs-outbound/ を読み取り専用でマウントする（compose）
 CA_DIR = "/etc/netconfig/outbound"
 # 常に直接つなぐ宛先（compose のサービス名と localhost）。NO_PROXY に書かなくてよい
@@ -317,10 +321,10 @@ def load_ca_file(path: str) -> list:
         hint = f"（{path}）"
     try:
         with open(path, "rb") as f:
-            data = f.read(5 * 1024 * 1024 + 1)
+            data = f.read(CA_MAX_BYTES + 1)
     except OSError:
         raise ValueError(f"OUTBOUND_CA_FILE のファイルを読めません{hint}") from None
-    if len(data) > 5 * 1024 * 1024:
+    if len(data) > CA_MAX_BYTES:
         raise ValueError(f"OUTBOUND_CA_FILE のファイルが大きすぎます{hint}")
     if b"PRIVATE KEY-----" in data:
         raise ValueError(f"OUTBOUND_CA_FILE に秘密鍵が入っています。CA 証明書だけを置いてください{hint}")

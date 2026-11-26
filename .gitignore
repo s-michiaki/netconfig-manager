@@ -20,3 +20,5 @@ backend/build-ca/*
 !backend/build-ca/README.md
 frontend/build-ca/*
 !frontend/build-ca/README.md
+# TypeScript のビルドの途中経過（tsc -b が作る）
+frontend/tsconfig.tsbuildinfo

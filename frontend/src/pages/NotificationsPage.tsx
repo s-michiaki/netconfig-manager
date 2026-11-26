@@ -323,13 +323,20 @@ function MyTab({ deviceGroups }: { deviceGroups: DeviceGroup[] }) {
   const [test, setTest] = useState<Record<string, string> | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  // alive: 画面を開いたときの読み込みが、閉じた（または 2 重に走った）あとに届いても、入力中の値を上書きしない
+  // （開発サーバーの React.StrictMode は、画面を開いたときの読み込みを 2 回走らせる）
+  const load = useCallback(async (alive: () => boolean = () => true) => {
     const r = await api.get<MyNotification>("/notifications/me");
+    if (!alive()) return;
     setData(r.data);
     setMode(r.data.mode);
     setForm(initForm(r.data));
   }, []);
-  useEffect(() => { load().catch((e) => setError(errorMessage(e))); }, [load]);
+  useEffect(() => {
+    let alive = true;
+    load(() => alive).catch((e) => { if (alive) setError(errorMessage(e)); });
+    return () => { alive = false; };
+  }, [load]);
 
   const save = async () => {
     setBusy(true); setError(""); setMsg("");

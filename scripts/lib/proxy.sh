@@ -34,6 +34,8 @@ NCM_PROXY_ALWAYS_DIRECT="localhost,127.0.0.1,::1,db,redis,backend,worker,beat,fr
 # 追加の CA を写す先のファイル名（certs-outbound/ の中・各ビルドコンテキストの build-ca/ の中）
 NCM_PROXY_CA_IMPORT_NAME="outbound-ca.pem"
 NCM_PROXY_BUILD_CA_NAME="outbound-ca.crt"   # update-ca-certificates は .crt だけを読む
+# CA のファイルの大きさの上限（バイト）。アプリ（backend/app/core/outbound.py の CA_MAX_BYTES）と同じ 5MB。超えるとアプリは起動できない
+NCM_PROXY_CA_MAX_BYTES=5242880
 
 _NCM_PX_URL=""; _NCM_PX_SRC=""; _NCM_PX_NO=""; _NCM_PX_NO_USER=""; _NCM_PX_CA=""; _NCM_PX_CA_SRC=""
 _NCM_PX_GIT_BUNDLE=""; _NCM_PX_MODE="preserve"; _NCM_PX_KEEP=(); _NCM_PX_NOTES=(); _NCM_PX_ERR=""; _NCM_PX_ENVFILE=""
@@ -188,6 +190,8 @@ ncm_proxy_check() {
       _NCM_PX_ERR="https:// のプロキシには対応していません（http:// で書いてください。宛先との HTTPS の通信は、プロキシまでが http:// でも暗号化されたままです）"; return 1 ;;
     [Ss][Oo][Cc][Kk][Ss]*://*)
       _NCM_PX_ERR="SOCKS のプロキシには対応していません（HTTP のプロキシ http://ホスト:ポート だけに対応しています）"; return 1 ;;
+    [Hh][Tt][Tt][Pp]://*)   # 小文字の http:// は上で通っているので、ここに来るのは HTTP:// などの大文字まじり
+      _NCM_PX_ERR="http:// は小文字で書いてください（HTTP:// のような大文字まじりは使えません）"; return 1 ;;
     *://*)
       _NCM_PX_ERR="http:// で始まる形で書いてください（http://[ユーザー:パスワード@]ホスト:ポート）"; return 1 ;;
     *)
@@ -274,7 +278,8 @@ ncm_proxy_load() {
   # 環境変数の値が不正なとき（スキームの無い host:port・https://・socks など。勝手に読み替えない）は、使わずに今までどおり直接つなぐ
   if [ -n "$e_px" ]; then
     if ! ncm_proxy_check "$e_px"; then
-      _NCM_PX_ERR="プロキシの設定（.env の OUTBOUND_PROXY）が正しくありません: ${_NCM_PX_ERR}"
+      # よくある原因を添える（アプリの検査より厳しいため、行末のコメント・大文字のスキームで止まる。値は出さない）
+      _NCM_PX_ERR="プロキシの設定（.env の OUTBOUND_PROXY）が正しくありません: ${_NCM_PX_ERR}。よくある原因: 行末にコメントを書けません（# 以降を消すか、コメントを別の行にしてください）／http:// は小文字で書いてください"
       return 1
     fi
     _NCM_PX_URL="$e_px"; _NCM_PX_SRC=".env の OUTBOUND_PROXY"
@@ -356,6 +361,13 @@ ncm_proxy_load() {
     if ! _ncm_px_exists "$_NCM_PX_CA"; then
       _NCM_PX_ERR="追加で信頼する CA（${src}）のファイルがありません: ${_NCM_PX_CA}"
       [ -n "$_NCM_PX_CA_IMPORT" ] || _NCM_PX_ERR="${_NCM_PX_ERR}（${dir}/certs-outbound/ に置いてください）"
+      _NCM_PX_CA=""; return 1
+    fi
+    # 大きさはアプリと同じ上限（超えるとアプリが起動できないので、コンテナを作り直す前に止める）。中身を読む前に確かめる
+    local bytes
+    bytes=$(_ncm_px_cat "$_NCM_PX_CA" | wc -c || true)
+    if [ "${bytes//[[:space:]]/}" -gt "$NCM_PROXY_CA_MAX_BYTES" ] 2>/dev/null; then
+      _NCM_PX_ERR="CA のファイルが大きすぎます（上限 $((NCM_PROXY_CA_MAX_BYTES / 1024 / 1024))MB。アプリは超えると起動できません）: ${_NCM_PX_CA}（${src}）"
       _NCM_PX_CA=""; return 1
     fi
     pem=$(_ncm_px_cat "$_NCM_PX_CA" || true)
