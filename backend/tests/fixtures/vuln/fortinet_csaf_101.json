@@ -1,0 +1,128 @@
+{
+ "document": {
+  "title": "Out-of-bound write in example daemon",
+  "category": "Fortinet PSIRT Advisories",
+  "csaf_version": "2.0",
+  "tracking": {
+   "id": "FG-IR-99-101",
+   "initial_release_date": "2099-01-10T00:00:00",
+   "current_release_date": "2099-01-12T00:00:00",
+   "status": "final",
+   "version": "0"
+  }
+ },
+ "product_tree": {
+  "branches": [
+   {
+    "category": "vendor",
+    "name": "Fortinet PSIRT",
+    "branches": []
+   }
+  ]
+ },
+ "vulnerabilities": [
+  {
+   "cve": "CVE-2099-1101",
+   "title": "FortiOS - CRITICAL - FG-IR-99-101",
+   "scores": [
+    {
+     "products": [
+      "FortiOS"
+     ],
+     "cvss_v3": {
+      "version": "3.1",
+      "baseScore": 9.6,
+      "baseSeverity": "CRITICAL"
+     }
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "FortiOS >=7.4.0|<=7.4.2",
+     "FortiOS >=7.2.0|<=7.2.6",
+     "FortiOS 6.4 all versions"
+    ],
+    "known_not_affected": [
+     "FortiOS-7.4.3",
+     "FortiOS-7.2.7"
+    ]
+   },
+   "remediations": [
+    {
+     "category": "vendor_fix",
+     "details": "作り物",
+     "product_ids": [
+      "FortiOS"
+     ]
+    }
+   ]
+  },
+  {
+   "cve": "CVE-2099-1101",
+   "title": "FortiProxy - CRITICAL - FG-IR-99-101",
+   "scores": [
+    {
+     "products": [
+      "FortiProxy"
+     ],
+     "cvss_v3": {
+      "version": "3.1",
+      "baseScore": 9.6,
+      "baseSeverity": "CRITICAL"
+     }
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "FortiProxy >=7.4.0|<=7.4.2",
+     "FortiProxy 1.2 all versions"
+    ],
+    "known_not_affected": [
+     "FortiProxy-7.4.3"
+    ]
+   },
+   "remediations": [
+    {
+     "category": "vendor_fix",
+     "details": "作り物",
+     "product_ids": [
+      "FortiProxy"
+     ]
+    }
+   ]
+  },
+  {
+   "cve": "CVE-2099-1101",
+   "title": "FortiOS-6K7K - CRITICAL - FG-IR-99-101",
+   "scores": [
+    {
+     "products": [
+      "FortiOS-6K7K"
+     ],
+     "cvss_v3": {
+      "version": "3.1",
+      "baseScore": 9.6,
+      "baseSeverity": "CRITICAL"
+     }
+    }
+   ],
+   "product_status": {
+    "known_affected": [
+     "FortiOS-6K7K 7.0.10"
+    ],
+    "known_not_affected": [
+     "FortiOS-6K7K-7.0.12"
+    ]
+   },
+   "remediations": [
+    {
+     "category": "vendor_fix",
+     "details": "作り物",
+     "product_ids": [
+      "FortiOS-6K7K"
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -7,7 +7,10 @@ _WEAK_SECRETS = {"change-me-in-production", "changeme", "secret", "your_jwt_secr
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore",
+        hide_input_in_errors=True,  # 不正な値（鍵・認証情報つき URL）をエラーに出さない
+    )
 
     DATABASE_URL: str = "postgresql+asyncpg://netconfig:changeme@localhost:5432/netconfig"
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -145,6 +148,28 @@ class Settings(BaseSettings):
     SNMP_TIMEOUT: float = Field(default=3.0, gt=0, le=30)
     SNMP_RETRIES: int = Field(default=1, ge=0, le=5)
 
+    # --- 脆弱性（CVE）とサポート終了日（EOL）の管理（services/vuln_*.py。既定は無効） ---
+    # 有効にすると、毎日 1 回、外部（Palo Alto・Fortinet・CISA・endoflife.date）から製品単位の情報を取得して機器の OS バージョンと
+    # 照合する。機器名・IP・バージョンは外部へ送らない（取得する URL に含めない）。無効のあいだは外部へ一切つながない
+    VULN_ENABLED: bool = False
+    VULN_FETCH_HOUR: int = Field(default=4, ge=0, le=23)  # 毎日この時刻（TIMEZONE）以降の最初の判定で取得する
+    # 使う情報源（カンマ区切り）。paloalto=Palo Alto の勧告 / fortinet=Fortinet の勧告（FortiOS）/
+    # kev=CISA の悪用確認済み一覧 / eol=endoflife.date のサポート終了日
+    VULN_SOURCES: str = "paloalto,fortinet,kev,eol"
+
+    # --- 外部への接続（インターネットへの HTTP(S)。app/core/outbound.py） ---
+    # 対象: Discord・Slack・Teams の Webhook、メールの OAuth 2.0 のトークンの取得、脆弱性情報の取得。
+    # 外部 Git（https://）は git に環境変数で渡す（services/git_export.py）。SMTP・SSH・踏み台・DB・Redis は通さない
+    # プロキシ（http://[ユーザー:パスワード@]ホスト:ポート。http:// だけ。空なら直接つなぐ）。
+    # ユーザー名・パスワードの記号は URL エンコードで書く（@ → %40 など）。環境変数の HTTPS_PROXY などは見ない
+    OUTBOUND_PROXY: str = ""
+    # プロキシを通さない宛先（カンマ区切り。ホスト名・ドメイン（後方一致）・IP・CIDR。* はすべて直接）。
+    # localhost・ループバック・コンテナ名（db・redis など）は書かなくても常に直接つなぐ
+    OUTBOUND_NO_PROXY: str = ""
+    # 追加で信頼する CA 証明書（PEM。HTTPS の中身を検査するプロキシの CA など）。ホストの certs-outbound/ に置いた
+    # ファイルの名前（コンテナの中では OUTBOUND_CA_DIR の下）か、コンテナの中の絶対パス。空なら追加しない
+    OUTBOUND_CA_FILE: str = ""
+
     # --- 通知 ---
     # 利用者がブラウザで開く URL（例: https://netconfig.example.local）。通知に画面へのリンクを付けるのに使う。空ならリンクなし
     PUBLIC_URL: str = ""
@@ -178,6 +203,37 @@ class Settings(BaseSettings):
                 "(例: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\")"
             ) from e
         return v
+
+    @field_validator("OUTBOUND_PROXY")
+    @classmethod
+    def _check_outbound_proxy(cls, v: str) -> str:
+        from app.core import outbound  # 遅く読む（outbound は settings を読む）
+
+        v = v.strip()
+        outbound.parse_proxy(v)  # 不正なら ValueError（値・認証情報は文に入れない）
+        return v
+
+    @field_validator("OUTBOUND_NO_PROXY")
+    @classmethod
+    def _check_outbound_no_proxy(cls, v: str) -> str:
+        from app.core import outbound
+
+        outbound.parse_no_proxy(v)  # 不正な項目があれば ValueError
+        return v.strip()
+
+    @field_validator("OUTBOUND_CA_FILE")
+    @classmethod
+    def _check_outbound_ca(cls, v: str) -> str:
+        from app.core import outbound
+
+        v = v.strip()
+        if v:
+            outbound.load_ca_file(outbound.resolve_ca_path(v))  # 読めない・PEM でない・証明書が無い → ValueError
+        return v
+
+    @property
+    def vuln_sources(self) -> list[str]:
+        return [x.strip().lower() for x in self.VULN_SOURCES.split(",") if x.strip()]
 
     @property
     def cors_origins(self) -> list[str]:

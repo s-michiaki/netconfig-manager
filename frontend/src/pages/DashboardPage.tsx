@@ -29,6 +29,8 @@ interface Dashboard {
   changes: { last_24h: number; last_7d: number; recent: Change[] };
   compliance: { rules: number; by_severity: { high: number; medium: number; low: number }; violations: number; devices: number };
   schedules: { active: number; upcoming: Upcoming[] };
+  // 脆弱性（VULN_ENABLED のときだけ。無効なら null）: 未確認の該当（確定）の件数、うち悪用確認済み、サポート終了まで eol_days 日以内の機器
+  vuln?: { open: number; kev: number; devices: number; eol_soon: number; eol_ended: number; eol_days: number } | null;
 }
 
 const TRIGGER: Record<string, string> = { manual: "手動", schedule: "スケジュール" };
@@ -117,6 +119,14 @@ export default function DashboardPage() {
           {data.startup.enabled && (data.startup.unsaved > 0 || data.startup.targets > 0) && (
             <Tile label="保存されていない変更" value={data.startup.unsaved} to="/devices" tone={data.startup.unsaved ? "warn" : "good"}
                   sub={data.startup.unsaved ? `running を startup に保存し忘れた機器（対象 ${data.startup.targets} 台）` : `対象 ${data.startup.targets} 台はすべて保存済み`} />
+          )}
+          {data.vuln && (
+            <Tile label="脆弱性" value={data.vuln.open} to="/vulns" tone={data.vuln.kev ? "bad" : data.vuln.open || data.vuln.eol_soon ? "warn" : "good"}
+                  sub={<>
+                    {data.vuln.open ? `未確認の該当（${data.vuln.devices} 台）・うち悪用確認済み ${data.vuln.kev} 件` : "未確認の該当はありません"}
+                    <br />
+                    {`サポート終了まで ${data.vuln.eol_days} 日以内: ${data.vuln.eol_soon} 台${data.vuln.eol_ended ? `（終了済み ${data.vuln.eol_ended} 台）` : ""}`}
+                  </>} />
           )}
           <Tile label="コンプライアンス違反" value={cp.violations} to="/compliance" tone={sev.high ? "bad" : cp.violations ? "warn" : cp.rules ? "good" : undefined}
                 sub={cp.rules === 0 ? "ルールが登録されていません"

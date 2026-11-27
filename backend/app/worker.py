@@ -15,6 +15,10 @@ Celeryワーカー定義
 - ping_monitor: Ping監視の常時監視（PING_MONITOR_INTERVAL_SEC ごと。応答なし・復旧を通知）
 - git_export_sync: コンフィグ履歴を外部 Git へ push（GIT_EXPORT_URL を設定したとき。収集で変わったときと 1 時間ごと）
   （収集の失敗は flush_failure_notifications で NOTIFY_FAILURE_BATCH_SEC 秒ごとにまとめて送る）
+- fetch_vulns: 脆弱性・サポート終了日の外部からの取得（beat が毎時に判定。VULN_ENABLED のときだけ、1 日 1 回）。
+  あわせて、サポート終了日が近いことの通知（1 日 1 回まで）
+- import_fortinet_advisories: 管理者が指定した Fortinet の過去の勧告の取り込み
+- send_vuln_notification: 新しく脆弱性に該当した機器と勧告の通知（照合の commit のあとに投入される）
 - poll_snmp / collect_fw_hits_all / collect_fw_hits_device: モニタリング（試験導入。MONITORING_ENABLED のときだけ動く）
 収集に成功したら、その機器のコンプライアンスチェックも行う。
 収集の結果・スケジュールの実行などはアクティビティログに記録する（ref で同じ実行の記録をまとめる）
@@ -28,11 +32,13 @@ from zoneinfo import ZoneInfo
 
 import redis
 from celery import Celery
+from celery.signals import worker_ready
 from croniter import croniter
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.core import outbound
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, CommandResult, CommandRun, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
@@ -43,6 +49,7 @@ from app.services import collect_state, config_service, failure_batch, fw_hits, 
 from app.services import command_run as command_run_svc
 from app.services import ping_monitor as ping_monitor_svc
 from app.services import report as report_svc
+from app.services import vuln_service as vuln_svc
 from app.services.activity import SYSTEM_ACTOR, record
 from app.services.audit import purge_old
 from app.services.compliance import recheck_expired_exceptions as _recheck_expired
@@ -60,12 +67,14 @@ from app.services.ignore_rules import load_patterns as load_ignore_patterns
 from app.services.notify import (
     notify_change,
     notify_drift,
+    notify_eol,
     notify_failure,
     notify_failures,
     notify_inventory,
     notify_ping,
     notify_unsaved,
     notify_violations,
+    notify_vulns,
     wants_any,
 )
 from app.services.ping import PingUnavailable
@@ -77,6 +86,13 @@ celery_app = Celery(
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
+
+
+@worker_ready.connect
+def _log_outbound(**_kw) -> None:
+    """worker の起動時に、外部への接続の設定を 1 行（プロキシはホスト:ポートと認証の有無だけ）"""
+    outbound.startup_log(logger)
+
 
 celery_app.conf.update(
     task_serializer="json",
@@ -133,6 +149,11 @@ celery_app.conf.update(
             "task": "app.worker.send_periodic_reports",
             "schedule": 3600.0,
         },
+        # 脆弱性・サポート終了日の取得: 毎時に「今が取る時刻か・今日は取得済みか」を判定する（無効のときは何もしない）
+        "fetch-vulns": {
+            "task": "app.worker.fetch_vulns",
+            "schedule": 3600.0,
+        },
         "purge-audit-logs": {
             "task": "app.worker.purge_audit_logs",
             "schedule": 24 * 3600.0,
@@ -143,6 +164,7 @@ celery_app.conf.update(
 # このウィンドウ内に直近のcron発火時刻があれば実行する（beat の60秒間隔の揺らぎを吸収）
 SCHEDULE_WINDOW = timedelta(seconds=90)
 COLLECT_LOCK_TIMEOUT = 900
+VULN_FETCH_LOCK_TIMEOUT = 1800  # 脆弱性の取得の最大（vuln_service.MAX_FETCH_SECONDS = 約 16 分）より長くする（テストで確認）
 # 同じ機器へ SSH で入る処理（コンフィグ収集・FW ヒット数の取得）は1つずつにする。
 # FortiGate は接続のたびに console の output を変えて終了時に戻すため、重なると片方の出力がページングで止まる
 SSH_LOCK_WAIT = 300  # 収集は、ほかの SSH 処理が終わるのを最大この秒数待つ
@@ -461,6 +483,12 @@ def collect_device_config(
                 _run_async(_check_compliance(device_id, actor, ref))
             except Exception:  # noqa: BLE001 - 検査の失敗で収集を失敗扱いにしない
                 logger.exception("コンプライアンスチェックに失敗しました device=%s", device_id)
+        if result.success and result.inventory and (result.inventory.get("os_version") or result.inventory.get("model")) \
+                and settings.VULN_ENABLED:
+            try:  # OS バージョンが変わったかもしれないので、その機器だけ照合し直す（外部へはつながない）
+                _run_async(_reconcile_vulns(device_id))
+            except Exception:  # noqa: BLE001 - 照合の失敗で収集を失敗扱いにしない
+                logger.exception("脆弱性の照合に失敗しました device=%s", device_id)
         if not result.success and not will_retry:
             try:
                 if _run_async(_wants("failure")):
@@ -810,6 +838,12 @@ async def _check_compliance(device_id: str, actor: str | None = None, ref: str |
         await db.commit()
 
 
+async def _reconcile_vulns(device_id: str) -> None:
+    async with _sessionmaker()() as db:
+        await vuln_svc.reconcile(db, device_ids=[device_id])
+        await db.commit()
+
+
 async def _recheck_expired_exceptions() -> int:
     async with _sessionmaker()() as db:
         return await _recheck_expired(db)
@@ -851,6 +885,122 @@ def send_periodic_reports():
     if result["sent"] or result["failed"]:
         logger.info("定期レポート: %s", result)
     return result
+
+
+async def _fetch_vulns(force: bool) -> dict:
+    async with _sessionmaker()() as db:
+        sources = vuln_svc.active_sources() if force else await vuln_svc.due_sources(db)
+        if not sources:
+            return {"due": []}
+        return await vuln_svc.run_fetch(db, sources)
+
+
+async def _eol_notices() -> dict:
+    """サポート終了日が近いことの通知（毎日 VULN_FETCH_HOUR 時以降の最初の判定。1 日 1 回まで）
+
+    印（どの段階まで知らせたか）は、送信が済んでから確定する。すべての宛先で失敗したら印を残さず、次の毎時の判定で
+    送り直す（1 つでも届いた・通知する設定が無いときは確定して、二重には送らない）。脆弱性の取得と同じロックの中で呼ぶ
+    """
+    if vuln_svc.local_now().hour < settings.VULN_FETCH_HOUR:
+        return {"sent": 0, "failed": 0}
+    async with _sessionmaker()() as db:
+        groups, cursor = await vuln_svc.plan_eol_notices(db)
+        if not groups or not await wants_any(db, "vuln"):
+            await vuln_svc.save_eol_notice_state(db, cursor)
+            await db.commit()
+            return {"sent": 0, "failed": 0, "groups": len(groups)}
+        result = await notify_eol(db, groups)
+        if result.get("sent") or not result.get("failed"):
+            await vuln_svc.save_eol_notice_state(db, cursor)
+            await db.commit()
+        return {**result, "groups": len(groups)}
+
+
+@celery_app.task
+def send_vuln_notification(items: list):
+    """新しく脆弱性に該当した機器と勧告の通知。items: [[機器ID, [[勧告 ID, 題, 重大度, CVSS, KEV], ...]], ...]"""
+    async def run():
+        async with _sessionmaker()() as db:
+            return await notify_vulns(db, items)
+
+    try:
+        return _run_async(run())
+    except Exception:  # noqa: BLE001
+        logger.exception("脆弱性の通知に失敗しました")
+        return {"error": True}
+
+
+@celery_app.task
+def import_fortinet_advisories(ids: list[str], actor: str | None = None):
+    """Fortinet の過去の勧告の取り込み（管理者が API から投入）。結果は vuln_sources の fortinet_import に残す（画面に出す）
+
+    毎日の取得と同じロックを取る（同時に Fortinet へ要求しない）。取れなければ「取得中」として終わる
+    """
+    if not settings.VULN_ENABLED:
+        return {"disabled": True}
+
+    async def save(state: dict) -> None:
+        async with _sessionmaker()() as db:
+            await vuln_svc.set_import_state(db, state)
+            await db.commit()
+
+    base = {"by": actor, "ids": ids, "at": utcnow().isoformat()}
+    lock = _redis().lock("netconfig:vuln-fetch", timeout=VULN_FETCH_LOCK_TIMEOUT)
+    if not lock.acquire(blocking=False):
+        _run_async(save({**base, "status": "busy",
+                         "message": "取得の途中のため、取り込めませんでした。しばらくしてからやり直してください"}))
+        return {"busy": True}
+
+    async def run():
+        async with _sessionmaker()() as db:
+            return await vuln_svc.import_fortinet(db, ids)
+
+    try:
+        results = _run_async(run())
+        _run_async(save({**base, "status": "done", "results": results, "finished_at": utcnow().isoformat()}))
+        return {"results": len(results)}
+    except Exception:  # noqa: BLE001
+        logger.exception("Fortinet の勧告の取り込みに失敗しました")
+        _run_async(save({**base, "status": "error", "message": "想定外のエラーで取り込めませんでした（ログを確認してください）"}))
+        return {"error": True}
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
+
+
+@celery_app.task
+def fetch_vulns(force: bool = False):
+    """脆弱性・サポート終了日を外部から取得する（beat が毎時に呼ぶ。force は管理者の「いま取得」）。
+
+    VULN_ENABLED=false（既定）なら何もしない（外部へはつながない）。取得するのは製品単位の公開情報だけで、機器の情報は送らない
+    """
+    if not settings.VULN_ENABLED:
+        return {"disabled": True}
+    lock = _redis().lock("netconfig:vuln-fetch", timeout=VULN_FETCH_LOCK_TIMEOUT)
+    if not lock.acquire(blocking=False):
+        return {"skipped": True}
+    try:
+        try:
+            result = _run_async(_fetch_vulns(force))
+        except Exception:  # noqa: BLE001 - 次の毎時にやり直せる。ほかのタスクに影響させない
+            logger.exception("脆弱性情報の取得に失敗しました")
+            return {"error": True}
+        if result.get("sources"):
+            logger.info("脆弱性情報の取得: %s", {k: ("ok" if v["ok"] else "failed") for k, v in result["sources"].items()})
+        try:  # サポート終了日の通知も同じロックの中で（2 つの worker が同時に送らない）
+            eol = _run_async(_eol_notices())
+            if eol.get("sent") or eol.get("failed") or eol.get("groups"):
+                result["eol_notices"] = eol
+        except Exception:  # noqa: BLE001 - 次の毎時にやり直せる
+            logger.exception("サポート終了日の通知に失敗しました")
+        return result
+    finally:
+        try:
+            lock.release()
+        except redis.exceptions.LockError:
+            pass
 
 
 @celery_app.task

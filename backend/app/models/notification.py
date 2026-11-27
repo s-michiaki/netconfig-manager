@@ -7,7 +7,8 @@
 - 対象は機器のグループ（device_group_ids、未分類は include_ungrouped）。all_devices なら全機器
 - 通知する内容は on_change（コンフィグの変更）/ on_violation（コンプライアンス違反の発生）/ on_failure（収集の失敗）/
   on_system（システムの異常。対象の機器グループに関係なく送る）/ on_inventory（機器情報の変化）/
-  on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）/ on_unsaved（保存し忘れ）
+  on_ping（Ping監視の応答なし・復旧）/ on_drift（基準の世代からのずれ）/ on_unsaved（保存し忘れ）/
+  on_vuln（脆弱性に新しく該当・サポート終了日が近い）
 - 定期レポート（report）: 期間内の状況のまとめを週次・月次で送る（送る内容の選択 on_* とは別。対象の機器の絞り込みは同じ）
 - 通知先は Discord / Slack / Teams（ワークフロー）の Webhook と、メールの宛先（email_to。送信の設定は models/mail.py）
 - Webhook URL は秘密情報（知っていれば誰でも投稿できる）なので暗号化して保存する
@@ -78,6 +79,9 @@ class NotificationSetting(Base):
     on_drift: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     # 保存し忘れ（startup と running の不一致に変わったとき）。既定は無効
     on_unsaved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
+    # 脆弱性・サポート期限（新しく該当になった機器と勧告、サポート終了日の 180・90・30 日前と当日）。既定は無効。
+    # VULN_ENABLED のときだけ届く
+    on_vuln: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa_false())
     # 定期レポート（services/report.py）。off / weekly / monthly / both。送る日・時刻は REPORT_HOUR（settings.TIMEZONE）
     report: Mapped[str] = mapped_column(String(8), nullable=False, default="off", server_default="off")
     # 種類ごとに、その種類が「無効 → 有効」になった時刻（API が入れる。無効になると NULL）。これより前に終わった期間は送らない
@@ -98,7 +102,7 @@ class NotificationSetting(Base):
         return [x for x in v if isinstance(x, str)]
 
     def wants(self, event: str) -> bool:
-        """この設定で通知する内容か（change / violation / failure / system / inventory / ping / drift / unsaved）"""
+        """この設定で通知する内容か（change / violation / failure / system / inventory / ping / drift / unsaved / vuln）"""
         return bool(getattr(self, f"on_{event}", False))
 
     def matches(self, device_group_id: str | None) -> bool:

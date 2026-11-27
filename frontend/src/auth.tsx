@@ -26,6 +26,8 @@ export const PERM = {
   ACTIVITY_READ: "activity:read",
   MONITOR_READ: "monitor:read",
   SYSTEM_READ: "system:read",
+  VULN_READ: "vuln:read",
+  VULN_WRITE: "vuln:write",
 } as const;
 export type Perm = (typeof PERM)[keyof typeof PERM];
 

@@ -226,14 +226,13 @@ def test_google_user_refresh(smtp, token_server):
 def test_token_errors_are_readable(monkeypatch):
     import io
     import urllib.error
-    import urllib.request
 
     def boom(req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 401, "x", {}, io.BytesIO(json.dumps(
             {"error": "invalid_client", "error_description": "AADSTS7000215: Invalid client secret provided.\r\nTrace"}
         ).encode()))
 
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(mail, "_urlopen", boom)
     with pytest.raises(mail.MailError) as e:
         mail.fetch_token(cfg(auth="microsoft", ms_tenant_id="t1", ms_client_id="a", ms_client_secret="b"))
     assert str(e.value) == "トークンを取得できません（AADSTS7000215: Invalid client secret provided.）"

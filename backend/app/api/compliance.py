@@ -40,6 +40,7 @@ from app.services.compliance import (
 router = APIRouter()
 
 Severity = Literal["high", "medium", "low"]
+MAX_REMEDIATION_LENGTH = 4000
 SEVERITY_ORDER = {"high": 3, "medium": 2, "low": 1}
 
 
@@ -54,9 +55,17 @@ class RuleIn(BaseModel):
     section_pattern: Annotated[str, StringConstraints(max_length=500)] | None = None
     severity: Severity = "medium"
     enabled: bool = True
+    # 直し方（設定の例）・根拠・分野。画面ではテキストとして表示するだけで、機器へは送らない
+    remediation: Annotated[str, StringConstraints(max_length=MAX_REMEDIATION_LENGTH)] | None = None
+    reference: Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)] | None = None
+    category: Annotated[str, StringConstraints(strip_whitespace=True, max_length=32)] | None = None
 
     @model_validator(mode="after")
     def _valid(self):
+        # 空の欄は未設定（NULL）にそろえる
+        self.remediation = self.remediation if self.remediation and self.remediation.strip() else None
+        self.reference = self.reference or None
+        self.category = self.category or None
         # 正規表現の検証（compile）はここではしない。イベントループを止めないよう、route で _check_rule（スレッド）を通す
         if self.scope != "section":
             self.section_pattern = None
@@ -81,6 +90,9 @@ class RuleOut(BaseModel):
     section_pattern: str | None
     severity: str
     enabled: bool
+    remediation: str | None = None
+    reference: str | None = None
+    category: str | None = None
     updated_by: str | None
     updated_at: datetime | None
     pass_count: int = 0
@@ -143,6 +155,7 @@ def _rule_out(r: ComplianceRule, counts: dict[str, dict[str, int]] | None = None
         id=r.id, name=r.name, description=r.description, platforms=load_platforms(r.platforms),
         match_type=r.match_type, expect=r.expect, pattern=r.pattern, scope=r.scope,
         section_pattern=r.section_pattern, severity=r.severity, enabled=r.enabled,
+        remediation=r.remediation, reference=r.reference, category=r.category,
         updated_by=r.updated_by, updated_at=r.updated_at,
         pass_count=c.get("pass", 0), fail_count=c.get("fail", 0), error_count=c.get("error", 0),
         exempt_count=c.get("exempt", 0), exception_count=c.get("_exceptions", 0),
@@ -160,6 +173,9 @@ def _apply(r: ComplianceRule, payload: RuleIn, username: str) -> None:
     r.section_pattern = payload.section_pattern
     r.severity = payload.severity
     r.enabled = payload.enabled
+    r.remediation = payload.remediation
+    r.reference = payload.reference
+    r.category = payload.category
     r.updated_by = username
 
 
@@ -174,7 +190,7 @@ async def _check_rule(payload: RuleIn) -> None:
 
 
 def _rule_detail(payload: RuleIn) -> dict:
-    return {k: v for k, v in payload.model_dump().items() if k not in ("name", "description")}
+    return {k: v for k, v in payload.model_dump().items() if k not in ("name", "description", "remediation")}
 
 
 async def _rule_counts(db: AsyncSession) -> dict[str, dict[str, int]]:

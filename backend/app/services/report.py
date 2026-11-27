@@ -403,6 +403,55 @@ async def _ping_section(db, scope, setting, s_utc, e_utc) -> tuple[Section, int]
     return Section("ping", "Ping監視", "period", lines, "応答なしの多い対象", top, len(counts)), total
 
 
+VULN_EOL_REPORT_DAYS = 180  # 「サポート終了が近い」とみなす日数（通知の最初の段階と同じ）
+TOP_EOL = 5
+
+
+async def _vuln_section(db, scope, s_utc, e_utc) -> Section:
+    """脆弱性・サポート期限（VULN_ENABLED のときだけ）: 期間内に新しく該当になった件数、未確認の該当の多い機器（いま）、
+    サポート終了が近い機器（いま）。勧告の題・本文・直し方は入れない（件数と機器名だけ）"""
+    from app.models.vuln import VulnAdvisory, VulnMatch
+    from app.services import vuln_service
+
+    new = (await db.execute(select(VulnMatch.device_id).where(
+        VulnMatch.confidence == "confirmed", VulnMatch.first_seen >= s_utc, VulnMatch.first_seen < e_utc))).scalars().all()
+    n_new = sum(1 for d in new if d in scope)
+    per: dict[str, list[int]] = {}
+    for d, sev, kev in (await db.execute(
+            select(VulnMatch.device_id, VulnAdvisory.severity, VulnAdvisory.kev)
+            .join(VulnAdvisory, VulnAdvisory.id == VulnMatch.advisory_id)
+            .where(VulnMatch.state == "open", VulnMatch.stale.is_(False), VulnMatch.confidence == "confirmed"))).all():
+        if d in scope:
+            t = per.setdefault(d, [0, 0, 0, 0])  # 件数・重大・高・悪用確認済み
+            t[0] += 1
+            t[1] += sev == "critical"
+            t[2] += sev == "high"
+            t[3] += bool(kev)
+    names = {d: v["name"] for d, v in scope.items()}
+    ranked = sorted(per.items(), key=lambda kv: (-kv[1][3], -kv[1][1], -kv[1][2], -kv[1][0], names[kv[0]]))
+    top = [f"{_name(names[d])}: {t[0]} 件（重大 {t[1]}・高 {t[2]}・悪用確認済み {t[3]}）" for d, t in ranked[:TOP_DEVICES]]
+    eol_rows = await vuln_service.eol_rows(db)
+    today = vuln_service.local_today()
+    devs = [d for d in (await db.execute(select(Device))).scalars() if d.id in scope and scope[d.id]["active"]]
+    soon = []
+    for d in devs:
+        e = vuln_service.device_eol(eol_rows, d, today)
+        days = [(x["days_left"], x["eol_date"]) for x in (e["os"], e["hardware"]) if x]
+        if days and min(days)[0] <= VULN_EOL_REPORT_DAYS:
+            soon.append((min(days), d.name))
+    soon.sort()
+    lines = [f"期間内に新しく該当になった件数: {n_new} 件",
+             f"未確認の該当（いまの件数）: {sum(t[0] for t in per.values())} 件（{len(per)} 台。"
+             f"うち悪用確認済み {sum(t[3] for t in per.values())} 件）",
+             f"サポート終了まで {VULN_EOL_REPORT_DAYS} 日以内・終了済みの機器（いまの件数）: {len(soon)} 台"]
+    for (days, day), name in soon[:TOP_EOL]:
+        when = f"あと {days} 日" if days > 0 else ("きょう終了" if days == 0 else "終了済み")
+        lines.append(f"・{_name(name)}: {when}（{day.replace('-', '/')}）")
+    if len(soon) > TOP_EOL:
+        lines.append(f"…ほか {len(soon) - TOP_EOL} 台")
+    return Section("vuln", "脆弱性・サポート期限", "mixed", lines, "未確認の該当が多い機器", top, len(per))
+
+
 async def _admin_section(db, s_utc, e_utc, now) -> Section:
     """管理者向け: 機器に結び付かない項目（数だけ。利用者名・メールアドレス・トークン名は入れない）"""
     no_mfa = (await db.execute(select(func.count()).select_from(User).where(
@@ -447,6 +496,8 @@ async def build_report(db: AsyncSession, kind: str, start: datetime, end: dateti
     state = await _state_section(db, scope)
     ping, n_ping = await _ping_section(db, scope, setting, s_utc, e_utc)
     sections = [collect, change, comp, state, ping]
+    if settings.VULN_ENABLED:
+        sections.append(await _vuln_section(db, scope, s_utc, e_utc))
     if include_admin:
         sections.append(await _admin_section(db, s_utc, e_utc, now))
     empty = not (n_fail or n_change or n_comp or n_ping)

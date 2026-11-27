@@ -12,3 +12,13 @@ celerybeat-schedule*
 # HTTPS の証明書・秘密鍵（scripts/import_cert.sh で配置。リポジトリには入れない）
 certs/*
 !certs/README.md
+# 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE。README.md だけを入れて、ディレクトリを常に用意する）
+certs-outbound/*
+!certs-outbound/README.md
+# ビルド用の追加の CA の写し（setup.sh がビルドの直前に certs-outbound/ から置く。README.md だけを入れる）
+backend/build-ca/*
+!backend/build-ca/README.md
+frontend/build-ca/*
+!frontend/build-ca/README.md
+# TypeScript のビルドの途中経過（tsc -b が作る）
+frontend/tsconfig.tsbuildinfo

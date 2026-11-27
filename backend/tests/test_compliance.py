@@ -192,6 +192,55 @@ def test_rule_test_and_templates(ctx):
                       headers=op).status_code == 200, x["name"]
 
 
+def test_templates_api_has_category_remediation_reference(ctx):
+    """ひな形の一覧に、分野・直し方・根拠がある（合格・違反の例は出さない）。閲覧者も見られる"""
+    c, view = ctx["c"], ctx["view"]
+    t = c.get("/api/compliance/templates", headers=view).json()
+    assert len(t) >= 80 and len({x["name"] for x in t}) == len(t)
+    for x in t:
+        assert x["category"] and x["remediation"] and x["reference"], x["name"]
+        assert "good" not in x and "bad" not in x
+    # 機種ごとの絞り込みに使う platforms が、すべての機種のまとまりで付いている
+    platforms = {p for x in t for p in x["platforms"]}
+    assert {"cisco_ios", "cisco_nxos", "cisco_asa", "arista_eos", "juniper_junos", "fortinet", "paloalto_panos",
+            "allied_telesis_awplus", "yamaha"} <= platforms
+
+
+def test_rule_remediation_fields(ctx):
+    """直し方・根拠・分野の保存と取得、空の欄は NULL、長さの上限、権限。内容は HTML として扱わず、そのまま保存する"""
+    c, op, view, admin = ctx["c"], ctx["op"], ctx["view"], ctx["admin"]
+    name = f"fix-{uuid.uuid4().hex[:6]}"
+    text = "# 注意\nno ip http server\n<script>alert(1)</script>"
+    rule = {"name": name, "match_type": "regex", "expect": "absent", "pattern": r"^ip http server",
+            "platforms": ["cisco_ios"], "remediation": text, "reference": " 一般的な堅牢化の推奨 ",
+            "category": "管理アクセス"}
+    assert c.post("/api/compliance/rules", json=rule, headers=view).status_code == 403
+    r = c.post("/api/compliance/rules", json=rule, headers=op)
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["remediation"] == text and out["reference"] == "一般的な堅牢化の推奨" and out["category"] == "管理アクセス"
+    # 閲覧者も一覧で見られる
+    got = {x["id"]: x for x in c.get("/api/compliance/rules", headers=view).json()}[out["id"]]
+    assert got["remediation"] == text and got["category"] == "管理アクセス"
+    # 監査ログには、直し方の本文を載せない（長いため）
+    logs = c.get("/api/audit/logs", params={"action": "compliance.rule_create"}, headers=admin).json()["items"]
+    mine = [x for x in logs if x["target_name"] == name]
+    assert mine and "alert(1)" not in (mine[0]["detail"] or "") and "管理アクセス" in (mine[0]["detail"] or "")
+    # 空・空白だけの欄は NULL。更新で消せる
+    r = c.put(f"/api/compliance/rules/{out['id']}", json={**rule, "remediation": "  \n ", "reference": "", "category": None},
+              headers=op)
+    assert r.status_code == 200, r.text
+    assert (r.json()["remediation"], r.json()["reference"], r.json()["category"]) == (None, None, None)
+    # 上限（直し方 4000 文字・根拠 255 文字・分野 32 文字）
+    assert c.put(f"/api/compliance/rules/{out['id']}", json={**rule, "remediation": "x" * 4000}, headers=op).status_code == 200
+    for k, v in [("remediation", "x" * 4001), ("reference", "x" * 256), ("category", "x" * 33)]:
+        assert c.put(f"/api/compliance/rules/{out['id']}", json={**rule, k: v}, headers=op).status_code == 422, k
+    # 項目を持たない（以前の）ルールの作り方も受け付ける
+    legacy = {k: v for k, v in rule.items() if k not in ("remediation", "reference", "category")}
+    assert c.put(f"/api/compliance/rules/{out['id']}", json=legacy, headers=op).json()["remediation"] is None
+    assert c.delete(f"/api/compliance/rules/{out['id']}", headers=op).status_code == 204
+
+
 # ---------------------------------------------------------------- 正規表現の照合時間（ReDoS 対策）
 EVIL = r"^(?:a|aa)+c"  # 「a」が続く行で照合が指数関数的に長くなる
 EVIL_CONFIG = "hostname r1\n" + "a" * 40 + "\n"

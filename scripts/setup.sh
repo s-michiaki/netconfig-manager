@@ -27,6 +27,7 @@ for arg in "$@"; do
       echo "使い方: bash setup.sh [--reconfigure]"
       echo "  初回は対話形式でセットアップし、2回目以降は .env の設定のまま更新します。"
       echo "  --reconfigure  2回目以降でも設定（ポート・IP アドレスなど）を聞き直す"
+      echo "  プロキシが必要な環境: export https_proxy=http://ホスト:ポート してから実行（README「プロキシ環境での導入」）"
       exit 0 ;;
     *) echo "不明なオプションです: $arg（--help で使い方を表示）"; exit 1 ;;
   esac
@@ -34,7 +35,7 @@ done
 
 # テスト用の差し替えが設定されていれば知らせる（本番では設定しない。設定すると、バックアップ先の差し替えには
 # chmod 700 をかけ、systemd が読まない場所にユニットを書いて enable に失敗する）
-for v in NCM_ENV_BACKUP_DIR NCM_SYSTEMD_UNIT_DIR NCM_OS_RELEASE_FILE NCM_SYSTEMD_DROPIN_DIR; do
+for v in NCM_ENV_BACKUP_DIR NCM_SYSTEMD_UNIT_DIR NCM_OS_RELEASE_FILE NCM_SYSTEMD_DROPIN_DIR NCM_OS_CA_BUNDLE; do
   [ -z "${!v:-}" ] || echo "[WARN] テスト用の差し替え（$v）が設定されています"
 done
 
@@ -91,7 +92,7 @@ pull_source() { # $1 = リポジトリ
   if [ "$owner" = "$(id -un)" ]; then
     git -C "$1" pull --ff-only || return 1
   else
-    sudo -u "$owner" git -C "$1" pull --ff-only || return 1
+    ncm_sudo_out -u "$owner" git -C "$1" pull --ff-only || return 1
   fi
   PULLED_DIR="$1"
 }
@@ -101,6 +102,69 @@ env_get() { # $1 = キー, $2 = .env
   sudo sed -n "s/^$1=//p" "$2" | tail -1 | tr -d '\r' | sed -e "s/^[\"']//" -e "s/[\"']\$//"
 }
 file_hash() { sha256sum "$1" 2>/dev/null | cut -d" " -f1 || true; }
+
+# =========================
+# 外部への通信のプロキシ・追加で信頼する CA（scripts/lib/proxy.sh）
+# =========================
+# git pull より前に読む（更新の pull もプロキシを通すため）。設定は .env の OUTBOUND_PROXY・OUTBOUND_NO_PROXY・
+# OUTBOUND_CA_FILE、.env に無ければ実行時の環境変数（初回: export https_proxy=... してから実行）。
+# 外へ出るコマンド（git・dnf / apt-get・podman pull・podman-compose build）は ncm_sudo_out で実行し、プロキシの環境変数を
+# 名前で引き継ぐ（sudo は環境変数を落とすため。値はコマンドラインに出さない）。設定が無ければ sudo と同じ
+#
+# lib が無いあいだ（setup.sh だけをダウンロードした初回の、ソースの取得まで）は、環境変数のプロキシを名前で引き継ぐだけ
+# （sudo の設定で名前の引き継ぎが許されないときは、値を自分だけが読める一時ファイルに書いて root の bash に読ませる。
+#   sudo のログ・コマンドラインにはファイルのパスしか出ない。この間に使うのは sudo の引数の無い呼び出しだけ）
+BOOT_PX_FILE=""
+ncm_sudo_out() {
+  local -; set +x
+  local v keep=""
+  for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY; do [ -z "${!v:-}" ] || keep="${keep:+$keep,}$v"; done
+  if [ -z "$keep" ]; then sudo "$@"
+  elif sudo -n --preserve-env="$keep" true >/dev/null 2>&1; then sudo --preserve-env="$keep" "$@"
+  else
+    if [ -z "$BOOT_PX_FILE" ]; then
+      BOOT_PX_FILE=$(umask 077; mktemp)
+      for v in ${keep//,/ }; do printf 'export %s=%q\n' "$v" "${!v}"; done > "$BOOT_PX_FILE"
+    fi
+    # shellcheck disable=SC2016  # $1 などは root の bash の中で展開する
+    sudo bash -c '. "$1"; shift; exec "$@"' _ "$BOOT_PX_FILE" "$@"
+  fi
+}
+# 一時ファイル（git 用の CA の束・sudo に渡すプロキシの設定）を消す
+cleanup_tmp() {
+  px cleanup
+  if [ -n "$BOOT_PX_FILE" ]; then rm -f "$BOOT_PX_FILE"; BOOT_PX_FILE=""; fi
+}
+# podman-compose の出力の秘密（podman run の -e キー=値・URL の認証情報）を伏せる（lib が無ければそのまま）
+redact_out() { if declare -F ncm_redact_output >/dev/null; then ncm_redact_output; else cat; fi; }
+# lib/proxy.sh の関数を呼ぶ（lib が無い・古いときは何もしない）。px load → ncm_proxy_load
+px() { local f="ncm_proxy_$1"; shift; if declare -F "$f" >/dev/null; then "$f" "$@"; fi; }
+load_proxy_lib() { # $1 = lib/proxy.sh
+  [ -n "$1" ] || return 0
+  declare -F ncm_proxy_load >/dev/null && return 0
+  # shellcheck source=lib/proxy.sh
+  if [ -r "$1" ]; then . "$1"; elif sudo test -r "$1" 2>/dev/null; then . <(sudo cat "$1"); fi
+  return 0
+}
+PROXY_DIR=""
+setup_proxy() { # $1 = 設置場所。設定を読み、以後のコマンドに渡す（設置場所が変わったときだけ読み直す）。形式が正しくなければ止める
+  declare -F ncm_proxy_load >/dev/null || return 0
+  [ "$PROXY_DIR" != "$1" ] || return 0
+  PROXY_DIR="$1"
+  if ! ncm_proxy_load "$1"; then
+    echo "❌ $(ncm_proxy_error)"
+    echo "   値は表示していません。README「プロキシ環境での導入」の書き方（http://[ユーザー:パスワード@]ホスト:ポート）を確かめてください"
+    exit 1
+  fi
+  ncm_proxy_apply
+  ncm_proxy_describe
+}
+if [ -f "$SCRIPT_DIR/../docker-compose.prod.yml" ]; then PROXY_LIB="$SCRIPT_DIR/lib/proxy.sh"; else PROXY_LIB="$INSTALL_DIR/scripts/lib/proxy.sh"; fi
+[ -f "$PROXY_LIB" ] || PROXY_LIB=""
+load_proxy_lib "$PROXY_LIB"
+# 終了時に一時ファイル（git 用の CA の束・sudo に渡すプロキシの設定）を消す
+trap 'cleanup_tmp' EXIT
+setup_proxy "$INSTALL_DIR"
 
 # =========================
 # 更新時: 先にソースを更新し、このスクリプトが変わっていたら新しい内容でやり直す
@@ -118,6 +182,7 @@ if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALL_DIR/.env" ] && [ "${NETCONFIG_SE
   pull_source "$INSTALL_DIR" || {
     echo ""
     echo "❌ ソースを更新できませんでした（git pull に失敗）。ネットワークと、$INSTALL_DIR に手で変更したファイルが無いかを確認してください"
+    px fail_hint "ソースの更新（git pull）"
     exit 1
   }
   # 実行中のスクリプトと、更新後のリポジトリのスクリプトが違えば、新しいほうで最初からやり直す
@@ -125,6 +190,8 @@ if [ -d "$INSTALL_DIR/.git" ] && [ -f "$INSTALL_DIR/.env" ] && [ "${NETCONFIG_SE
   if [ -f "$REPO_SCRIPT" ] && [ "$BEFORE" != "$(file_hash "$REPO_SCRIPT")" ]; then
     echo "[INFO] setup.sh が更新されました。新しい内容でやり直します"
     echo ""
+    # exec では終了時の処理（trap）が動かないので、一時ファイルを先に消す。プロキシの環境変数はそのまま引き継がれる
+    cleanup_tmp
     NETCONFIG_SETUP_REEXEC=1 exec bash "$REPO_SCRIPT" "$@"
   fi
 elif [ "${NETCONFIG_SETUP_REEXEC:-0}" = "1" ]; then
@@ -153,6 +220,9 @@ if [ ! -d "$INSTALL_DIR/.git" ]; then
   read -r -p "BRANCH Please Enter [${BRANCH}]: " Red_BRANCH
   if [ -n "${Red_BRANCH}" ]; then BRANCH="${Red_BRANCH}" ; fi
 fi
+
+# 設置場所を変えたときは、そこの .env のプロキシの設定を読み直す
+setup_proxy "$INSTALL_DIR"
 
 ask "IP Address Please Enter [${IPADD}]: " Red_IPADD
 if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
@@ -228,10 +298,10 @@ if [ -z "$OS_LIB" ]; then
   echo "[INFO] OS の共通部品（scripts/lib/os.sh）が無いため、先に git を入れてソースを取得します"
   if ! command -v git >/dev/null; then
     if command -v apt-get >/dev/null; then
-      sudo apt-get update
-      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y git
+      ncm_sudo_out apt-get update
+      ncm_sudo_out env DEBIAN_FRONTEND=noninteractive apt-get install -y git
     elif command -v dnf >/dev/null; then
-      sudo dnf install -y git
+      ncm_sudo_out dnf install -y git
     else
       echo "git が見つかりません。git を入れてから再実行してください"; exit 1
     fi
@@ -242,9 +312,12 @@ if [ -z "$OS_LIB" ]; then
     echo "[INFO] Cloning $REPO_URL ($BRANCH) into $INSTALL_DIR..."
     echo "       （プライベートリポジトリの場合、Password には GitHub の Personal Access Token を入力）"
     sudo mkdir -p "$(dirname "$INSTALL_DIR")"
-    sudo git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    ncm_sudo_out git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
   fi
   PULLED_DIR="$INSTALL_DIR"  # 取得済み（後の「ソース取得」では繰り返さない）
+  # 取得したリポジトリのプロキシの部品を読み、以後は .env の設定・形式の検査・追加の CA も使う
+  load_proxy_lib "$INSTALL_DIR/scripts/lib/proxy.sh"
+  setup_proxy "$INSTALL_DIR"
   OS_LIB="$INSTALL_DIR/scripts/lib/os.sh"
   [ -r "$OS_LIB" ] || sudo test -r "$OS_LIB" || { echo "$OS_LIB が見つかりません"; exit 1; }
 fi
@@ -255,6 +328,8 @@ echo "[INFO] OS: ${NCM_OS_PRETTY:-不明}（${NCM_OS_FAMILY}）"
 if [ "$NCM_OS_LEVEL" = "unsupported" ]; then echo "対象外の OS です: $NCM_OS_NOTE"; exit 1; fi
 [ -z "$NCM_OS_NOTE" ] || echo "[WARN] $NCM_OS_NOTE"
 ncm_require_pkg_manager || exit 1
+# 追加で信頼する CA が OS に登録されていなさそうなら、登録の手順を表示する（OS の信頼の設定は変えない）
+px ca_check
 
 # =========================
 # 必要パッケージのインストール（git / podman / podman-compose）
@@ -271,7 +346,7 @@ mapfile -t EXTRA_PKGS < <(ncm_extra_packages)
 PKGS+=("${EXTRA_PKGS[@]}")
 if [ ${#PKGS[@]} -gt 0 ]; then
   echo "[INFO] Installing ${PKGS[*]}..."
-  ncm_install_packages "${PKGS[@]}"
+  ncm_install_packages "${PKGS[@]}" || { px fail_hint "パッケージの導入"; exit 1; }
 else
   echo "[INFO] git / podman / podman-compose are already installed"
 fi
@@ -283,15 +358,17 @@ if [ "$PULLED_DIR" = "$INSTALL_DIR" ]; then
   echo "[INFO] Source is up to date ($(git -C "$INSTALL_DIR" log -1 --format='%h %s' 2>/dev/null || sudo git -C "$INSTALL_DIR" log -1 --format='%h %s' 2>/dev/null || echo "$INSTALL_DIR"))"
 elif [ -d "$INSTALL_DIR/.git" ]; then
   echo "[INFO] Updating source ($INSTALL_DIR)..."
-  pull_source "$INSTALL_DIR"
+  pull_source "$INSTALL_DIR" || { px fail_hint "ソースの更新（git pull）"; exit 1; }
 else
   echo "[INFO] Cloning $REPO_URL ($BRANCH) into $INSTALL_DIR..."
   echo "       （プライベートリポジトリの場合、Password には GitHub の Personal Access Token を入力）"
   sudo mkdir -p "$(dirname "$INSTALL_DIR")"
-  sudo git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  ncm_sudo_out git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR" || { px fail_hint "ソースの取得（git clone）"; exit 1; }
 fi
 cd "$INSTALL_DIR"
 [ -f "$COMPOSE_FILE" ] || { echo "$INSTALL_DIR/$COMPOSE_FILE が見つかりません"; exit 1; }
+# 環境変数 OUTBOUND_CA_FILE でホスト上の CA を渡されたときは、certs-outbound/ へ写す（アプリも使う置き場所）
+px import_ca || exit 1
 
 # =========================
 # 導入前チェック（check_env.sh があれば実行）
@@ -301,7 +378,10 @@ if [ "$FIRST_INSTALL" -eq 0 ]; then
   echo "[INFO] Update mode: skipping pre-install check"
 elif [ -f scripts/check_env.sh ]; then
   echo "[INFO] Running pre-install check..."
-  if ! sudo bash scripts/check_env.sh -m prod | sed 's/^/       /'; then
+  CHECK_ARGS=(-m prod)
+  CHECK_CA=$(px ca_path || true)
+  [ -z "$CHECK_CA" ] || CHECK_ARGS+=(-c "$CHECK_CA")  # 追加の CA（まだ .env が無いので引数で渡す）
+  if ! ncm_sudo_out bash scripts/check_env.sh "${CHECK_ARGS[@]}" | sed 's/^/       /'; then
     read -r -p "チェックで NG がありました。続行しますか？ [y/N]: " Red_CONT
     [ "${Red_CONT}" = "y" ] || [ "${Red_CONT}" = "Y" ] || { echo "中止しました"; exit 1; }
   fi
@@ -355,9 +435,12 @@ HTTP_PORT=${HTTP_PORT}
 HTTPS_PORT=${HTTPS_PORT}
 PUBLIC_URL=
 EOF
+  # 環境変数で渡されたプロキシ・追加の CA（空の値は書かない）
+  px env_lines >> "$TMP_ENV"
   sudo install -m 600 -o root -g root "$TMP_ENV" "$INSTALL_DIR/.env"
   rm -f "$TMP_ENV"
   backup_env
+  px saved_notice
 else
   # .env を変える前に、まずバックアップを取る（壊れる前の内容を必ず残すため）
   backup_env
@@ -370,6 +453,8 @@ else
       ncm_env_append .env "$kv"
     fi
   done
+  # 環境変数で渡されたプロキシ・追加の CA で、.env にキーが無いものだけを足す（既存の行は変えない）
+  px save_missing .env
 fi
 
 # =========================
@@ -416,14 +501,27 @@ IMAGES=$( { sed -n 's#^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\).*#\1#p' "
 PULL_FAILED=()
 for img in $IMAGES; do
   echo "[INFO] Pulling $img ..."
-  if ! sudo podman pull -q "$img" >/dev/null; then
+  if ! ncm_sudo_out podman pull -q "$img" >/dev/null; then
     echo "[WARN] $img を取り直せませんでした（手元のイメージで続けます）"
     PULL_FAILED+=("$img")
   fi
 done
+[ ${#PULL_FAILED[@]} -eq 0 ] || px fail_hint "イメージの取得（podman pull）"
+# 追加で信頼する CA を、ビルドの中の apt-get・pip・npm・apk に渡す（各ビルドコンテキストの build-ca/。無ければ消す）
+px stage_build_ca "$INSTALL_DIR"
 # OS_UPGRADE: Dockerfile の OS のパッケージの更新（apt-get upgrade / apk upgrade）を、キャッシュがあっても日に 1 回はやり直す
-sudo env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" build
-sudo env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" up -d --force-recreate
+# ビルドにはプロキシの環境変数を引き継ぐ（podman build は既定で RUN に渡すが、イメージには保存しない。README「確かめ方」）
+# 出力は伏せ字のフィルタに通す（終了コードは podman-compose のもの。pipefail）
+ncm_sudo_out env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" build 2>&1 | redact_out \
+  || { rc=$?; px fail_hint "コンテナのビルド"; exit "$rc"; }
+# 起動には渡さない（podman は既定で、起動したプロセスのプロキシの環境変数をコンテナにも渡すため。認証情報が
+# podman inspect に残り、内向きの通信までプロキシへ向かう）。アプリは .env の OUTBOUND_PROXY だけを使う
+UP_ENV=()
+if declare -F ncm_proxy_is_set >/dev/null && ncm_proxy_is_set; then
+  UP_ENV=(-u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u no_proxy -u NO_PROXY)
+fi
+# podman-compose 1.0.6 は、実行する podman run の引数（-e SECRET_KEY=… -e OUTBOUND_PROXY=… など）を画面に出すので、伏せ字のフィルタに通す
+sudo env "${UP_ENV[@]}" OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" up -d --force-recreate 2>&1 | redact_out
 # 取り直し・作り直しで使われなくなった古いイメージ（名前の無いもの）を消す（ディスクの圧迫を防ぐ）
 sudo podman image prune -f >/dev/null 2>&1 || true
 

@@ -63,3 +63,56 @@ test("メールサーバーを設定し、自分の通知にメールの宛先�
     await cleanup(page);
   }
 });
+
+/**
+ * 同じ GET の 2 回目だけを遅らせる。開発サーバーは React.StrictMode で、画面を開いたときの読み込みを 2 回走らせる
+ * （負荷が高いと 2 回目の応答が操作のあとに届く）。遅れて届いた応答が、入力中の値を消さないことを確かめる
+ * 戻り値の finished: 2 回目の応答を画面に返し終えたら解決する Promise（Promise をそのまま返すと await で待ってしまうので、オブジェクトに包む）
+ */
+async function delaySecondGet(page: Page, glob: string, ms: number): Promise<{ finished: Promise<void> }> {
+  let n = 0;
+  let done!: () => void;
+  const finished = new Promise<void>((resolve) => { done = resolve; });
+  await page.route(glob, async (route) => {
+    if (route.request().method() !== "GET" || ++n !== 2) return route.continue();
+    const res = await route.fetch();
+    await new Promise((r) => setTimeout(r, ms));
+    await route.fulfill({ response: res });
+    done();
+  });
+  return { finished };
+}
+
+/** 表示の更新（React の再描画）が終わるまで待つ */
+async function settleRender(page: Page) {
+  await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+}
+
+test("画面を開いたときの読み込みの応答が遅れて届いても、入力した値が消えない（通知設定・メールサーバー）", async ({ page }) => {
+  await login(page);
+  await cleanup(page);
+  try {
+    const me = await delaySecondGet(page, "**/api/notifications/me", 1500);
+    const mail = await delaySecondGet(page, "**/api/mail/server", 1500);
+
+    await openNav(page, "/notifications");
+    await page.getByRole("radio", { name: /個別に設定する/ }).check();
+    await page.getByLabel(/^メールの宛先/).fill("ops@example.test");
+    await me.finished;
+    await settleRender(page);
+    await expect(page.getByRole("radio", { name: /個別に設定する/ })).toBeChecked();
+    await expect(page.getByLabel(/^メールの宛先/)).toHaveValue("ops@example.test");
+
+    await page.getByRole("tab", { name: "メールサーバー" }).click();
+    await page.getByRole("radio", { name: /Microsoft 365/ }).check();
+    await page.getByLabel("送信元のメールアドレス").fill("notify@example.test");
+    await mail.finished;
+    await settleRender(page);
+    await expect(page.getByRole("radio", { name: /Microsoft 365/ })).toBeChecked();
+    await expect(page.getByLabel("送信元のメールアドレス")).toHaveValue("notify@example.test");
+  } finally {
+    await page.unroute("**/api/notifications/me");
+    await page.unroute("**/api/mail/server");
+    await cleanup(page);
+  }
+});

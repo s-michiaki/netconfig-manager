@@ -4,7 +4,8 @@ import { api, errorMessage } from "../api/client";
 import { useAuth } from "../auth";
 
 /**
- * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push、コンテナのイメージの新しさ
+ * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push、コンテナのイメージの新しさ、
+ * 外部への接続（プロキシ・追加の CA。管理者は「接続を確かめる」で固定の宛先へ試せる）
  * 「止まっていることに気づけない」をなくすための画面。異常は通知設定（システムの異常）の通知先にも送られる
  *
  * 「項目」メニュー（再確認の横）: 全項目の状態を一覧で確認でき、選ぶと詳細を表示する。＋/− で画面に大きく（カードで）
@@ -31,7 +32,18 @@ interface Component {
     url?: string; branch?: string; // 外部 Git（last は GitExportState）
     images?: ImageInfo[]; pull_failed?: string[]; reported_at?: string; // コンテナのイメージ（setup.sh が伝える）
     host?: string; auth?: string; mail_last?: { at: string; ok: boolean } | null; // メール送信
+    sources?: { source: string; label: string; last_ok_at: string | null; last_error: string | null }[]; failed?: string[]; // 脆弱性情報の取得
+    // 外部への接続（プロキシはホスト:ポートと認証の有無だけ。認証情報は API も返さない）
+    proxy?: string | null; proxy_auth?: boolean; proxy_error?: string | null; no_proxy?: string[]; check_url?: string;
+    ca?: OutboundCA | null; last_check?: OutboundCheck | null;
   };
+}
+/** 追加で信頼する CA（OUTBOUND_CA_FILE） */
+interface OutboundCA { file: string; count: number; nearest_expiry?: string; days_left?: number; expired?: boolean; error?: string; }
+/** 「接続を確かめる」の結果 */
+export interface OutboundCheck {
+  result: "ok" | "proxy_unreachable" | "proxy_auth" | "cert" | "timeout" | "proxy_refused" | "config" | "error";
+  label: string; message: string; via: "proxy" | "direct" | "-"; elapsed_ms: number; target?: string; at?: string;
 }
 /** コンテナのイメージ（名前・作成日時。stale_days より前なら古い） */
 interface ImageInfo { name: string; created: string | null; age_days: number | null; }
@@ -61,6 +73,8 @@ const HELP: Record<string, string> = {
   git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
   images: "PostgreSQL・Redis と、ビルドの土台（Python・Node.js・nginx）のイメージ。setup.sh で取り直す",
   mail: "メール通知の送信（通知設定 → メールサーバー）。最後の送信の結果",
+  vuln: "脆弱性・サポート終了日の外部からの取得（.env の VULN_ENABLED=true のときだけ）。3 日以上取得できていないと注意",
+  outbound: "Webhook の送信・メールの OAuth 2.0 のトークン・脆弱性情報の取り込みで、インターネットへ出るときの経路（.env の OUTBOUND_PROXY・OUTBOUND_CA_FILE）。SMTP・機器への接続はプロキシを通しません",
 };
 
 function fmt(iso: string | null | undefined): string {
@@ -145,6 +159,20 @@ function Detail({ c }: { c: Component }) {
       </ul>
     );
   }
+  if (c.key === "vuln" && d.sources) {
+    return (
+      <ul className="sys-list">
+        {d.sources.map((x) => (
+          <li key={x.source} className="sys-wrap">
+            {x.label}: {x.last_ok_at ? `最後の成功 ${fmt(x.last_ok_at)}` : "まだ成功していません"}
+            {x.last_error ? `　失敗: ${x.last_error}` : ""}
+          </li>
+        ))}
+        <li>{"　"}<Link to="/vulns">脆弱性・サポート期限を開く →</Link></li>
+      </ul>
+    );
+  }
+  if (c.key === "outbound") return <OutboundDetail d={d} />;
   if (c.key === "images" && d.images) {
     return (
       <ul className="sys-list">
@@ -160,6 +188,59 @@ function Detail({ c }: { c: Component }) {
     );
   }
   return null;
+}
+
+/** 項目の中の操作のあとに、システム状態を取り直す合図 */
+const RELOAD_EVENT = "ncm:system-reload";
+
+function OutboundDetail({ d }: { d: Component["detail"] }) {
+  const [res, setRes] = useState<OutboundCheck | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const shown = res ?? d.last_check ?? null;
+  const target = d.check_url ? d.check_url.replace(/^https:\/\//, "").replace(/\/$/, "") : "";
+  const run = async () => {
+    setBusy(true);
+    setNote("");
+    try {
+      const r = await api.post<OutboundCheck>("/system/outbound-check");
+      setRes({ ...r.data, at: r.data.at ?? new Date().toISOString() });
+      window.dispatchEvent(new Event(RELOAD_EVENT)); // 印（正常・注意）も取り直す
+    } catch (e) {
+      setNote(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const ca = d.ca;
+  return (
+    <>
+      <ul className="sys-list">
+        <li>プロキシ: {d.proxy ? <><span className="mono">{d.proxy}</span>（認証{d.proxy_auth ? "あり" : "なし"}）</> : "使わない（直接）"}</li>
+        {!!d.no_proxy?.length && <li className="sys-wrap">プロキシを通さない宛先: <span className="mono">{d.no_proxy.join(", ")}</span></li>}
+        <li className="sys-wrap">
+          追加の CA: {!ca ? "なし" : ca.error ? <span className="form-error">{ca.error}</span> : (
+            <>{ca.count} 件（<span className="mono">{ca.file}</span>）。いちばん近い期限 {fmt(ca.nearest_expiry)}
+              {ca.expired ? " ⚠ 期限切れ" : ca.days_left != null && ca.days_left <= 30 ? ` ⚠ あと ${ca.days_left} 日` : ""}</>
+          )}
+        </li>
+        {shown && (
+          <li className="sys-wrap" data-testid="outbound-check-result">
+            確認の結果（{fmt(shown.at)}）: <b className={shown.result === "ok" ? "" : "form-error"}>{shown.label}</b>
+            {/* 文が「見出し（理由）」の形なら、見出しを繰り返さずに理由だけ */}
+            {shown.message && shown.message !== shown.label
+              ? (shown.message.startsWith(shown.label) ? shown.message.slice(shown.label.length) : `　${shown.message}`) : ""}
+            {shown.via !== "-" ? `（${shown.via === "proxy" ? "プロキシ経由" : "直接"}・${shown.elapsed_ms} ms）` : ""}
+          </li>
+        )}
+      </ul>
+      <p className="sys-sub">
+        <button className="btn btn-sm" onClick={run} disabled={busy}>{busy ? "確かめています…" : "接続を確かめる"}</button>{" "}
+        <span className="topo-muted topo-small">宛先は固定（<span className="mono">{target}</span>）。30 秒に 1 回まで</span>
+      </p>
+      {note && <p className="sys-sub form-error">{note}</p>}
+    </>
+  );
 }
 
 function GitExportDetail({ d }: { d: Component["detail"] }) {
@@ -290,7 +371,8 @@ export default function SystemPage() {
   useEffect(() => {
     load();
     const t = window.setInterval(load, 30_000);
-    return () => window.clearInterval(t);
+    window.addEventListener(RELOAD_EVENT, load);
+    return () => { window.clearInterval(t); window.removeEventListener(RELOAD_EVENT, load); };
   }, [load]);
 
   const bad = data?.components.filter((c) => c.status === "error" || c.status === "warn") ?? [];

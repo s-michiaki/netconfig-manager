@@ -153,9 +153,26 @@ def test_helpers(tmp_path):
     assert sorted(layout) == ["未分類/sw_1.txt", "未分類/sw_1_22222222.txt"]
     # HTTPS の認証情報は環境変数から返す（URL や設定ファイルに書かない）
     script = git_export._askpass_script(str(tmp_path))
-    env = {**os.environ, "NCM_GIT_USERNAME": "oauth2", "NCM_GIT_TOKEN": "tok-123"}
-    assert subprocess.run([script, "Username for 'https://x'"], env=env, capture_output=True, text=True).stdout == "oauth2"
-    assert subprocess.run([script, "Password for 'https://x'"], env=env, capture_output=True, text=True).stdout == "tok-123"
+    env = {**os.environ, "NCM_GIT_USERNAME": "oauth2", "NCM_GIT_TOKEN": "tok-123", "NCM_GIT_SCHEME": "https",
+           "NCM_GIT_HOST": "git.example.test:8443"}
+
+    def ask(prompt, **kw):
+        r = subprocess.run([script, prompt], env={**env, **kw}, capture_output=True, text=True)
+        return r.returncode, r.stdout
+
+    # 宛先の Git サーバーについての問いには答える
+    assert ask("Username for 'https://git.example.test:8443': ") == (0, "oauth2")
+    assert ask("Password for 'https://oauth2@git.example.test:8443': ") == (0, "tok-123")
+    assert ask("Password for 'https://oauth2@git.example.test:8443/net/a.git': ") == (0, "tok-123")
+    # プロキシ・ほかのホスト・別のポート・別の scheme の問いには答えない（トークンを渡さない）
+    for prompt in ("Password for 'http://user01@proxy.example.test:3128': ", "Username for 'http://proxy.example.test:3128': ",
+                   "Password for 'https://oauth2@git.example.test': ", "Password for 'https://oauth2@git.example.test:8443.evil.test': ",
+                   "Password for 'http://oauth2@git.example.test:8443': ", "Password for 'https://git.example.test:84430': ",
+                   "Password: ", ""):
+        assert ask(prompt) == (1, ""), prompt
+    assert ask("Password for 'https://oauth2@git.example.test:8443': ", NCM_GIT_HOST="") == (1, "")
+    # ホストに sh の特別な文字があっても、文字どおりに比べる（パターンとして解釈しない）
+    assert ask("Password for 'https://oauth2@a.example.test': ", NCM_GIT_HOST="*") == (1, "")
     assert json.loads(json.dumps({"ok": True}))["ok"]
 
 
@@ -188,3 +205,325 @@ def test_status_warns_url_credentials(env, monkeypatch):
     monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://u:secret@gitlab.local/a.git")
     comp = system_component(env)
     assert comp.status == "warn" and "GIT_EXPORT_TOKEN" in comp.summary and "secret" not in json.dumps(comp.detail)
+
+
+# ---------------------------------------------------------------- プロキシ（OUTBOUND_PROXY）と追加の CA
+
+
+PX_USER, PX_PASS = "git-proxy-MARKU", "pw@MARK:P"
+PX_ENC = "pw%40MARK%3AP"
+
+
+def _no_secret(text: str) -> bool:
+    import base64
+
+    tok = base64.b64encode(f"{PX_USER}:{PX_PASS}".encode()).decode()
+    return not any(s in text for s in ("MARKU", "MARK:P", PX_ENC, tok))
+
+
+@pytest.fixture
+def outbound_settings(monkeypatch):
+    for k in ("OUTBOUND_PROXY", "OUTBOUND_NO_PROXY", "OUTBOUND_CA_FILE", "GIT_EXPORT_CA_FILE", "GIT_EXPORT_TOKEN",
+              "GIT_EXPORT_SSH_KEY"):
+        monkeypatch.setattr(settings, k, "")
+    monkeypatch.setattr(settings, "GIT_EXPORT_TIMEOUT", 20)
+    # コンテナの環境に何か入っていても使わないこと（git のプロセスへは明示的に空を渡す）
+    monkeypatch.setenv("HTTPS_PROXY", "http://env-proxy.invalid:1")
+    monkeypatch.setenv("https_proxy", "http://env-proxy.invalid:1")
+
+
+@pytest.mark.parametrize("url,proxied", [
+    ("https://git.example.test/net/configs.git", True),
+    ("https://user:tok@git.example.test/net/configs.git", True),
+    ("https://intranet.example.test/net/configs.git", False),  # OUTBOUND_NO_PROXY
+    ("https://localhost:8443/net/configs.git", False),  # 内向き
+    ("git@git.example.test:net/configs.git", False),  # SSH は HTTP のプロキシを通せない（直接）
+    ("ssh://git@git.example.test/net/configs.git", False),
+    ("/srv/git/configs.git", False),
+])
+def test_proxy_env_for_git(outbound_settings, monkeypatch, url, proxied):
+    proxy = f"http://{PX_USER}:{PX_ENC}@proxy.example.test:3128"
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", proxy)
+    monkeypatch.setattr(settings, "OUTBOUND_NO_PROXY", "intranet.example.test")
+    env = git_export.proxy_env(git_export.split_url(url)[0])
+    assert set(env) == {*git_export._PROXY_VARS, "GIT_HTTP_PROXY_AUTHMETHOD"}  # 使わないときも、すべて（空で）渡す
+    vars_ = {k: v for k, v in env.items() if k != "GIT_HTTP_PROXY_AUTHMETHOD"}
+    if proxied:
+        assert env["https_proxy"] == env["HTTPS_PROXY"] == proxy
+        assert all(vars_[k] == "" for k in vars_ if k.lower() != "https_proxy")
+        assert env["GIT_HTTP_PROXY_AUTHMETHOD"] == "basic"  # 認証情報があれば最初の CONNECT から Basic
+    else:
+        assert all(v == "" for v in vars_.values()) and env["GIT_HTTP_PROXY_AUTHMETHOD"] == "anyauth"
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "")
+    env = git_export.proxy_env(url)
+    assert all(v == "" for k, v in env.items() if k != "GIT_HTTP_PROXY_AUTHMETHOD")
+    assert env["GIT_HTTP_PROXY_AUTHMETHOD"] == "anyauth"
+    # 認証なしのプロキシ・空のパスワードを明示したプロキシ
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "http://proxy.example.test:3128")
+    if proxied:
+        assert git_export.proxy_env(url)["GIT_HTTP_PROXY_AUTHMETHOD"] == "anyauth"
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", "http://user01:@proxy.example.test:3128")
+        assert git_export.proxy_env(url)["GIT_HTTP_PROXY_AUTHMETHOD"] == "basic"
+
+
+def test_plain_http_git_is_not_sent_via_proxy(outbound_settings, monkeypatch):
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "http://proxy.example.test:3128")
+    with pytest.raises(RuntimeError, match="平文"):
+        git_export.proxy_env("http://git.example.test/a.git")
+    monkeypatch.setattr(settings, "OUTBOUND_NO_PROXY", "git.example.test")
+    assert git_export.proxy_env("http://git.example.test/a.git")["http_proxy"] == ""
+
+
+def _work_repo(tmp_path):
+    repo = git.Repo.init(tmp_path / "w")
+    (tmp_path / "w" / "a.txt").write_text("x")
+    repo.index.add(["a.txt"])
+    repo.index.commit("init")
+    return repo
+
+
+def test_push_passes_proxy_by_env_only_and_scrubs_stderr(outbound_settings, monkeypatch, tmp_path, caplog):
+    """プロキシは環境変数だけで渡す（引数・.git/config に無い）。git の stderr の URL・認証情報は伏せる"""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    proxy = f"http://{PX_USER}:{PX_ENC}@proxy.example.test:3128"
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", proxy)
+    monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://git.example.test/net/configs.git")
+    seen = {}
+
+    real_execute = git.Git.execute
+
+    def fake_execute(self, command, **kw):
+        if "push" not in command:
+            return real_execute(self, command, **kw)
+        seen["cmd"], seen["env"] = list(command), dict(self._environment)
+        raise git.GitCommandError(command, 128, stderr=(
+            f"fatal: unable to access 'https://git.example.test/net/configs.git/': "
+            f"Received HTTP code 407 from proxy after CONNECT ({proxy}) Proxy-Authorization: Basic xyzxyzxyz"))
+
+    monkeypatch.setattr(git.Git, "execute", fake_execute)
+    repo = _work_repo(tmp_path)
+    with pytest.raises(RuntimeError) as e:
+        git_export.push(repo)
+    msg = str(e.value)
+    assert "プロキシの認証に失敗しました" in msg and _no_secret(msg) and "xyzxyzxyz" not in msg
+    assert seen["env"]["https_proxy"] == proxy and seen["env"]["no_proxy"] == "" and seen["env"]["ALL_PROXY"] == ""
+    assert _no_secret(" ".join(seen["cmd"])) and "proxy" not in " ".join(seen["cmd"]).lower()
+    assert _no_secret((tmp_path / "w" / ".git" / "config").read_text())
+    assert "proxy" not in (tmp_path / "w" / ".git" / "config").read_text()
+    assert _no_secret(caplog.text)
+
+
+def test_sync_error_has_no_proxy_secrets(env, outbound_settings, monkeypatch, caplog):
+    """last_error（Redis）・システム状態・アクティビティ・ログにプロキシの認証情報を残さない"""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    c, admin = env["c"], env["admin"]
+    proxy = f"http://{PX_USER}:{PX_ENC}@proxy.example.test:3128"
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", proxy)
+    monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://git.example.test/net/configs.git")
+
+    real_execute = git.Git.execute
+
+    def fake_execute(self, command, **kw):
+        if "push" not in command:
+            return real_execute(self, command, **kw)
+        raise git.GitCommandError(command, 128, stderr=f"fatal: unable to access via {proxy}: Could not resolve proxy")
+
+    cs.save_config(env["devs"][0]["id"], "hostname a\n", "manual")
+    with monkeypatch.context() as mp:
+        mp.setattr(git.Git, "execute", fake_execute)
+        res = worker.git_export_sync.apply().get()
+    assert res["ok"] is False and "接続できません" in res["error"]
+    comp = system_component(env)
+    acts = c.get("/api/activity/logs", params={"event": "export.failed"}, headers=admin).text
+    st = c.get("/api/system/status", headers=admin).text
+    for text in (json.dumps(res, ensure_ascii=False), env["r"].get(git_export.STATE_KEY).decode(),
+                 json.dumps(comp.detail, ensure_ascii=False), comp.summary, acts, st, caplog.text):
+        assert _no_secret(text), text
+
+
+@pytest.fixture(params=["body", "anyauth"])
+def authmethod(request, monkeypatch):
+    """本物の git の試験を 2 通りで回す: body=本体の proxy_env のまま（認証情報があれば basic）／
+    anyauth=GIT_HTTP_PROXY_AUTHMETHOD を上書きして「認証なしの CONNECT → 407 → 認証つきの CONNECT」の流れにする
+    （新しい git＝libcurl の既定の動き。手元の古い git でも同じ流れを確かめるため）"""
+    if request.param == "anyauth":
+        real = git_export.proxy_env
+        monkeypatch.setattr(git_export, "proxy_env", lambda url: {**real(url), "GIT_HTTP_PROXY_AUTHMETHOD": "anyauth"})
+    return request.param
+
+
+def _any_connect_has(px, header: str) -> bool:
+    return any(header in c for c in px.connects)
+
+
+def _real_push(repo, monkeypatch):
+    monkeypatch.setattr(settings, "GIT_EXPORT_URL", "https://git.example.test/net/configs.git")
+    with pytest.raises(RuntimeError) as e:
+        git_export.push(repo)
+    return str(e.value)
+
+
+def test_real_git_goes_through_proxy_with_ca_bundle(outbound_settings, monkeypatch, tmp_path, authmethod):
+    """本物の git（curl）: 環境変数のプロキシへ CONNECT し（Basic）、追加の CA を束ねたもので TLS を検証する"""
+    import base64
+
+    from fake_proxy import FakeProxy, TestCA
+
+    ca = TestCA("Example Corp CA")
+    repo = _work_repo(tmp_path)
+    tok = base64.b64encode(f"{PX_USER}:{PX_PASS}".encode()).decode()
+    # 407: プロキシの認証に失敗（認証情報は CONNECT にだけ載り、文には出ない）
+    with FakeProxy(ca, mode="407") as px:
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", px.url(PX_USER, PX_ENC))
+        msg = _real_push(repo, monkeypatch)
+    assert px.connects and all(c.startswith("CONNECT git.example.test:443") for c in px.connects)
+    assert _any_connect_has(px, f"Proxy-Authorization: Basic {tok}")
+    if authmethod == "body":
+        assert f"Proxy-Authorization: Basic {tok}" in px.connects[0]  # basic: 最初の CONNECT から付ける
+    else:  # anyauth: 認証なしの CONNECT → 407 → 認証つきの CONNECT（新しい git の既定の流れ）を通っている
+        assert "Proxy-Authorization" not in px.connects[0] and len(px.connects) >= 2
+    assert "プロキシの認証に失敗しました" in msg and _no_secret(msg), msg
+
+    def not_found(method, path, headers, body):
+        return 404, {"Content-Type": "text/plain"}, b"not found"
+
+    # HTTPS を検査するプロキシ: 追加の CA なしでは証明書エラー、OUTBOUND_CA_FILE があれば宛先（ここでは 404）まで届く
+    with FakeProxy(ca, auth=(PX_USER, PX_PASS), respond=not_found) as px:
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", px.url(PX_USER, PX_ENC))
+        msg = _real_push(repo, monkeypatch)
+        assert "証明書を確認できません" in msg and "OUTBOUND_CA_FILE" in msg, msg
+        ca_file = ca.write_pem(tmp_path / "corp-ca.pem")
+        monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(ca_file))
+        bundles = []
+        real_bundle = git_export._ca_bundle
+
+        def spy(url, tmp):
+            env, opts = real_bundle(url, tmp)
+            bundles.append((env, opts, Path(env["GIT_SSL_CAINFO"]).read_bytes()))
+            return env, opts
+
+        monkeypatch.setattr(git_export, "_ca_bundle", spy)
+        msg = _real_push(repo, monkeypatch)
+        assert "証明書" not in msg and "リポジトリが見つかりません" in msg, msg
+        assert px.inner and px.inner[0]["path"].startswith("/net/configs.git/info/refs")
+        assert _any_connect_has(px, f"Proxy-Authorization: Basic {tok}")  # プロキシの認証が通って宛先まで届いた
+    env_, opts, data = bundles[0]
+    assert not opts and ca.pem() in data and data.count(b"BEGIN CERTIFICATE") > 1  # OS の束＋追加の CA
+    assert not Path(env_["GIT_SSL_CAINFO"]).exists()  # 終わったら消す
+    assert _no_secret(msg)
+
+
+def test_ca_bundle_with_git_export_ca_file(outbound_settings, monkeypatch, tmp_path):
+    from fake_proxy import TestCA
+
+    corp, own = TestCA("Example Corp CA"), TestCA("Example Git CA")
+    own_file = own.write_pem(tmp_path / "git-ca.pem")
+    monkeypatch.setattr(settings, "GIT_EXPORT_CA_FILE", str(own_file))
+    url = "https://git.example.test/a.git"
+    # 追加の CA なし: 今までどおり（GIT_EXPORT_CA_FILE を http.sslCAInfo に）
+    assert git_export._ca_bundle(url, str(tmp_path)) == ({}, ["-c", f"http.sslCAInfo={own_file}"])
+    # 両方: GIT_EXPORT_CA_FILE ＋ OUTBOUND_CA_FILE を束ねて http.sslCAInfo に（OS の信頼は使わない）
+    monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(corp.write_pem(tmp_path / "corp.pem")))
+    env, opts = git_export._ca_bundle(url, str(tmp_path))
+    bundle = Path(opts[1].split("=", 1)[1])
+    assert env == {} and bundle.read_bytes() == own.pem() + corp.pem()
+    # SSH・ローカルのパスでは束ねない
+    assert git_export._ca_bundle("git@git.example.test:a.git", str(tmp_path)) == ({}, ["-c", f"http.sslCAInfo={own_file}"])
+
+
+def _spy_askpass(monkeypatch, tmp_path):
+    """askpass への問いを記録する（本物の askpass へそのまま渡す）"""
+    log = tmp_path / "askpass.log"
+    real = git_export._askpass_script
+
+    def wrapper(tmp):
+        inner = real(tmp)
+        p = os.path.join(tmp, "askpass-spy.sh")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(f'#!/bin/sh\nprintf "%s\\n" "$1" >> "{log}"\nexec "{inner}" "$1"\n')
+        os.chmod(p, 0o700)
+        return p
+
+    monkeypatch.setattr(git_export, "_askpass_script", wrapper)
+    return log
+
+
+def test_git_token_is_never_sent_to_proxy(outbound_settings, monkeypatch, tmp_path, authmethod):
+    """H1: ユーザー名だけのプロキシで git がプロキシのパスワードを聞いても、askpass は GIT_EXPORT_TOKEN を答えない"""
+    import base64
+
+    from fake_proxy import FakeProxy, TestCA
+
+    token = "glpat-TOKEN-MARK"
+    monkeypatch.setattr(settings, "GIT_EXPORT_TOKEN", token)
+    monkeypatch.setattr(settings, "GIT_EXPORT_USERNAME", "oauth2")
+    log = _spy_askpass(monkeypatch, tmp_path)
+    repo = _work_repo(tmp_path)
+    with FakeProxy(TestCA(), mode="407") as px:
+        # 設定の検査では弾く形（ユーザー名だけ）を、検査をすり抜けた想定で git に直接渡す
+        user_only = f"http://user01@127.0.0.1:{px.port}"
+        with pytest.raises(ValueError, match="パスワードも書いてください"):
+            from app.core import outbound
+            outbound.parse_proxy(user_only)
+        method = "anyauth" if authmethod == "anyauth" else "basic"
+        monkeypatch.setattr(git_export, "proxy_env", lambda url: {**dict.fromkeys(git_export._PROXY_VARS, ""),
+                                                                  "https_proxy": user_only, "HTTPS_PROXY": user_only,
+                                                                  "GIT_HTTP_PROXY_AUTHMETHOD": method})
+        msg = _real_push(repo, monkeypatch)
+    prompts = log.read_text() if log.exists() else ""
+    assert f"127.0.0.1:{px.port}" in prompts  # git はプロキシのパスワードを聞いた（試験が成り立っている）
+    leaked = base64.b64encode(f"user01:{token}".encode()).decode()
+    # askpass が答えないので、git は接続の前にやめる（接続したとしても、トークンは載らない）
+    assert not any(leaked in c or token in c for c in px.connects)
+    assert token not in msg
+
+
+def test_git_empty_proxy_password_is_not_asked(outbound_settings, monkeypatch, tmp_path, authmethod):
+    """user:@（空のパスワードを明示）なら、git はプロキシのパスワードを聞き返さず、空のパスワードで Basic を送る"""
+    import base64
+
+    from fake_proxy import FakeProxy, TestCA
+
+    monkeypatch.setattr(settings, "GIT_EXPORT_TOKEN", "glpat-TOKEN-MARK")
+    log = _spy_askpass(monkeypatch, tmp_path)
+    repo = _work_repo(tmp_path)
+    with FakeProxy(TestCA(), mode="407") as px:
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", f"http://user01:@127.0.0.1:{px.port}")
+        _real_push(repo, monkeypatch)
+    assert px.connects and _any_connect_has(px, "Proxy-Authorization: Basic " + base64.b64encode(b"user01:").decode())
+    assert not any("TOKEN-MARK" in c for c in px.connects)
+    assert f"127.0.0.1:{px.port}" not in (log.read_text() if log.exists() else "")
+
+
+def test_git_destination_prompt_is_still_answered(outbound_settings, monkeypatch, tmp_path, authmethod):
+    """宛先の Git サーバーの認証（401）には、今までどおり askpass がトークンを答える（プロキシ経由でも）"""
+    import base64
+
+    from fake_proxy import FakeProxy, TestCA
+
+    token = "glpat-TOKEN-MARK"
+    monkeypatch.setattr(settings, "GIT_EXPORT_TOKEN", token)
+    monkeypatch.setattr(settings, "GIT_EXPORT_USERNAME", "oauth2")
+    ca = TestCA("Example Corp CA")
+    monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(ca.write_pem(tmp_path / "ca.pem")))
+
+    def respond(method, path, headers, body):
+        if "authorization" not in headers:
+            return 401, {"WWW-Authenticate": 'Basic realm="git"'}, b""
+        return 404, {}, b""
+
+    repo = _work_repo(tmp_path)
+    with FakeProxy(ca, auth=(PX_USER, PX_PASS), respond=respond) as px:
+        monkeypatch.setattr(settings, "OUTBOUND_PROXY", px.url(PX_USER, PX_ENC))
+        msg = _real_push(repo, monkeypatch)
+    sent = [i["headers"].get("authorization") for i in px.inner]
+    assert "Basic " + base64.b64encode(f"oauth2:{token}".encode()).decode() in sent
+    tok = base64.b64encode(f"{PX_USER}:{PX_PASS}".encode()).decode()
+    assert _any_connect_has(px, f"Proxy-Authorization: Basic {tok}")  # プロキシの認証が通った
+    leaked = base64.b64encode(f"oauth2:{token}".encode()).decode()
+    assert not any(token in c or leaked in c for c in px.connects)  # プロキシへの CONNECT にはトークンを載せない
+    assert token not in msg and _no_secret(msg)

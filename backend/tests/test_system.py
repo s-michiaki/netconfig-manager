@@ -341,3 +341,104 @@ def test_image_status(ctx, monkeypatch):
     b = by_key(c, admin)[1]["images"]
     assert b["status"] == "warn" and "取り直せませんでした" in b["summary"] and "postgres:16-alpine" in b["summary"]
     asyncio.run(login_limit.client().delete(system.IMAGES_KEY))
+
+
+# ---------------------------------------------------------------- 外部への接続（core/outbound.py）
+
+
+def test_outbound_status_shows_host_port_only_and_ca_expiry(ctx, monkeypatch, tmp_path):
+    from fake_proxy import TestCA
+
+    c, admin = ctx["c"], ctx["admin"]
+    for k in ("OUTBOUND_PROXY", "OUTBOUND_NO_PROXY", "OUTBOUND_CA_FILE"):
+        monkeypatch.setattr(settings, k, "")
+    comp = by_key(c, admin)[1]["outbound"]
+    assert comp["status"] == "unknown" and "直接接続します" in comp["summary"] and comp["detail"]["proxy"] is None
+    monkeypatch.setattr(settings, "OUTBOUND_PROXY", "http://sys-user-MARK:sys%40pass-MARK@proxy.example.test:3128")
+    monkeypatch.setattr(settings, "OUTBOUND_NO_PROXY", "intranet.example.test,10.0.0.0/8")
+    ca = TestCA("Example Corp CA", days=400)
+    monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(ca.write_pem(tmp_path / "ca.pem")))
+    r = c.get("/api/system/status", headers=admin)
+    comp = {x["key"]: x for x in r.json()["components"]}["outbound"]
+    assert "MARK" not in r.text and "sys%40pass" not in r.text
+    assert comp["status"] == "ok" and comp["detail"]["proxy"] == "proxy.example.test:3128" and comp["detail"]["proxy_auth"]
+    assert "プロキシ proxy.example.test:3128（認証あり）" in comp["summary"] and "追加の CA 1 件" in comp["summary"]
+    assert comp["detail"]["no_proxy"] == ["intranet.example.test", "10.0.0.0/8"]
+    assert comp["detail"]["ca"]["count"] == 1 and comp["detail"]["ca"]["days_left"] >= 398
+    # 期限まで 30 日以内・期限切れは注意
+    soon = TestCA("Example Corp CA 2", days=10)
+    monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(soon.write_pem(tmp_path / "soon.pem")))
+    comp = by_key(c, admin)[1]["outbound"]
+    assert comp["status"] == "warn" and "期限まであと" in comp["summary"]
+    later = utcnow() + timedelta(days=20)
+    comp = asyncio.run(system.check_outbound(later))
+    assert comp.status == "warn" and "期限が切れています" in comp.summary
+    assert "outbound" not in system.ALERT_KEYS  # 画面に出すだけ（通知はしない）
+
+
+def test_outbound_check_api(ctx, monkeypatch, tmp_path):
+    import json as _json
+
+    from fake_proxy import FakeProxy, TestCA
+    from sqlalchemy import delete, select
+
+    from app.core import outbound
+    from app.models.audit import AuditLog
+
+    c, admin = ctx["c"], ctx["admin"]
+    user, pw = "chk-user-MARKU", "chk:pw@MARKP"
+    enc = "chk%3Apw%40MARKP"
+    monkeypatch.setattr(settings, "OUTBOUND_NO_PROXY", "")
+    ca = TestCA("Example Corp CA")
+    monkeypatch.setattr(settings, "OUTBOUND_CA_FILE", str(ca.write_pem(tmp_path / "ca.pem")))
+    # 閲覧者は使えない
+    name = f"sysc-{uuid.uuid4().hex[:6]}"
+    c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"}, headers=admin)
+    assert c.post("/api/system/outbound-check", headers=token(c, name, "password-1234")).status_code == 403
+
+    def audits():
+        async def q():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(select(AuditLog).where(AuditLog.action == "system.outbound_check"))).scalars().all()
+        return asyncio.run(q())
+
+    try:
+        with FakeProxy(ca, mode="407") as px:
+            monkeypatch.setattr(settings, "OUTBOUND_PROXY", px.url(user, enc))
+            r = c.post("/api/system/outbound-check", headers=admin)
+            assert r.status_code == 200 and r.json()["result"] == "proxy_auth" and r.json()["via"] == "proxy"
+            assert "プロキシの認証に失敗しました" in r.json()["message"]
+            assert px.connects[0].startswith("CONNECT endoflife.date:443")  # 固定の宛先だけ
+            # 続けては確かめられない（外部へ続けて送らない）
+            r2 = c.post("/api/system/outbound-check", headers=admin)
+            assert r2.status_code == 429 and "Retry-After" in r2.headers
+            st = c.get("/api/system/status", headers=admin)
+        comp = {x["key"]: x for x in st.json()["components"]}["outbound"]
+        assert comp["status"] == "warn" and "最後の接続の確認に失敗しました" in comp["summary"]
+        assert comp["detail"]["last_check"]["result"] == "proxy_auth"
+        logs = audits()
+        assert logs and logs[-1].success is False and _json.loads(logs[-1].detail)["result"] == "proxy_auth"
+        for text in (r.text, r2.text, st.text, " ".join(x.detail or "" for x in logs)):
+            assert "MARKU" not in text and "MARKP" not in text and enc not in text
+        # 成功（HTTPS を検査するプロキシ＋組織の CA）。宛先の HTTP の応答が返れば成功
+        asyncio.run(login_limit.client().delete("netconfig:report:outbound-check:all"))
+        with FakeProxy(ca, auth=(user, pw)) as px2:
+            monkeypatch.setattr(settings, "OUTBOUND_PROXY", px2.url(user, enc))
+            r = c.post("/api/system/outbound-check", headers=admin)
+        assert r.json()["result"] == "ok" and r.json()["label"] == "成功" and px2.inner[0]["method"] == "HEAD"
+        assert px2.inner[0]["host"] == urllib_host(outbound.CHECK_URL)
+        comp = by_key(c, admin)[1]["outbound"]
+        assert comp["status"] == "ok"
+    finally:
+        async def cleanup():
+            async with AsyncSessionLocal() as db:
+                await db.execute(delete(AuditLog).where(AuditLog.action == "system.outbound_check"))
+                await db.commit()
+        asyncio.run(cleanup())
+        asyncio.run(login_limit.client().delete(system.OUTBOUND_CHECK_KEY))
+
+
+def urllib_host(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    return urlsplit(url).hostname or ""
