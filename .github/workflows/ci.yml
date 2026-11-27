@@ -176,6 +176,8 @@ jobs:
         run: |
           git config --global user.name "ci"
           git config --global user.email "ci@example.invalid"
+          # Ping 監視を動かす画面テストのために、特権なしで ICMP を送れるようにする（できなければ、そのテストは飛ばされる）
+          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647" || true
           npm run e2e
       - name: 失敗時のレポート
         if: failure()

@@ -115,6 +115,12 @@ test("Ping 監視を動かしたまま 2 段階認証を設定しても、予備
   await page.locator(".ping-sel-item", { hasText: "Core-SW01" }).locator("input").check();
   await page.getByRole("button", { name: "決定" }).click();
   await page.getByRole("button", { name: "▶ 開始" }).click();
+  // サーバーから ICMP を送れない環境（権限なし）では、監視は始まらずエラーの文が出る。その環境では確かめられないので飛ばす
+  // （CI では net.ipv4.ping_group_range を設定して動かす）
+  const unavailable = page.getByText(/PING を送れません/);
+  await expect(page.locator(".badge", { hasText: "監視中" }).or(unavailable).first()).toBeVisible();
+  await page.waitForTimeout(1500);
+  test.skip(await unavailable.isVisible(), "この環境ではサーバーから ICMP を送れない");
   await expect(page.locator(".badge", { hasText: "監視中" })).toBeVisible();
 
   await page.getByRole("button", { name: /^2 段階認証/ }).click();
