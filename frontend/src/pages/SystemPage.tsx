@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 /**
  * システムの状態: worker・スケジューラー・Redis・DB が動いているか、収集の状況、ディスク、証明書の期限、バックアップ、外部 Git への push、コンテナのイメージの新しさ、
@@ -382,7 +383,7 @@ export default function SystemPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">システム状態</span>
+        <span className="page-title">システム状態<HelpLink topic="system" /></span>
         {data && <span className={`badge ${BADGE[data.overall][0]}`}>{data.overall === "ok" ? "すべて正常" : `要確認 ${bad.length} 件`}</span>}
         <span style={{ flex: 1 }} />
         {data && <span className="topo-muted topo-small">確認: {fmt(data.checked_at)}（30秒ごとに更新）</span>}

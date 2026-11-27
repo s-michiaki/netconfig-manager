@@ -51,6 +51,12 @@ test("CSP を付けても全画面・書き出し・ダウンロード・WebSock
     await expect(page.locator(".page-title").first()).toBeVisible();
   }
 
+  // ヘルプ（本文は画面に埋め込んだデータ。外へ接続せず、README へのリンクを開くだけ）
+  for (const path of ["/help", "/help/devices", "/help/system", "/help/install"]) {
+    await page.goto(path);
+    await expect(page.locator("article.help-article h2")).toBeVisible();
+  }
+
   // ターミナル（xterm.js は <style> 要素を作って表示を整える）
   await page.goto("/terminal");
   await expect(page.locator(".xterm-rows")).toContainText("NetConfig Manager");

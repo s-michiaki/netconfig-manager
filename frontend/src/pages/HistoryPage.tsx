@@ -5,6 +5,7 @@ import { PERM, useAuth } from "../auth";
 import { downloadFile } from "../components/CsvButton";
 import BaselineModal, { BaselineBadge, driftOf, isUnknown, type Baseline } from "../components/BaselineModal";
 import ReviewModal, { ReviewBadge, type Review } from "../components/ReviewModal";
+import HelpLink from "../components/HelpLink";
 
 interface Device { id: string; name: string; group_name: string | null; }
 /** 世代へのコメント（作業内容のメモ） */
@@ -377,7 +378,7 @@ export default function HistoryPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">世代管理 (Git)</span>
+        <span className="page-title">世代管理 (Git)<HelpLink topic="history" /></span>
         <div style={{ display: "flex", gap: 8 }}>
           <DeviceSelect devices={devices} groupOrder={groupOrder} value={selectedDevice} onChange={setSelectedDevice}
             placeholder="デバイスを選択..." style={{ width: 200 }} />

@@ -20,6 +20,7 @@ import {
 } from "../topology/model";
 import { DeviceIconSvg, TopologyContext, nodeTypes } from "../topology/nodes";
 import { edgeTypes } from "../topology/LinkEdge";
+import HelpLink from "../components/HelpLink";
 
 interface DeviceItem { id: string; name: string; hostname: string; platform: string; group_id: string | null; group_name: string | null; }
 
@@ -133,7 +134,7 @@ export default function TopologyPage() {
         <div className="page-body">{error ? <p className="form-error">{error}</p> : "読み込み中..."}</div>
       ) : maps.length === 0 ? (
         <>
-          <div className="page-header"><span className="page-title">構成図</span></div>
+          <div className="page-header"><span className="page-title">構成図<HelpLink topic="topology" /></span></div>
           <div className="page-body">
             <div className="topo-empty">
               <p>構成図はまだありません。</p>
@@ -854,7 +855,7 @@ img{display:block;max-width:100%;max-height:${landscape ? "250mm" : "370mm"};mar
       )}
       <div className="page-header topo-header">
         <div className="topo-header-left">
-          <span className="page-title">構成図</span>
+          <span className="page-title">構成図<HelpLink topic="topology" /></span>
           <select className="topo-map-select" value={mapId} onChange={(e) => onSwitch(e.target.value)} aria-label="構成図を選択">
             {maps.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>

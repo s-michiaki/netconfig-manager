@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { CsvButton, downloadCsv, downloadFile } from "../components/CsvButton";
+import HelpLink from "../components/HelpLink";
 
 interface AuditLog {
   id: string;
@@ -706,7 +707,7 @@ export default function AuditPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">監査ログ</span>
+        <span className="page-title">監査ログ<HelpLink topic="audit" /></span>
         <div className="seg-tabs" role="tablist">
           <button role="tab" aria-selected={tab === "logs"} className={`seg-tab${tab === "logs" ? " active" : ""}`} onClick={() => setTab("logs")}>操作履歴</button>
           <button role="tab" aria-selected={tab === "sessions"} className={`seg-tab${tab === "sessions" ? " active" : ""}`} onClick={() => setTab("sessions")}>ターミナルの記録</button>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage, getToken, redirectToLogin, wsUrl } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import PingMonitorPanel from "./PingMonitorPanel";
+import HelpLink from "../components/HelpLink";
 
 /**
  * Ping監視（deadman 風）
@@ -489,7 +490,7 @@ export default function PingPage() {
   if (!data) {
     return (
       <div className="page">
-        <div className="page-header"><span className="page-title">Ping監視</span></div>
+        <div className="page-header"><span className="page-title">Ping監視<HelpLink topic="ping" /></span></div>
         <div className="page-body">{loadError ? <p className="form-error">{loadError}</p> : <p style={{ color: "var(--color-muted)" }}>読み込み中...</p>}</div>
       </div>
     );
@@ -509,7 +510,7 @@ export default function PingPage() {
       {showSelect && <SelectModal data={data} selected={selected} onClose={() => setShowSelect(false)} onApply={applySelection} />}
       {showManage && <CustomManager groups={data.groups} targets={customs} onClose={() => setShowManage(false)} onChanged={load} />}
       <div className="page-header">
-        <span className="page-title">Ping監視</span>
+        <span className="page-title">Ping監視<HelpLink topic="ping" /></span>
         <div className="seg-tabs" role="tablist">
           <button role="tab" aria-selected={tab === "live"} className={`seg-tab${tab === "live" ? " active" : ""}`} onClick={() => setTab("live")}>リアルタイム</button>
           <button role="tab" aria-selected={tab === "monitor"} className={`seg-tab${tab === "monitor" ? " active" : ""}`} onClick={() => setTab("monitor")}>常時監視</button>

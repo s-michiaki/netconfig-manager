@@ -1,6 +1,7 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 export interface CredentialProfile {
   id: string;
@@ -291,7 +292,7 @@ export default function CredentialProfilesPage() {
     <div className="page">
       {modal && <ProfileModal profile={modal.profile} options={options} onClose={() => setModal(null)} onSaved={load} />}
       <div className="page-header">
-        <span className="page-title">認証情報プロファイル</span>
+        <span className="page-title">認証情報プロファイル<HelpLink topic="credential-profiles" /></span>
         {canWrite && <button className="btn btn-primary" onClick={() => setModal({ profile: null })}>＋ 追加</button>}
       </div>
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 interface Schedule {
   id: string;
@@ -80,7 +81,7 @@ export default function SchedulePage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">スケジュール設定</span>
+        <span className="page-title">スケジュール設定<HelpLink topic="schedules" /></span>
         {canWrite && <button className="btn btn-primary" onClick={() => setShowAdd(true)}>＋ 追加</button>}
       </div>
 

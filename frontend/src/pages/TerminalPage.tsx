@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { api, getToken, redirectToLogin, wsUrl } from "../api/client";
+import HelpLink from "../components/HelpLink";
 
 interface Device {
   id: string;
@@ -172,7 +173,7 @@ export default function TerminalPage() {
     <div className="page">
       <div className="page-header">
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span className="page-title">SSH ターミナル</span>
+          <span className="page-title">SSH ターミナル<HelpLink topic="terminal" /></span>
           {statusBadge}
           {selectedDevice && (
             <span style={{ fontSize: 12, color: "var(--color-muted)" }}>{selectedDevice.hostname}</span>

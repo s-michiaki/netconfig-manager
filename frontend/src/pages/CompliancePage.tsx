@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { usePlatforms } from "../platforms";
+import HelpLink from "../components/HelpLink";
 
 type Severity = "high" | "medium" | "low";
 type Status = "pass" | "fail" | "error" | "exempt";
@@ -804,7 +805,7 @@ export default function CompliancePage() {
           }} />
       )}
       <div className="page-header">
-        <span className="page-title">コンプライアンス</span>
+        <span className="page-title">コンプライアンス<HelpLink topic="compliance" /></span>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {notice && <span className="topo-notice">{notice}</span>}
           {canWrite && (

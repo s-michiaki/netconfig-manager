@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 interface User {
   id: string;
@@ -260,7 +261,7 @@ export default function UsersPage() {
           onDone={() => { setNotice(`「${mfaReset.username}」の 2 段階認証を解除しました`); load(); }} />
       )}
       <div className="page-header">
-        <span className="page-title">ユーザー管理</span>
+        <span className="page-title">ユーザー管理<HelpLink topic="users" /></span>
         <button className="btn btn-primary" onClick={() => setModal({ user: null })}>＋ 追加</button>
       </div>
 

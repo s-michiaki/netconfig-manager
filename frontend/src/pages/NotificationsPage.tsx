@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import MailServerTab from "../components/MailServerTab";
+import HelpLink from "../components/HelpLink";
 
 /**
  * 通知（Discord / Slack / Teams / メール）: コンフィグの変更・コンプライアンス違反の発生・収集の失敗・機器情報の変化
@@ -619,7 +620,7 @@ export default function NotificationsPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">通知設定</span>
+        <span className="page-title">通知設定<HelpLink topic="notifications" /></span>
         {isAdmin && (
           <div className="seg-tabs" role="tablist">
             <button role="tab" aria-selected={tab === "me"} className={`seg-tab${tab === "me" ? " active" : ""}`} onClick={() => setTab("me")}>自分の通知</button>

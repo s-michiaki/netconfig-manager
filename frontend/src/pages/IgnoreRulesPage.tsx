@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { api, errorMessage } from "../api/client";
 import { usePlatforms } from "../platforms";
+import HelpLink from "../components/HelpLink";
 
 interface Rule {
   id: string; scope: "platform" | "device"; platform: string | null; platform_label: string | null;
@@ -195,7 +196,7 @@ export default function IgnoreRulesPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">無視する行</span>
+        <span className="page-title">無視する行<HelpLink topic="ignore-rules" /></span>
         <span className="topo-muted topo-small">毎回変わる行（時刻・カウンタなど）を、正規表現で収集の対象から外します</span>
         <button className="btn btn-primary" style={{ marginLeft: "auto" }} onClick={() => { setMessage(""); setModal({ rule: null }); }}>ルールを追加</button>
       </div>

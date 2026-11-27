@@ -4,6 +4,7 @@ import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import BaselineModal, { LATEST, type Baseline } from "../components/BaselineModal";
 import ReviewModal, { ReviewBadge, bulkMessage, bulkReview, clearReview, reviewError, setReview, type Review, type ReviewTarget } from "../components/ReviewModal";
+import HelpLink from "../components/HelpLink";
 
 /**
  * 変更の確認: 検出した変更（世代）に「確認済み」「想定外」を付け、未確認の変更を一覧にする。
@@ -317,7 +318,7 @@ export default function ReviewsPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">変更の確認</span>
+        <span className="page-title">変更の確認<HelpLink topic="reviews" /></span>
         <span className="topo-muted topo-small">収集で検出した変更に「確認済み」「想定外」を付けます。付いていない変更が「未確認」です（各機器の最初の世代は対象外）。承認済みの世代（基準）からのずれも確認できます</span>
       </div>
       <div className="page-body">

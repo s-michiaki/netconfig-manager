@@ -4,6 +4,7 @@ import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { ReviewBadge, type Review } from "../components/ReviewModal";
 import DashboardClock from "../components/DashboardClock";
+import HelpLink from "../components/HelpLink";
 
 /**
  * ダッシュボード: ログイン後の最初の画面。
@@ -78,13 +79,13 @@ export default function DashboardPage() {
     return () => window.clearInterval(t);
   }, [load]);
 
-  if (!data) return <div className="page"><div className="page-header dash-header"><span className="page-title">ダッシュボード</span><DashboardClock /></div><div className="page-body">{error && <p className="form-error">{error}</p>}</div></div>;
+  if (!data) return <div className="page"><div className="page-header dash-header"><span className="page-title">ダッシュボード<HelpLink topic="dashboard" /></span><DashboardClock /></div><div className="page-body">{error && <p className="form-error">{error}</p>}</div></div>;
   const { devices: dv, compliance: cp, changes: ch, reviews: rv, baselines: bl } = data;
   const sev = cp.by_severity;
   return (
     <div className="page">
       <div className="page-header dash-header">
-        <span className="page-title">ダッシュボード</span>
+        <span className="page-title">ダッシュボード<HelpLink topic="dashboard" /></span>
         <span style={{ flex: 1 }} />
         <span className="topo-muted topo-small">最後に成功した収集: {fmt(data.last_success)}{data.last_success ? `（${ago(data.last_success)}）` : ""}</span>
         <DashboardClock />

@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { CsvButton, downloadCsv } from "../components/CsvButton";
+import HelpLink from "../components/HelpLink";
 
 /**
  * アクティビティログ: システムで起きたこと（収集の結果・スケジュールの実行・違反の発生・通知の送信など）
@@ -136,7 +137,7 @@ export default function ActivityPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">アクティビティ</span>
+        <span className="page-title">アクティビティ<HelpLink topic="activity" /></span>
         <span className="topo-muted topo-small">収集の結果・スケジュールの実行・違反の発生・通知の送信など、システムで起きたことの記録（利用者の操作は監査ログ）</span>
       </div>
       <div className="page-body">

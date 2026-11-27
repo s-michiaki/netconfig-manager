@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.67.0",
+    version="1.68.0",
     lifespan=lifespan,
     # Swagger UI・ReDoc（CDN のスクリプトを読む）は使わない。API の一覧は DOCS_ENABLED のときだけ、外部のスクリプトを
     # 使わない /docs と /openapi.json を出す（下の install_api_docs）。本番では python -m app.tools.api_list で見る

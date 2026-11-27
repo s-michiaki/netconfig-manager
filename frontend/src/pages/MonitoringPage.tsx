@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 /**
  * モニタリング（試験導入）
@@ -635,7 +636,7 @@ export default function MonitoringPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">モニタリング</span>
+        <span className="page-title">モニタリング<HelpLink topic="monitoring" /></span>
         <span className="badge badge-warning" title="試験導入中の機能です">試験導入</span>
         <span style={{ flex: 1 }} />
         <div className="seg-tabs" role="tablist">

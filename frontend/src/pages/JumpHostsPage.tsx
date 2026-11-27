@@ -1,6 +1,7 @@
 import { ChangeEvent, useEffect, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import HelpLink from "../components/HelpLink";
 
 interface JumpHost {
   id: string;
@@ -202,7 +203,7 @@ export default function JumpHostsPage() {
     <div className="page">
       {modal && <JumpHostModal jump={modal.jump} onClose={() => setModal(null)} onSaved={load} />}
       <div className="page-header">
-        <span className="page-title">踏み台サーバ</span>
+        <span className="page-title">踏み台サーバ<HelpLink topic="jump-hosts" /></span>
         {canWrite && <button className="btn btn-primary" onClick={() => setModal({ jump: null })}>＋ 追加</button>}
       </div>
 

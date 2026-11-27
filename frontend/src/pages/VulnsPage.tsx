@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
 import { CsvButton, downloadCsv } from "../components/CsvButton";
+import HelpLink from "../components/HelpLink";
 
 /**
  * 脆弱性・サポート期限: 機器の OS バージョンを、ベンダーの勧告（Palo Alto・Fortinet）・悪用確認済み一覧（CISA KEV）・
@@ -763,7 +764,7 @@ export default function VulnsPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">脆弱性・サポート期限</span>
+        <span className="page-title">脆弱性・サポート期限<HelpLink topic="vulns" /></span>
         <span className="topo-muted topo-small">機器の OS バージョンを、公開されている脆弱性情報・サポート終了日と照合します</span>
         <span style={{ flex: 1 }} />
         {canFetch && <button className="btn" onClick={fetchNow}>いま取得</button>}

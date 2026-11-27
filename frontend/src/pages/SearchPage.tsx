@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { CsvButton, downloadFilePost } from "../components/CsvButton";
 import { usePlatforms } from "../platforms";
+import HelpLink from "../components/HelpLink";
 
 /**
  * コンフィグ検索: 全機器の最新コンフィグを文字列・正規表現で横断検索する。
@@ -136,7 +137,7 @@ export default function SearchPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">コンフィグ検索</span>
+        <span className="page-title">コンフィグ検索<HelpLink topic="search" /></span>
         <span className="topo-muted topo-small">各機器の最後に収集したコンフィグから探します（「過去の世代も含める」で、消えた設定も探せます）</span>
       </div>
       <div className="page-body">

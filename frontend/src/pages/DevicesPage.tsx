@@ -7,6 +7,7 @@ import DeviceImportModal from "../components/DeviceImportModal";
 import StartupDiffModal from "../components/StartupDiffModal";
 import { usePlatforms } from "../platforms";
 import type { CredentialProfile } from "./CredentialProfilesPage";
+import HelpLink from "../components/HelpLink";
 
 interface Device {
   id: string;
@@ -905,7 +906,7 @@ export default function DevicesPage() {
           onDone={(n) => { load(); setError(""); setMessage(`CSV から ${n} 台を登録しました。取り込んだ CSV ファイルは削除してください。`); }} />
       )}
       <div className="page-header">
-        <span className="page-title">デバイス管理</span>
+        <span className="page-title">デバイス管理<HelpLink topic="devices" /></span>
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" title="機器の一覧（モデル・シリアル番号・OS バージョンを含む）を CSV で出力します"
             onClick={() => downloadCsv("/devices/export", {}, "devices.csv").catch((e) => setError(errorMessage(e)))}>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errorMessage } from "../api/client";
 import { usePlatforms } from "../platforms";
+import HelpLink from "../components/HelpLink";
 
 interface Device { id: string; name: string; hostname: string; platform: string; is_active: boolean; group_id: string | null; group_name: string | null; }
 interface Group { id: string; name: string; }
@@ -155,7 +156,7 @@ export default function CollectPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">コンフィグ収集</span>
+        <span className="page-title">コンフィグ収集<HelpLink topic="collect" /></span>
         <button className="btn btn-primary" onClick={startCollect} disabled={running || !shown.some((d) => d.is_active && selected.has(d.id))}>
           {running ? "収集中..." : "▶ 収集開始"}
         </button>

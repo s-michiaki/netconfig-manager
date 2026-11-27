@@ -3,6 +3,7 @@ import axios from "axios";
 import { api, errorMessage } from "../api/client";
 import { downloadFile } from "../components/CsvButton";
 import { usePlatforms } from "../platforms";
+import HelpLink from "../components/HelpLink";
 
 /**
  * コマンド実行: 複数の機器へ、表示コマンド（show / display など。設定を変えないもの）を一括で送り、
@@ -357,7 +358,7 @@ export default function CommandsPage() {
   return (
     <div className="page">
       <div className="page-header">
-        <span className="page-title">コマンド実行</span>
+        <span className="page-title">コマンド実行<HelpLink topic="commands" /></span>
         <button className="btn btn-primary" onClick={start} disabled={!canRun}>
           {starting ? "投入中..." : run && !run.finished ? "実行中..." : "▶ 実行"}
         </button>

@@ -49,6 +49,7 @@ const DashboardPage = lazyPage(() => import("./pages/DashboardPage"));
 const ReviewsPage = lazyPage(() => import("./pages/ReviewsPage"));
 const IgnoreRulesPage = lazyPage(() => import("./pages/IgnoreRulesPage"));
 const SearchPage = lazyPage(() => import("./pages/SearchPage"));
+const HelpPage = lazyPage(() => import("./pages/HelpPage"));
 
 type NavItem = { path: string; label: string; icon: string; perm: Perm; feature?: string };
 type NavGroup = { id: string; label: string; items: NavItem[] };
@@ -104,6 +105,12 @@ const NAV_GROUPS: NavGroup[] = [
 ];
 
 const isOnPath = (pathname: string, path: string) => pathname.startsWith(path);
+
+/** いま開いている画面に対応するヘルプの項目へのパス（対応する画面が無ければ /help。項目の id は画面のパスの先頭の語） */
+function helpPathFor(pathname: string): string {
+  const item = [NAV_TOP, ...NAV_GROUPS.flatMap((g) => g.items)].find((i) => isOnPath(pathname, i.path));
+  return item ? `/help/${item.path.slice(1)}` : pathname.startsWith("/help") ? pathname : "/help";
+}
 
 /** いまの画面を含む大項目の id（権限・機能の条件に関係なく、定義から引く。モニタリングの有無が決まる前でも変わらない） */
 function groupOfPath(pathname: string): string | undefined {
@@ -352,6 +359,7 @@ function Layout() {
                 <button className="link-btn" onClick={() => setShowTokens(true)} title="スクリプトなどから API を使うためのトークン">
                   API トークン
                 </button>
+                <Link className="link-btn" to={helpPathFor(location.pathname)} title="この画面の使い方">ヘルプ</Link>
                 <button className="link-btn" onClick={logout}>ログアウト</button>
               </div>
             </div>
@@ -389,6 +397,8 @@ function Layout() {
           <Route path="/audit" element={<RequirePerm perm={PERM.AUDIT_READ}><AuditPage /></RequirePerm>} />
           <Route path="/users" element={<RequirePerm perm={PERM.USER_ADMIN}><UsersPage /></RequirePerm>} />
           <Route path="/system" element={<RequirePerm perm={PERM.SYSTEM_READ}><SystemPage /></RequirePerm>} />
+          <Route path="/help" element={<HelpPage />} />
+          <Route path="/help/:topicId" element={<HelpPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
         </Suspense>
