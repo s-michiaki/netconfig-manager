@@ -159,6 +159,7 @@ ROUTES = {
     # システム・メール・ダッシュボード・モニタリング
     "GET /api/system/status": T,
     "POST /api/system/git-export": S,
+    "POST /api/system/outbound-check": S,  # 外部へ送る操作（管理者がログインして行う）
     "GET /api/mail/server": S,
     "PUT /api/mail/server": S,
     "POST /api/mail/server/test": S,
@@ -178,6 +179,22 @@ ROUTES = {
     "GET /api/monitoring/fw/{device_id}/rules": T,
     "POST /api/monitoring/fw/{device_id}/collect": T,
     "GET /api/monitoring/fw/{device_id}/raw": T,
+    # 脆弱性・サポート終了日（閲覧は T。確認済み・手入力・いま取得は S）
+    "GET /api/vulns/summary": T,
+    "GET /api/vulns/matches": T,
+    "GET /api/vulns/matches/export": T,
+    "GET /api/vulns/devices": T,
+    "GET /api/vulns/unknown": T,
+    "GET /api/vulns/advisories/{advisory_id}": T,
+    "POST /api/vulns/matches/{match_id}/ack": S,
+    "POST /api/vulns/matches/{match_id}/unack": S,
+    "GET /api/vulns/eol": T,
+    "PUT /api/vulns/eol": S,
+    "DELETE /api/vulns/eol/{eol_id}": S,
+    "GET /api/vulns/eol/devices": T,
+    "POST /api/vulns/fetch": S,
+    "POST /api/vulns/fortinet/import": S,
+    "GET /api/vulns/fortinet/import": S,
     # 通知の設定（送信先・Webhook の URL を含む）
     "GET /api/notifications/me": S,
     "PUT /api/notifications/me": S,

@@ -1,0 +1,1054 @@
+{
+ "success": true,
+ "data": [
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2001",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SA（lessThan が修正点の最大）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.2.0",
+         "versionType": "custom",
+         "lessThan": "12.2.4-h2",
+         "changes": [
+          {
+           "at": "12.2.4-h2",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.1.0",
+         "versionType": "custom",
+         "lessThan": "11.1.16-h5",
+         "changes": [
+          {
+           "at": "11.1.16-h5",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.13-h17",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.10-h37",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.7-h13",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.6-h41",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.4-h39",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.2.0",
+         "versionType": "custom",
+         "lessThan": "10.2.18-h14",
+         "changes": [
+          {
+           "at": "10.2.18-h14",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.16-h13",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.13-h28",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.10-h43",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.7-h40",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "Prisma Access",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "All",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2002",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SB（lessThan が修正点の最小）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.1.0",
+         "versionType": "custom",
+         "lessThan": "12.1.4-h7",
+         "changes": [
+          {
+           "at": "12.1.4-h7",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.7",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.1.0",
+         "versionType": "custom",
+         "lessThan": "11.1.4-h34",
+         "changes": [
+          {
+           "at": "11.1.4-h34",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.6-h33",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.7-h7",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.10-h27",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.13-h7",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.15",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.2.0",
+         "versionType": "custom",
+         "lessThan": "10.2.7-h35",
+         "changes": [
+          {
+           "at": "10.2.7-h35",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.10-h37",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.13-h22",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.16-h8",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.18-h7",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2003",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SC（修正版の無い系列・記載のない系列も影響あり）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "affected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.1.0",
+         "versionType": "custom",
+         "lessThan": "12.1.8",
+         "changes": [
+          {
+           "at": "12.1.8",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.2.0",
+         "versionType": "custom",
+         "lessThan": "11.2.13",
+         "changes": [
+          {
+           "at": "11.2.13",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.1.0",
+         "versionType": "custom",
+         "lessThan": "11.1.16",
+         "changes": [
+          {
+           "at": "11.1.16",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.2.0",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2004",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SD（changes だけ）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.2.0",
+         "versionType": "custom",
+         "changes": [
+          {
+           "at": "12.2.4",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "12.1.0",
+         "versionType": "custom",
+         "changes": [
+          {
+           "at": "12.1.7-h8",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.10-h2",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.4-h12",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2005",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SE（途中から影響・影響なしの行）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.2.0",
+         "versionType": "custom",
+         "changes": [
+          {
+           "at": "12.2.4-h3",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "12.1.5",
+         "versionType": "custom",
+         "changes": [
+          {
+           "at": "12.1.10-h6",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.7-h15",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.2.8",
+         "versionType": "custom",
+         "changes": [
+          {
+           "at": "11.2.16-h3",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.2.13-h6",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.2.10-h19",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "unaffected",
+         "version": "11.1.0",
+         "versionType": "custom"
+        },
+        {
+         "status": "unaffected",
+         "version": "10.2.0",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2006",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SF（系列つきの製品名）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "作り物の別製品",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "Any",
+         "versionType": "custom",
+         "lessThan": "0.2.9",
+         "changes": [
+          {
+           "at": "0.2.9",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "12.2",
+         "versionType": "custom",
+         "lessThan": "12.2.4-h1",
+         "changes": [
+          {
+           "at": "12.2.4-h1",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "12.1",
+         "versionType": "custom",
+         "lessThan": "12.1.4-h13",
+         "changes": [
+          {
+           "at": "12.1.10-h3",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.7-h11",
+           "status": "unaffected"
+          },
+          {
+           "at": "12.1.4-h13",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS 11.1",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "All",
+         "versionType": "custom"
+        }
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS 10.2",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "All",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "PAN-SA-2099-2007",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SG（影響の有無が不明）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unknown",
+         "version": "",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 0.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2008",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SH（Panorama だけ）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "10.2.0",
+         "versionType": "custom",
+         "lessThan": "10.2.18-h14",
+         "changes": [
+          {
+           "at": "10.2.18-h14",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.16-h13",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.13-h28",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.10-h43",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.7-h40",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ],
+       "platforms": [
+        "Panorama"
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "Cloud NGFW",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "All",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2009",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SX（読めない行）",
+     "datePublic": "2099-05-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "affected",
+         "version": "10.1.0",
+         "versionType": "custom",
+         "lessThan": "10.1.9",
+         "changes": [
+          {
+           "at": "10.1.5",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.1.7",
+           "status": "affected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "9.1.0",
+         "versionType": "semver",
+         "lessThan": "9.1.9"
+        },
+        {
+         "status": "affected",
+         "version": "11.0.0",
+         "versionType": "custom",
+         "lessThan": "11.0.9",
+         "changes": [
+          {
+           "at": "11.0.x-h1",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 7.5
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2010",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SI（古い形の x.y All）",
+     "datePublic": "2099-06-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "9.0 All"
+        },
+        {
+         "status": "unaffected",
+         "version": "9.1 All"
+        },
+        {
+         "status": "unaffected",
+         "version": "10.0 All"
+        },
+        {
+         "status": "unaffected",
+         "version": "10.1 All"
+        },
+        {
+         "status": "affected",
+         "version": "10.2",
+         "versionType": "custom",
+         "lessThan": "10.2.0-h3",
+         "changes": [
+          {
+           "at": "10.2.0-h3",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.1-h2",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.5-h6",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.9-h1",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.1",
+         "versionType": "custom",
+         "lessThan": "11.1.0-h3",
+         "changes": [
+          {
+           "at": "11.1.0-h3",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.1-h1",
+           "status": "unaffected"
+          },
+          {
+           "at": "11.1.2-h3",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 8.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2011",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SJ（古い形の All と None の組）",
+     "datePublic": "2099-06-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "unaffected",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "11.1 All",
+         "versionType": "custom"
+        },
+        {
+         "status": "affected",
+         "version": "9.1 All",
+         "versionType": "custom"
+        },
+        {
+         "status": "unaffected",
+         "version": "9.1 None",
+         "versionType": "custom"
+        },
+        {
+         "status": "affected",
+         "version": "9.0 All",
+         "versionType": "custom"
+        },
+        {
+         "status": "unaffected",
+         "version": "9.0 None",
+         "versionType": "custom"
+        },
+        {
+         "status": "affected",
+         "version": "11.0",
+         "versionType": "custom",
+         "lessThan": "11.0.3",
+         "changes": [
+          {
+           "at": "11.0.3",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.1",
+         "versionType": "custom",
+         "lessThan": "10.1.11",
+         "changes": [
+          {
+           "at": "10.1.11",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.2",
+         "versionType": "custom",
+         "lessThan": "10.2.8",
+         "changes": [
+          {
+           "at": "10.2.8",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 8.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "CVE-2099-2012",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SK（Panorama だけ・古い形）",
+     "datePublic": "2099-06-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "versions": [
+        {
+         "status": "unaffected",
+         "version": "9.0 All"
+        },
+        {
+         "status": "unaffected",
+         "version": "9.1 All"
+        },
+        {
+         "status": "unaffected",
+         "version": "11.1 All"
+        }
+       ]
+      },
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "platforms": [
+        "Panorama"
+       ],
+       "versions": [
+        {
+         "status": "affected",
+         "version": "10.1",
+         "versionType": "custom",
+         "lessThan": "10.1.12",
+         "changes": [
+          {
+           "at": "10.1.12",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "10.2",
+         "versionType": "custom",
+         "lessThan": "10.2.7-h3",
+         "changes": [
+          {
+           "at": "10.2.7-h3",
+           "status": "unaffected"
+          },
+          {
+           "at": "10.2.8",
+           "status": "unaffected"
+          }
+         ]
+        },
+        {
+         "status": "affected",
+         "version": "11.0",
+         "versionType": "custom",
+         "lessThan": "11.0.4",
+         "changes": [
+          {
+           "at": "11.0.4",
+           "status": "unaffected"
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 8.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "dataType": "CVE_RECORD",
+   "dataVersion": "5.0",
+   "cveMetadata": {
+    "cveId": "PAN-SA-2099-2013",
+    "state": "PUBLISHED"
+   },
+   "containers": {
+    "cna": {
+     "title": "PAN-OS: 作り物の勧告 SL（特定の機種だけ）",
+     "datePublic": "2099-06-01T00:00:00.000Z",
+     "affected": [
+      {
+       "vendor": "Palo Alto Networks",
+       "product": "PAN-OS",
+       "defaultStatus": "affected",
+       "platforms": [
+        "PA-3200",
+        "PA-5200",
+        "PA-7000"
+       ],
+       "versions": [
+        {
+         "status": "affected",
+         "version": " All",
+         "versionType": "custom"
+        }
+       ]
+      }
+     ],
+     "metrics": [
+      {
+       "format": "CVSS",
+       "cvssV4_0": {
+        "version": "4.0",
+        "baseScore": 8.0
+       }
+      }
+     ]
+    }
+   }
+  }
+ ]
+}

@@ -13,6 +13,16 @@
 - 認証は HTTPS（GIT_EXPORT_USERNAME / GIT_EXPORT_TOKEN。GIT_ASKPASS で渡し、URL や .git/config に残さない）か
   SSH（GIT_EXPORT_SSH_KEY の秘密鍵。初回に相手のホスト鍵を記録し、以後は変わったら拒否する）
 - 結果は Redis に残し、システム状態に表示する。失敗はシステムの異常として通知する（services/system.py）
+- プロキシ（core/outbound.py の OUTBOUND_PROXY）: https:// の宛先が outbound.use_proxy に当たるときだけ、git のプロセスの
+  環境変数（https_proxy など）で渡す。コマンドラインの引数・.git/config には書かない（プロセス一覧・ファイルに認証情報を
+  残さない。#14 と同じ考え）。当たらない宛先・SSH（ssh://・git@host:path）・ローカルのパスでは、プロキシの環境変数を明示的に
+  空にする（コンテナの環境に何が入っていても使わない）。平文（http://）の宛先をプロキシ経由では送らない（外へは HTTPS だけ）
+- 追加の CA: OUTBOUND_CA_FILE があれば、https の宛先で
+    GIT_EXPORT_CA_FILE なし → OS の信頼（束）＋ OUTBOUND_CA_FILE を一時ファイルに束ねて GIT_SSL_CAINFO で渡す
+    GIT_EXPORT_CA_FILE あり → GIT_EXPORT_CA_FILE ＋ OUTBOUND_CA_FILE を束ねて http.sslCAInfo に渡す
+                             （OS の信頼は今までどおり使わない）
+  束ねたファイルは push の一時ディレクトリに作り、終わったら消す
+- git の失敗の文（stderr）は、プロキシの URL・認証情報を outbound.scrub で伏せてから記録する
 """
 import json
 import logging
@@ -29,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 import git
 
+from app.core import outbound
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.services.config_service import CONFIG_FILENAME, repo_path
@@ -200,13 +211,105 @@ def update_tree(repo: git.Repo, devices: list[DeviceFile]) -> tuple[bool, list[s
 
 
 def _askpass_script(tmp: str) -> str:
-    """HTTPS のユーザー名・トークンを環境変数から返すスクリプト（URL・.git/config に認証情報を書かないため）"""
+    """HTTPS のユーザー名・トークンを環境変数から返すスクリプト（URL・.git/config に認証情報を書かないため）
+
+    答えるのは、宛先の Git サーバー（NCM_GIT_SCHEME://[ユーザー@]NCM_GIT_HOST）についての問いだけ。
+    プロキシの認証の問い（Password for 'http://user@proxy…'）などには何も返さずに失敗する
+    （GIT_EXPORT_TOKEN をプロキシのパスワードとして送らないため）。ホストは環境変数で渡し、スクリプトには埋め込まない
+    """
     p = os.path.join(tmp, "askpass.sh")
     with open(p, "w", encoding="utf-8") as f:
-        f.write('#!/bin/sh\ncase "$1" in\n  Username*) printf "%s" "$NCM_GIT_USERNAME" ;;\n'
-                '  *) printf "%s" "$NCM_GIT_TOKEN" ;;\nesac\n')
+        f.write(
+            '#!/bin/sh\n'
+            's="$NCM_GIT_SCHEME"; h="$NCM_GIT_HOST"\n'
+            '[ -n "$s" ] && [ -n "$h" ] || exit 1\n'
+            'case "$1" in\n'
+            '  *"\'$s://$h\'"*|*"\'$s://$h/"*|*"\'$s://"*"@$h\'"*|*"\'$s://"*"@$h/"*) ;;\n'
+            '  *) exit 1 ;;\n'
+            'esac\n'
+            'case "$1" in\n'
+            '  Username*) printf "%s" "$NCM_GIT_USERNAME" ;;\n'
+            '  *) printf "%s" "$NCM_GIT_TOKEN" ;;\n'
+            'esac\n')
     os.chmod(p, stat.S_IRWXU)
     return p
+
+
+_PROXY_VARS = ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")
+# OS の信頼（CA の束）の場所。python の既定（SSL_CERT_FILE を含む）→ Debian（backend のイメージ）→ RHEL 系
+_OS_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem")
+
+
+def _https_host(url: str) -> tuple[str, str]:
+    """（scheme, ホスト）。http(s) の URL でなければ（SSH・ローカルのパス）scheme は空"""
+    p = urllib.parse.urlsplit(url)
+    if p.scheme in ("http", "https"):
+        return p.scheme, p.hostname or ""
+    return "", ""
+
+
+def proxy_env(url: str) -> dict[str, str]:
+    """git のプロセスに渡すプロキシの環境変数。使わないときも、すべて空にして返す（コンテナの環境の値を使わない）
+
+    GIT_HTTP_PROXY_AUTHMETHOD（http.proxyAuthMethod）: プロキシに認証情報があれば basic（最初の CONNECT から Basic を
+    付ける。git の版＝libcurl の版で「407 を受けてから付け直す」かどうかが変わらないように）。それ以外は anyauth
+    （git の既定と同じ。空にすると git が警告を出すため、既定の値を明示してコンテナの環境の値も使わない）。NTLM などは対象外
+    """
+    env = dict.fromkeys(_PROXY_VARS, "")
+    env["GIT_HTTP_PROXY_AUTHMETHOD"] = "anyauth"
+    scheme, host = _https_host(url)
+    if not scheme:
+        return env  # SSH・ローカルのパスは HTTP のプロキシを通せない（直接）
+    try:
+        use = outbound.use_proxy(host)
+    except outbound.ProxyError as e:
+        raise RuntimeError(e.message) from None
+    if not use:
+        return env
+    if scheme == "http":
+        raise RuntimeError("平文（http://）の Git サーバーへはプロキシ経由で接続しません（https:// の URL にするか、"
+                           "OUTBOUND_NO_PROXY に入れてください）")
+    value = settings.OUTBOUND_PROXY.strip()  # 認証情報は URL エンコードのまま（git・curl がデコードする）
+    env.update(https_proxy=value, HTTPS_PROXY=value)
+    proxy = outbound.current_proxy()
+    if proxy is not None and proxy.auth:  # user:pw@・user:@（空のパスワード）
+        env["GIT_HTTP_PROXY_AUTHMETHOD"] = "basic"
+    return env
+
+
+def _os_bundle() -> str | None:
+    import ssl
+
+    paths = ssl.get_default_verify_paths()
+    for p in (paths.cafile, paths.openssl_cafile, *_OS_BUNDLES):
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def _ca_bundle(url: str, tmp: str) -> tuple[dict[str, str], list[str]]:
+    """（環境変数, git -c のオプション）。追加の CA（OUTBOUND_CA_FILE）を束ねる。https の宛先のときだけ"""
+    env: dict[str, str] = {}
+    opts: list[str] = []
+    extra = outbound.ca_path()
+    if _https_host(url)[0] != "https" or not extra:
+        if settings.GIT_EXPORT_CA_FILE:
+            opts += ["-c", f"http.sslCAInfo={settings.GIT_EXPORT_CA_FILE}"]
+        return env, opts
+    base = settings.GIT_EXPORT_CA_FILE or _os_bundle()
+    bundle = os.path.join(tmp, "ca-bundle.pem")
+    with open(bundle, "wb") as out:
+        for src in (base, extra):
+            if not src:
+                continue
+            with open(src, "rb") as f:
+                data = f.read()
+            out.write(data if data.endswith(b"\n") else data + b"\n")
+    if settings.GIT_EXPORT_CA_FILE:
+        opts += ["-c", f"http.sslCAInfo={bundle}"]  # 今までどおり GIT_EXPORT_CA_FILE を使い、追加の CA を足す
+    else:
+        env["GIT_SSL_CAINFO"] = bundle
+    return env, opts
 
 
 def push(repo: git.Repo) -> str:
@@ -222,6 +325,8 @@ def push(repo: git.Repo) -> str:
     env = {"GIT_TERMINAL_PROMPT": "0"}
     opts: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
+        dest = urllib.parse.urlsplit(url)  # askpass が答えてよい宛先（プロキシの問いには答えない）
+        env.update(NCM_GIT_SCHEME=dest.scheme, NCM_GIT_HOST=dest.netloc.rsplit("@", 1)[-1])
         if settings.GIT_EXPORT_TOKEN:
             env.update(GIT_ASKPASS=_askpass_script(tmp), NCM_GIT_USERNAME=settings.GIT_EXPORT_USERNAME or "oauth2",
                        NCM_GIT_TOKEN=settings.GIT_EXPORT_TOKEN)
@@ -235,8 +340,10 @@ def push(repo: git.Repo) -> str:
                 "ssh", "-i", shlex.quote(settings.GIT_EXPORT_SSH_KEY), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
                 "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={shlex.quote(known)}",
             ])
-        if settings.GIT_EXPORT_CA_FILE:
-            opts += ["-c", f"http.sslCAInfo={settings.GIT_EXPORT_CA_FILE}"]
+        env.update(proxy_env(url))
+        ca_env, ca_opts = _ca_bundle(url, tmp)
+        env.update(ca_env)
+        opts += ca_opts
         g = git.Git(repo.working_tree_dir)
         g.update_environment(**env)
         try:
@@ -249,11 +356,13 @@ def push(repo: git.Repo) -> str:
 
 def _push_error(e: git.GitCommandError) -> str:
     """push の失敗を短い日本語の説明にする（認証情報は含めない）"""
-    err = mask_url(str(e.stderr or e).strip())
+    err = outbound.scrub(mask_url(str(e.stderr or e).strip()))
     low = err.lower()
     if "rejected" in low or "non-fast-forward" in low or "fetch first" in low:
         hint = ("相手のブランチに、こちらに無いコミットがあります（相手側で直接変更された可能性）。"
                 "相手のブランチを確認してください")
+    elif "407" in low or "proxy authentication" in low:
+        hint = "プロキシの認証に失敗しました（OUTBOUND_PROXY のユーザー名・パスワードを確認してください）"
     elif "authentication" in low or "could not read username" in low or "403" in low or "401" in low:
         hint = "認証に失敗しました（GIT_EXPORT_USERNAME / GIT_EXPORT_TOKEN、またはトークンの権限を確認してください）"
     elif "permission denied (publickey" in low:
@@ -261,7 +370,8 @@ def _push_error(e: git.GitCommandError) -> str:
     elif "host key verification failed" in low or "remote host identification has changed" in low:
         hint = f"相手のホスト鍵が以前と違います（{settings.GIT_EXPORT_KNOWN_HOSTS} を確認してください）"
     elif "certificate" in low or "ssl" in low:
-        hint = "HTTPS の証明書を確認できません（社内の CA なら GIT_EXPORT_CA_FILE を設定してください）"
+        hint = ("HTTPS の証明書を確認できません（社内の CA なら GIT_EXPORT_CA_FILE、HTTPS を検査するプロキシなら"
+                " OUTBOUND_CA_FILE を設定してください）")
     elif "could not resolve" in low or "connection refused" in low or "timed out" in low or "unable to access" in low:
         hint = "Git サーバーに接続できません（URL・ネットワークを確認してください）"
     elif "not found" in low or "does not appear to be a git repository" in low:
@@ -303,8 +413,9 @@ def sync(r, devices: list[DeviceFile], now: datetime | None = None) -> dict:
             result.update(ok=True, pushed=pushed, last_success=now.isoformat(),
                           message=f"push しました（{len(names)} 台の変更）" if names else "push しました")
     except Exception as e:  # noqa: BLE001 - 失敗は記録して、システム状態と通知で知らせる
-        logger.warning("外部 Git への push に失敗しました: %s", e)
-        result.update(ok=False, error=mask_url(str(e))[:500], pushed=state.get("pushed"),
+        err = outbound.scrub(mask_url(str(e)))
+        logger.warning("外部 Git への push に失敗しました: %s", err)
+        result.update(ok=False, error=err[:500], pushed=state.get("pushed"),
                       last_success=state.get("last_success"))
     r.set(STATE_KEY, json.dumps(result, ensure_ascii=False))
     return result

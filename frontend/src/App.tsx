@@ -43,6 +43,7 @@ const TerminalPage = lazyPage(() => import("./pages/TerminalPage"));
 const TopologyPage = lazyPage(() => import("./pages/TopologyPage"));
 const UsersPage = lazyPage(() => import("./pages/UsersPage"));
 const MonitoringPage = lazyPage(() => import("./pages/MonitoringPage"));
+const VulnsPage = lazyPage(() => import("./pages/VulnsPage"));
 const SystemPage = lazyPage(() => import("./pages/SystemPage"));
 const DashboardPage = lazyPage(() => import("./pages/DashboardPage"));
 const ReviewsPage = lazyPage(() => import("./pages/ReviewsPage"));
@@ -86,6 +87,8 @@ const NAV_GROUPS: NavGroup[] = [
       { path: "/ping", label: "Ping監視", icon: "◉", perm: PERM.PING_USE },
       // 試験導入中（.env の MONITORING_ENABLED=true のときだけ表示）
       { path: "/monitoring", label: "モニタリング", icon: "📈", perm: PERM.MONITOR_READ, feature: "monitoring" },
+      // 脆弱性・サポート期限（.env の VULN_ENABLED=true のときだけ表示。既定は無効）
+      { path: "/vulns", label: "脆弱性・サポート期限", icon: "⚠", perm: PERM.VULN_READ, feature: "vuln" },
       { path: "/activity", label: "アクティビティ", icon: "📋", perm: PERM.ACTIVITY_READ },
     ],
   },
@@ -338,6 +341,7 @@ function Layout() {
           <Route path="/terminal/:deviceId" element={<RequirePerm perm={PERM.TERMINAL}><TerminalPage /></RequirePerm>} />
           <Route path="/ping" element={<RequirePerm perm={PERM.PING_USE}><PingPage /></RequirePerm>} />
           <Route path="/monitoring" element={<RequirePerm perm={PERM.MONITOR_READ}><MonitoringPage /></RequirePerm>} />
+          <Route path="/vulns" element={<RequirePerm perm={PERM.VULN_READ}><VulnsPage /></RequirePerm>} />
           <Route path="/schedules" element={<RequirePerm perm={PERM.SCHEDULE_READ}><SchedulePage /></RequirePerm>} />
           <Route path="/ignore-rules" element={<RequirePerm perm={PERM.CONFIG_IGNORE}><IgnoreRulesPage /></RequirePerm>} />
           <Route path="/compliance" element={<RequirePerm perm={PERM.COMPLIANCE_READ}><CompliancePage /></RequirePerm>} />

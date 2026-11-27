@@ -19,6 +19,10 @@ export ADMIN_USERNAME=admin
 export ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-initial-pass-123}"
 export ALLOWED_ORIGINS=""
 export MONITORING_ENABLED=false  # 試験導入の機能は既定（無効）のまま確認する
+export VULN_ENABLED=true  # 脆弱性・サポート期限の画面は有効で確認する（見本のデータは seed.py。API は外部へつながない。取得は worker だけ）
+# 外部への接続: つながらない 127.0.0.1 のポートを、認証情報つきのプロキシに設定する（外へは出ない。画面に認証情報が出ないことを確かめる）
+export OUTBOUND_PROXY="http://e2e-proxy-user:e2e-proxy-secret@127.0.0.1:9"
+export OUTBOUND_NO_PROXY="intranet.example.test"
 export REDIS_URL="redis://127.0.0.1:1/0"  # 使わない（収集などのタスクは投入しない画面だけを確認する）
 
 cd "$BACKEND"

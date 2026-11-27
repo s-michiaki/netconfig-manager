@@ -81,6 +81,7 @@ redact() {
     -e 's#eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}#***TOKEN***#g' \
     -e 's#gAAAA[A-Za-z0-9_=-]{40,}#***ENCRYPTED***#g' \
     -e 's#(-----BEGIN [A-Z ]*PRIVATE KEY-----).*#\1 ***#g' \
+    -e 's#(^|[^A-Za-z0-9_])(([Hh][Tt][Tt][Pp][Ss]?|[Aa][Ll][Ll])_[Pp][Rr][Oo][Xx][Yy]=[A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]"'"'"']*@#\1\2***@#g' \
     -e 's#(([Pp]assword|[Pp]asswd|[Ss]ecret|[Tt]oken|[Aa]pi[_-]?[Kk]ey)["'"'"']?[=:] ?["'"'"']?)[^"'"'"' ,;&]+#\1***#g'
 }
 
@@ -150,12 +151,27 @@ fi
 
 # .env: 秘密の値は伏せる（キーの名前で判断。値が空かどうかは分かるようにする）
 #   秘密でないキーの値も redact に通し、URL に書かれた認証情報（https://user:token@host）は伏せる（#14）
+#   プロキシ（OUTBOUND_PROXY・廃止した VULN_HTTPS_PROXY）は、認証情報だけを伏せて host:port は残す（http://***@proxy.example.test:3128。
+#   起動時のログ・システム状態の画面と同じ。切り分けに使う）。OUTBOUND_NO_PROXY は件数だけ、OUTBOUND_CA_FILE（ファイル名）はそのまま
 if $SUDO test -f "$INSTALL_DIR/.env"; then
   $SUDO cat "$INSTALL_DIR/.env" 2>/dev/null | awk '
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     {
       eq = index($0, "="); if (eq == 0) { print; next }
       key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+      if (key ~ /PROXY/ && key !~ /NO_PROXY/) {
+        v = val; gsub(/^["\047]|["\047]\r?$|\r$/, "", v)
+        if (v == "") { print key "=（空）"; next }
+        if (v ~ /@/) {   # 認証情報（最後の @ まで）を伏せる。スキームが無い値も同じ
+          if (v ~ /:\/\//) { p = index(v, "://"); s = substr(v, 1, p + 2); r = substr(v, p + 3) } else { s = ""; r = v }
+          sub(/.*@/, "", r); v = s "***@" r
+        }
+        print key "=" v; next
+      }
+      if (key ~ /NO_PROXY/) {
+        v = val; gsub(/^["\047]|["\047]\r?$|\r$/, "", v)
+        print key "=" (v == "" ? "（空）" : "***（" split(v, _parts, ",") " 件）"); next
+      }
       if (key ~ /(PASSWORD|PASSWD|SECRET|KEY|TOKEN|WEBHOOK|DATABASE_URL|REDIS_URL|BROKER|COMMAND)/)
         print key "=" (val == "" ? "（空）" : "***（" length(val) " 文字）")
       else
@@ -269,6 +285,12 @@ if have openssl; then
   for crt in "$INSTALL_DIR"/certs/*.crt; do
     [ -f "$crt" ] || continue
     save "app/cert-$(basename "$crt").txt" $SUDO openssl x509 -in "$crt" -noout -subject -issuer -dates
+  done
+  # 外部への接続で追加で信頼する CA（certs-outbound/。期限切れ・取り違えの確認用。証明書は秘密ではない）
+  for crt in "$INSTALL_DIR"/certs-outbound/*; do
+    [ -f "$crt" ] || continue
+    case "$crt" in *.pem|*.crt|*.cer) ;; *) continue ;; esac
+    save "app/outbound-ca-$(basename "$crt").txt" $SUDO openssl x509 -in "$crt" -noout -subject -issuer -dates
   done
 fi
 BACKUP_DIR=$(env_value BACKUP_DIR /var/backups/netconfig-manager)

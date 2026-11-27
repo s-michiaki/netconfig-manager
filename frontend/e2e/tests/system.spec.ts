@@ -53,3 +53,30 @@ test("システム状態: 要確認の項目を外すと、画面の上に知ら
   await expect(alert).toBeHidden();
   await expect(page.locator(".sys-grid .sys-card .sys-head", { hasText: /^Redis/ })).toHaveCount(1);
 });
+
+test("システム状態: 外部への接続（プロキシはホスト:ポートだけ表示・接続を確かめる）", async ({ page }) => {
+  // e2e の backend は、認証情報つきのプロキシ（つながらない 127.0.0.1:9）を設定して起動している（start-backend.sh）
+  await login(page);
+  await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("ncm.system.hidden.")).forEach((k) => localStorage.removeItem(k)));
+  await openNav(page, "/system");
+  const card = page.locator(".sys-grid .sys-card", { has: page.locator(".sys-head", { hasText: /^外部への接続/ }) });
+  await expect(card).toHaveCount(1);
+  await expect(card).toContainText("プロキシ 127.0.0.1:9（認証あり）を通して接続します");
+  await expect(card).toContainText("プロキシを通さない宛先: intranet.example.test");
+  await expect(card).toContainText("追加の CA: なし");
+  // 確かめたあと、システム状態を取り直す（印も更新する）
+  const reloaded = page.waitForResponse((r) => r.url().includes("/api/system/status") && r.request().method() === "GET");
+  await card.getByRole("button", { name: "接続を確かめる" }).click();
+  await reloaded;
+  const result = card.getByTestId("outbound-check-result");
+  await expect(result).toContainText("プロキシに接続できません");
+  await expect(result).toContainText("プロキシ経由");
+  // 続けて押すと断る（30 秒に 1 回まで）
+  await card.getByRole("button", { name: "接続を確かめる" }).click();
+  await expect(card).toContainText("続けて確かめられません");
+  // 認証情報はどこにも出ない
+  const html = await page.content();
+  expect(html).not.toContain("e2e-proxy-user");
+  expect(html).not.toContain("e2e-proxy-secret");
+  if (process.env.E2E_SHOT_DIR) await card.screenshot({ path: `${process.env.E2E_SHOT_DIR}/outbound.png` });
+});

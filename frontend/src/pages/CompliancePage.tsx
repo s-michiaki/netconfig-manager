@@ -1,5 +1,5 @@
 /** コンプライアンスチェック: 違反一覧・機器別・ルール管理・例外 */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, errorMessage } from "../api/client";
 import { PERM, useAuth } from "../auth";
@@ -20,6 +20,10 @@ interface Rule {
   section_pattern: string | null;
   severity: Severity;
   enabled: boolean;
+  /** 違反したときの直し方（設定の例）・根拠・分野。機器へは送らず、画面で見る・コピーするだけ */
+  remediation: string | null;
+  reference: string | null;
+  category: string | null;
   updated_by: string | null;
   updated_at: string | null;
   pass_count: number;
@@ -74,6 +78,45 @@ interface DeviceSummary {
 interface Summary { rules: number; devices: DeviceSummary[]; fail_by_severity: Record<Severity, number>; }
 interface Device { id: string; name: string; platform: string; group_id: string | null; }
 const UNGROUPED = "__none__";
+
+/** 分野（backend/app/services/compliance_templates/_base.py の CATEGORIES と合わせる） */
+const CATEGORIES = ["管理アクセス", "認証", "ログ", "時刻", "SNMP", "暗号", "サービス", "バナー", "そのほか"];
+const MAX_REMEDIATION = 4000;
+
+/** クリップボードへコピーする。http・権限なしなど Clipboard API が使えないときは execCommand で試し、だめなら false */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 権限なしなど。下の方法へ
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = typeof document.execCommand === "function" && document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+const axiosStatus = (e: unknown) => (e as { response?: { status?: number } }).response?.status;
+
+/** 説明の行（「# 」＝# と空白で始まる行）。「#」だけの行や「#」に文字が続く行は、命令として残す */
+const isCommentLine = (l: string) => l.trimStart().startsWith("# ");
+
+/** 直し方のうち、機器に入れる行だけ（説明の行は除く） */
+function commandsOf(text: string): string {
+  return text.split("\n").filter((l) => !isCommentLine(l)).join("\n").trim();
+}
 
 const SEV_LABEL: Record<Severity, string> = { high: "高", medium: "中", low: "低" };
 const SEV_BADGE: Record<Severity, string> = { high: "badge-danger", medium: "badge-warning", low: "badge-neutral" };
@@ -245,6 +288,7 @@ function ExceptionModal({
 const EMPTY_RULE: RuleInput = {
   name: "", description: "", platforms: [], match_type: "contains", expect: "present", pattern: "",
   scope: "config", section_pattern: "", severity: "medium", enabled: true,
+  remediation: "", reference: "", category: "",
 };
 
 function RuleModal({
@@ -266,6 +310,9 @@ function RuleModal({
     ...form,
     description: form.description || null,
     section_pattern: form.scope === "section" ? form.section_pattern || null : null,
+    remediation: form.remediation?.trim() ? form.remediation : null,
+    reference: form.reference?.trim() || null,
+    category: form.category || null,
   });
   const canSave = form.name.trim() && form.pattern && (form.scope === "config" || form.section_pattern);
   const candidates = devices.filter((d) => !form.platforms.length || form.platforms.includes(d.platform));
@@ -371,6 +418,30 @@ function RuleModal({
             </p>
           </div>
         )}
+        <div className="cmp-row2">
+          <div className="form-group">
+            <label className="form-label" htmlFor="r-category">分野（任意）</label>
+            <select id="r-category" value={form.category ?? ""} onChange={(e) => set("category", e.target.value)}>
+              <option value="">指定しない</option>
+              {form.category && !CATEGORIES.includes(form.category) && <option value={form.category}>{form.category}</option>}
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="r-ref">根拠（任意。例: 社内標準、一般的な堅牢化の推奨）</label>
+            <input id="r-ref" value={form.reference ?? ""} maxLength={255} onChange={(e) => set("reference", e.target.value)} />
+          </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="r-fix">直し方（任意。設定の例）</label>
+          <textarea id="r-fix" className="mono cmp-fix-input" rows={5} maxLength={MAX_REMEDIATION}
+            value={form.remediation ?? ""} onChange={(e) => set("remediation", e.target.value)}
+            placeholder={"例:\n# 変更前に、別のセッションで SSH ログインできることを確かめてください\nno ip http server"} />
+          <p className="topo-muted topo-small" style={{ marginTop: 4 }}>
+            違反の一覧で表示・コピーできます。機器へは送りません。パスワードなどの秘密の値は書かず、<code>&lt;パスワード&gt;</code> のようなプレースホルダにしてください。
+            「# 」（# と空白）で始まる行は説明として扱い、コピーでは除きます（{(form.remediation ?? "").length} / {MAX_REMEDIATION} 文字）
+          </p>
+        </div>
         <label className="form-check" style={{ marginBottom: 12 }}>
           <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
           有効（無効にすると検査しません）
@@ -413,62 +484,139 @@ function RuleModal({
   );
 }
 
+type Template = RuleInput & { description: string };
+
 function TemplateModal({
   existing, onClose, onAdded,
-}: { existing: Set<string>; onClose: () => void; onAdded: (n: number) => void }) {
-  const { label: platformLabel } = usePlatforms();
-  const [templates, setTemplates] = useState<(RuleInput & { description: string })[]>([]);
+}: { existing: Set<string>; onClose: () => void; onAdded: (n: number, skipped: number) => void }) {
+  const { platforms, label: platformLabel } = usePlatforms();
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [platformFilter, setPlatformFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [open, setOpen] = useState<string | null>(null); // 直し方を開いているひな形
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    api.get("/compliance/templates").then((r) => setTemplates(r.data)).catch((e) => setError(errorMessage(e)));
+    api.get("/compliance/templates").then((r) => { setTemplates(r.data); setLoaded(true); }).catch((e) => setError(errorMessage(e)));
   }, []);
+
+  // 機種の選択肢は、ひな形がある機種だけ（メーカーごとにまとめる）
+  const platformOptions = useMemo(() => {
+    const used = new Set(templates.flatMap((t) => t.platforms));
+    const groups = new Map<string, { id: string; label: string }[]>();
+    for (const p of platforms.filter((x) => used.has(x.id))) groups.set(p.vendor, [...(groups.get(p.vendor) ?? []), p]);
+    return [...groups.entries()];
+  }, [templates, platforms]);
+  const categories = useMemo(() => CATEGORIES.filter((c) => templates.some((t) => t.category === c)), [templates]);
+  const shown = useMemo(
+    () => templates.filter((t) => (!platformFilter || t.platforms.length === 0 || t.platforms.includes(platformFilter))
+      && (!categoryFilter || t.category === categoryFilter)),
+    [templates, platformFilter, categoryFilter]
+  );
+  const selectable = shown.filter((t) => !existing.has(t.name));
+  const pickedShown = shown.filter((t) => picked.has(t.name)).length;
+  const setMany = (names: string[], on: boolean) => {
+    const s = new Set(picked);
+    for (const n of names) { if (on) s.add(n); else s.delete(n); }
+    setPicked(s);
+  };
+
   const add = async () => {
     setBusy(true);
     setError("");
     let n = 0;
+    let skipped = 0; // 同じ名前のルールが、開いている間にできていたもの
     try {
-      for (const t of templates.filter((x) => picked.has(x.name))) {
-        await api.post("/compliance/rules", { ...EMPTY_RULE, ...t, section_pattern: t.section_pattern ?? null });
-        n++;
+      for (const t of templates.filter((x) => picked.has(x.name) && !existing.has(x.name))) {
+        try {
+          await api.post("/compliance/rules", { ...EMPTY_RULE, ...t, section_pattern: t.section_pattern ?? null });
+          n++;
+        } catch (e) {
+          if (axiosStatus(e) === 409) skipped++;
+          else throw e;
+        }
       }
-      onAdded(n);
+      onAdded(n, skipped);
       onClose();
     } catch (e) {
       setError(`${n}件追加したところでエラー: ${errorMessage(e)}`);
-      if (n) onAdded(n);
+      if (n) onAdded(n, skipped);
     } finally {
       setBusy(false);
     }
   };
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal cmp-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal cmp-modal cmp-modal-wide" role="dialog" aria-label="テンプレートから追加" onClick={(e) => e.stopPropagation()}>
         <p className="modal-title">テンプレートから追加</p>
-        <p className="topo-muted topo-small" style={{ marginBottom: 10 }}>よく使う設定基準のひな形です。追加後に編集できます。</p>
-        <ul className="cmp-templates">
-          {templates.map((t) => {
+        <p className="topo-muted topo-small" style={{ marginBottom: 10 }}>
+          よく使う設定基準のひな形です。機種と分野で絞り込み、まとめて選んで追加できます。追加後に編集できます。
+          ひな形は実機では確かめていません（書式は公式ドキュメントと一部を照合したのみで、合格・違反の例は手で書いたものです）。環境に合わせて調整し、直し方は内容を確かめてから投入してください。
+        </p>
+        <div className="cmp-tpl-filters">
+          <label className="audit-field">
+            <span className="form-label">機種</span>
+            <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)} aria-label="機種で絞り込む">
+              <option value="">すべて</option>
+              {platformOptions.map(([vendor, list]) => (
+                <optgroup key={vendor} label={vendor}>
+                  {list.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+          <label className="audit-field">
+            <span className="form-label">分野</span>
+            <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} aria-label="分野で絞り込む">
+              <option value="">すべて</option>
+              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <div className="cmp-tpl-bulk">
+            <button type="button" className="btn btn-sm" disabled={!selectable.length}
+              onClick={() => setMany(selectable.map((t) => t.name), true)}>表示中をすべて選ぶ</button>
+            <button type="button" className="btn btn-sm" disabled={!pickedShown}
+              onClick={() => setMany(shown.map((t) => t.name), false)}>表示中の選択を外す</button>
+          </div>
+        </div>
+        <p className="topo-muted topo-small" style={{ margin: "6px 0" }} data-testid="tpl-count">
+          {shown.length}件を表示（選択中 {picked.size}件・登録済み {shown.filter((t) => existing.has(t.name)).length}件）
+        </p>
+        <ul className="cmp-templates" data-testid="tpl-list">
+          {shown.map((t) => {
             const exists = existing.has(t.name);
             return (
-              <li key={t.name}>
+              <li key={t.name} className="cmp-tpl-item">
                 <label className="form-check">
                   <input type="checkbox" disabled={exists} checked={picked.has(t.name)}
-                    onChange={(e) => {
-                      const s = new Set(picked);
-                      if (e.target.checked) s.add(t.name); else s.delete(t.name);
-                      setPicked(s);
-                    }} />
-                  <span>
-                    <b>{t.name}</b> <SevBadge s={t.severity} />{exists ? <span className="topo-muted">（登録済み）</span> : null}
-                    <span className="topo-muted topo-small" style={{ display: "block" }}>
-                      {t.description} ／ {t.platforms.length ? t.platforms.map((p) => platformLabel(p)).join("・") : "全機種"}
+                    onChange={(e) => setMany([t.name], e.target.checked)} />
+                  <span className="cmp-tpl-body">
+                    <span className="cmp-tpl-head">
+                      <b>{t.name}</b> <SevBadge s={t.severity} />
+                      {t.category && <span className="badge badge-neutral">{t.category}</span>}
+                      {exists ? <span className="badge badge-success">登録済み</span> : null}
+                    </span>
+                    <span className="topo-muted topo-small cmp-tpl-desc">{t.description}</span>
+                    <span className="topo-muted topo-small">
+                      {t.platforms.length ? t.platforms.map((p) => platformLabel(p)).join("・") : "全機種"}
                     </span>
                   </span>
                 </label>
+                {t.remediation && (
+                  <div className="cmp-tpl-fix">
+                    <button type="button" className="link-btn" aria-expanded={open === t.name}
+                      onClick={() => setOpen(open === t.name ? null : t.name)}>
+                      {open === t.name ? "直し方を閉じる" : "直し方を見る"}
+                    </button>
+                    {open === t.name && <RemediationPanel remediation={t.remediation} reference={t.reference} category={null} />}
+                  </div>
+                )}
               </li>
             );
           })}
+          {loaded && !shown.length && <li className="topo-muted" style={{ textAlign: "center", padding: 16 }}>条件に合うひな形はありません</li>}
         </ul>
         {error && <p className="form-error">{error}</p>}
         <div className="btn-row">
@@ -476,6 +624,61 @@ function TemplateModal({
           <button className="btn btn-primary" onClick={add} disabled={busy || !picked.size}>{busy ? "追加・検査中..." : `${picked.size}件を追加`}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** 直し方・根拠の表示。内容は利用者が書けるので、必ずテキストとして出す（HTML として解釈しない）。機器へは送らない */
+function RemediationPanel({
+  remediation, reference, category,
+}: { remediation: string | null; reference: string | null; category: string | null }) {
+  const [msg, setMsg] = useState("");
+  const preRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (!msg) return;
+    const t = window.setTimeout(() => setMsg(""), 4000);
+    return () => window.clearTimeout(t);
+  }, [msg]);
+  if (!remediation) {
+    return <p className="topo-muted topo-small cmp-fix">このルールには直し方が登録されていません（ルールの編集で追加できます）</p>;
+  }
+  const commands = commandsOf(remediation);
+  const copy = async () => {
+    if (await copyText(commands)) {
+      setMsg("コピーしました");
+      return;
+    }
+    // クリップボードを使えない（http・権限なし）ときは、表示を選択して手動でコピーできるようにする
+    try {
+      const sel = window.getSelection();
+      if (sel && preRef.current) {
+        const range = document.createRange();
+        range.selectNodeContents(preRef.current);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    } catch {
+      // 選択できなくても、表示はそのまま読める
+    }
+    setMsg("コピーできませんでした。表示を選択して、手動でコピーしてください（「# 」で始まる行は説明です）");
+  };
+  return (
+    <div className="cmp-fix" data-testid="remediation-panel">
+      <pre className="cmp-fix-pre mono" ref={preRef} data-testid="remediation-text">{remediation}</pre>
+      <div className="cmp-fix-actions">
+        <button type="button" className="btn btn-sm" onClick={copy} disabled={!commands}>コマンドをコピー</button>
+        {msg && <span className="topo-notice topo-small" role="status">{msg}</span>}
+      </div>
+      <p className="topo-muted topo-small cmp-fix-note">
+        機器へは送りません。内容を確かめてから、ご自身で投入してください。
+        {remediation.split("\n").some(isCommentLine) && "「# 」で始まる行は説明で、コピーには含めません。"}
+      </p>
+      {(reference || category) && (
+        <p className="topo-small cmp-fix-meta">
+          {category && <span className="badge badge-neutral">{category}</span>}
+          {reference && <span>根拠: {reference}</span>}
+        </p>
+      )}
     </div>
   );
 }
@@ -503,6 +706,7 @@ export default function CompliancePage() {
   const [sevFilter, setSevFilter] = useState<"" | Severity>("");
   const [editing, setEditing] = useState<Rule | RuleInput | null | undefined>(undefined);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [openFix, setOpenFix] = useState<string | null>(null); // 直し方を開いている違反（機器:ルール）
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [running, setRunning] = useState(false);
@@ -594,7 +798,10 @@ export default function CompliancePage() {
       )}
       {showTemplates && (
         <TemplateModal existing={new Set(rules.map((r) => r.name))} onClose={() => setShowTemplates(false)}
-          onAdded={(n) => { setNotice(`${n}件のルールを追加しました`); load(); }} />
+          onAdded={(n, skipped) => {
+            setNotice(`${n}件のルールを追加しました${skipped ? `（${skipped}件は同じ名前のルールがあり追加しませんでした）` : ""}`);
+            load();
+          }} />
       )}
       <div className="page-header">
         <span className="page-title">コンプライアンス</span>
@@ -669,30 +876,49 @@ export default function CompliancePage() {
             </div>
             <div className="table-scroll">
               <table className="data-table">
-                <thead><tr><th>重要度</th><th>機器</th><th>ルール</th><th>違反箇所</th><th>検査</th>{canWrite && <th />}</tr></thead>
+                <thead><tr><th>重要度</th><th>機器</th><th>ルール</th><th>違反箇所</th><th>検査</th><th /></tr></thead>
                 <tbody>
-                  {shown.map((x) => (
-                    <tr key={`${x.device_id}:${x.rule_id}`}>
+                  {shown.map((x) => {
+                    const key = `${x.device_id}:${x.rule_id}`;
+                    const rule = ruleById.get(x.rule_id);
+                    return (
+                    <Fragment key={key}>
+                    <tr>
                       <td><SevBadge s={x.severity} /></td>
                       <td className="nowrap">
                         <button className="link-btn" onClick={() => navigate(`/history?device=${x.device_id}`)} title="コンフィグの世代を見る">{x.device_name}</button>
                         <div className="topo-muted topo-small">{platformLabel(x.platform)}</div>
                       </td>
-                      <td>{x.rule_name}</td>
+                      <td className="cmp-rule-name">{x.rule_name}</td>
                       <td><Details items={x.details} /></td>
                       <td className="nowrap topo-small">{fmtDate(x.checked_at)}{x.commit_hash ? <div className="topo-muted mono">{x.commit_hash.slice(0, 8)}</div> : null}</td>
-                      {canWrite && (
-                        <td className="nowrap">
-                          {ruleById.get(x.rule_id) && (
+                      <td className="nowrap">
+                        <button className="btn btn-sm" aria-expanded={openFix === key} title="違反の直し方と根拠を見る"
+                          onClick={() => setOpenFix(openFix === key ? null : key)}>
+                          直し方
+                        </button>
+                        {canWrite && rule && (
+                          <>
+                            {" "}
                             <button className="btn btn-sm" title="承認済みの逸脱として除外する"
-                              onClick={() => setExcepting({ rule: ruleById.get(x.rule_id)!, device: { id: x.device_id, name: x.device_name }, details: x.details })}>
+                              onClick={() => setExcepting({ rule, device: { id: x.device_id, name: x.device_name }, details: x.details })}>
                               例外にする
                             </button>
-                          )}
-                        </td>
-                      )}
+                          </>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                    {openFix === key && (
+                      <tr className="cmp-fix-row">
+                        <td colSpan={6}>
+                          <RemediationPanel remediation={rule?.remediation ?? null} reference={rule?.reference ?? null}
+                            category={rule?.category ?? null} />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
+                    );
+                  })}
                   {!shown.length && (
                     <tr><td colSpan={6} className="topo-muted" style={{ textAlign: "center", padding: 24 }}>
                       {rules.length ? "違反はありません" : "ルールが登録されていません。「テンプレートから追加」で始められます"}
@@ -753,6 +979,7 @@ export default function CompliancePage() {
                   <tr key={r.id} style={{ opacity: r.enabled ? 1 : 0.55 }}>
                     <td>
                       <b>{r.name}</b>{!r.enabled && <span className="badge badge-neutral" style={{ marginLeft: 6 }}>無効</span>}
+                      {r.category && <span className="badge badge-neutral" style={{ marginLeft: 6 }}>{r.category}</span>}
                       <div className="topo-muted topo-small">{r.description}</div>
                       <div className="topo-small mono cmp-cond">{describe(r)}</div>
                     </td>

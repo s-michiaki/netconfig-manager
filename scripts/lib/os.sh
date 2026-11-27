@@ -121,21 +121,58 @@ ncm_install_hint() {
   else echo "sudo dnf install -y ${names% }"; fi
 }
 
+# 外へ出るコマンドの sudo（lib/proxy.sh を読んでいればプロキシ・追加の CA の環境変数を引き継ぐ。無ければ sudo のまま）
+_ncm_sudo_out() {
+  if declare -F ncm_sudo_out >/dev/null; then ncm_sudo_out "$@"; else sudo "$@"; fi
+}
+
 # パッケージを入れる（共通の名前を渡す。ncm_extra_packages の戻り値はそのまま渡してよい）
+#   失敗したら、その場で 1 を返す（「ncm_install_packages ... || 対処」の形で呼ぶと関数の中では set -e が効かないため）
 ncm_install_packages() {
   local names=()
   mapfile -t names < <(_ncm_pkg_names "$@")
   if [ "$NCM_OS_FAMILY" = "ubuntu" ]; then
-    sudo apt-get update
-    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${names[@]}"
+    _ncm_sudo_out apt-get update || return 1
+    _ncm_sudo_out env DEBIAN_FRONTEND=noninteractive apt-get install -y "${names[@]}" || return 1
   else
     # podman-compose は EPEL にある
     if [[ " $* " == *" podman-compose "* ]] && ! rpm -q epel-release >/dev/null 2>&1; then
       echo "[INFO] Installing epel-release (podman-compose is provided by EPEL)..."
-      sudo dnf install -y epel-release
+      _ncm_sudo_out dnf install -y epel-release || return 1
     fi
-    sudo dnf install -y "${names[@]}"
+    _ncm_sudo_out dnf install -y "${names[@]}" || return 1
   fi
+}
+
+# OS の信頼ストア（CA の束）の場所（lib/proxy.sh が git 用の束を作るとき・登録済みかを確かめるときに使う）
+#   RHEL 系: update-ca-trust が作る束 / Ubuntu: update-ca-certificates が作る束 / 判定できない OS: あるほう
+ncm_os_ca_bundle() {
+  case "$NCM_OS_FAMILY" in
+    rhel) echo /etc/pki/tls/certs/ca-bundle.crt ;;
+    ubuntu) echo /etc/ssl/certs/ca-certificates.crt ;;
+    *)
+      local f
+      for f in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+        [ -r "$f" ] && { echo "$f"; return 0; }
+      done ;;
+  esac
+}
+
+# 追加で信頼する CA（HTTPS の中身を検査するプロキシの組織の CA）を OS に登録する手順の案内（引数: CA のファイル）。
+#   setup.sh は OS の信頼の設定を自動では変えない（この案内を表示するだけ）
+ncm_ca_trust_hint() {
+  local ca="${1:-<CA のファイル>}"
+  case "$NCM_OS_FAMILY" in
+    rhel)
+      echo "       sudo cp $ca /etc/pki/ca-trust/source/anchors/netconfig-outbound-ca.pem && sudo update-ca-trust" ;;
+    ubuntu)
+      echo "       sudo cp $ca /usr/local/share/ca-certificates/netconfig-outbound-ca.crt && sudo update-ca-certificates"
+      echo "       （Ubuntu は拡張子が .crt のファイルだけを読みます。1 つのファイルに 1 つの証明書にしてください）" ;;
+    *)
+      echo "       AlmaLinux / RHEL: sudo cp $ca /etc/pki/ca-trust/source/anchors/netconfig-outbound-ca.pem && sudo update-ca-trust"
+      echo "       Ubuntu: sudo cp $ca /usr/local/share/ca-certificates/netconfig-outbound-ca.crt && sudo update-ca-certificates" ;;
+  esac
+  echo "       （podman pull は OS の信頼ストアを使います。レジストリごとに /etc/containers/certs.d/<レジストリ>/ca.crt に置く方法もあります）"
 }
 
 # .env に 1 行を足す（引数: ファイル 行）。共通部品（OS には依存しない）

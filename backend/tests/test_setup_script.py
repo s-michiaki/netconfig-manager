@@ -28,9 +28,15 @@ pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash が�
 
 # 偽のコマンド。呼ばれた名前と引数を $FAKE_LOG に 1 行ずつ記録する。動きは環境変数で変える
 #   FAKE_FAIL_ON    "|" 区切りで「コマンド名 引数」の一部。当てはまる呼び出しは 1 で失敗する
+#   FAKE_ENV_LOG    設定すると、受け取ったプロキシ・CA の環境変数を 1 行ずつ記録する（tests/test_proxy_scripts.py）
 STUB = r"""#!/bin/bash
 name=$(basename "$0")
 printf '%s %s\n' "$name" "$*" >> "$FAKE_LOG"
+if [ -n "${FAKE_ENV_LOG:-}" ]; then
+  printf '%s\thttp_proxy=%s\thttps_proxy=%s\tHTTP_PROXY=%s\tHTTPS_PROXY=%s\tno_proxy=%s\tNO_PROXY=%s\tGIT_SSL_CAINFO=%s\n' "$name $*" \
+    "${http_proxy:-}" "${https_proxy:-}" "${HTTP_PROXY:-}" "${HTTPS_PROXY:-}" "${no_proxy:-}" "${NO_PROXY:-}" "${GIT_SSL_CAINFO:-}" >> "$FAKE_ENV_LOG"
+  [ -z "${GIT_SSL_CAINFO:-}" ] || [ "$name" != git ] || cp "$GIT_SSL_CAINFO" "$FAKE_ENV_LOG.gitca"
+fi
 IFS='|' read -ra pats <<<"${FAKE_FAIL_ON:-}"
 for pat in "${pats[@]}"; do
   if [ -n "$pat" ] && [[ "$name $*" == *"$pat"* ]]; then echo "fake $name: 失敗させました" >&2; exit 1; fi
@@ -78,10 +84,24 @@ esac
 exit 0
 """
 # 偽の sudo: 記録して、本物のパスに触れる呼び出しは実行しない。check_env.sh は偽の結果を返す
+#   本物の sudo（env_reset）と同じく、プロキシ・CA の環境変数は --preserve-env=名前,... で引き継いだものだけを残す
+#   FAKE_SUDO_NO_PRESERVE を設定すると、--preserve-env を許さない sudo の設定のまねをする（1 で失敗する）。
+#   本物と同じく、root（偽の sudo の中）からの sudo には許す
 SUDO = r"""#!/bin/bash
 printf 'sudo %s\n' "$*" >> "$FAKE_LOG"
-while [[ "${1:-}" == -* ]]; do case "$1" in -v) [ -n "${FAKE_SUDO_V_FAIL:-}" ] && exit 1; exit 0 ;; -u) shift 2 ;; *) shift ;; esac; done
+keep=","
+while [[ "${1:-}" == -* ]]; do case "$1" in
+  -v) [ -n "${FAKE_SUDO_V_FAIL:-}" ] && exit 1; exit 0 ;;
+  -u) shift 2 ;;
+  --preserve-env=*) [ -n "${FAKE_SUDO_NO_PRESERVE:-}" ] && [ -z "${FAKE_IN_SUDO:-}" ] && { echo "sudo: sorry, you are not allowed to preserve the environment" >&2; exit 1; }
+                    keep=",${1#*=},"; shift ;;
+  *) shift ;;
+esac; done
+for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY GIT_SSL_CAINFO OUTBOUND_CA_FILE; do
+  [[ "$keep" == *",$v,"* ]] || unset "$v"
+done
 [ $# -gt 0 ] || exit 0
+export FAKE_IN_SUDO=1
 # 引数のどこかに、一時ディレクトリの外の本物のパスが含まれていれば（--opt=/etc/x や sh -c '... /etc/crontab' も）実行しない
 for a in "$@"; do
   pre="$FAKE_ROOT/"
@@ -94,7 +114,11 @@ for a in "$@"; do
       exit 99 ;;
   esac
 done
-if [ "$1" = bash ] && [[ "${2:-}" == */check_env.sh ]]; then
+# check_env.sh は偽の結果を返す（sudo env 変数=値 bash check_env.sh・sudo bash -c '. ファイル ...' _ ファイル bash check_env.sh の形でも）
+cmd=("$@")
+if [ "${cmd[0]}" = env ]; then cmd=("${cmd[@]:1}"); while [[ "${cmd[0]:-}" == *=* ]]; do cmd=("${cmd[@]:1}"); done; fi
+if [ "${cmd[0]:-}" = bash ] && [ "${cmd[1]:-}" = -c ] && [ "${cmd[3]:-}" = _ ]; then cmd=("${cmd[@]:5}"); fi
+if [ "${cmd[0]:-}" = bash ] && [[ "${cmd[1]:-}" == */check_env.sh ]]; then
   echo "[ ${FAKE_CHECK_ENV:-OK} ] fake check_env"
   [ "${FAKE_CHECK_ENV:-OK}" = OK ]; exit $?
 fi
@@ -122,6 +146,9 @@ OS_COMMANDS = {
 }
 COMMON_COMMANDS = ["systemctl", "systemd-analyze", "ip", "hostname", "sleep"]
 BASE_PKGS = ["git", "podman", "podman-compose", "curl"]
+# 実行する人の環境から外す変数（プロキシ・追加の CA）
+PROXY_ENV = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "all_proxy", "ALL_PROXY",
+             "GIT_SSL_CAINFO", "OUTBOUND_CA_FILE", "NCM_OS_CA_BUNDLE")
 UBUNTU_EXTRA = ["netavark", "aardvark-dns", "uidmap"]
 OLD_ENV = ("POSTGRES_PASSWORD=pgpass\nSECRET_KEY=secretkey\nDEVICE_ENCRYPTION_KEY=Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OWFiY2RlZmdoaWo=\n"
            "ADMIN_USERNAME=admin\nADMIN_PASSWORD=admin-password-1\nSSH_HOST_KEY_POLICY=tofu\nALLOWED_ORIGINS=\n"
@@ -203,7 +230,8 @@ class Box:
         return self.install / ".env"
 
     def env(self, **extra):
-        base = {k: v for k, v in os.environ.items() if k not in ("DEBIAN_FRONTEND", "NETCONFIG_SETUP_REEXEC")}
+        # 実行する人の環境のプロキシ（開発機・CI の設定）は外す（プロキシのテストは tests/test_proxy_scripts.py で明示して渡す）
+        base = {k: v for k, v in os.environ.items() if k not in ("DEBIAN_FRONTEND", "NETCONFIG_SETUP_REEXEC", *PROXY_ENV)}
         base.update(
             PATH=f"{self.stubs}:{self.installed}:{self.realbin}",
             HOME=str(self.tmp / "home"), TMPDIR=str(self.tmp / "tmp"), LC_ALL="C",
@@ -278,10 +306,10 @@ def assert_safe(b):
     for c in calls:
         for pat in DESTRUCTIVE:
             assert not re.search(pat, c), f"消す操作が呼ばれました: {c}"
-    # rm は一時ファイルの後始末（rm -f <mktemp の名前>）だけ
+    # rm は一時ファイルの後始末（rm -f <mktemp の名前>）と、ビルド用の追加の CA の写し（CA を使わない設定に戻したとき）だけ
     for c in calls:
         if c.startswith("rm "):
-            assert re.fullmatch(r"rm -f \S*/tmp/tmp\.\S+", c), c
+            assert re.fullmatch(r"rm -f \S*/tmp/tmp\.\S+", c) or re.fullmatch(r"rm -f \S*/(backend|frontend)/build-ca/outbound-ca\.crt", c), c
     # podman image prune -f（使われなくなった古いイメージ）以外の prune は呼ばない
     for c in calls:
         if "prune" in c:

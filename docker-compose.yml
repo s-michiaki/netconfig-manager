@@ -75,6 +75,23 @@ x-backend-env: &backend-env
   MONITOR_RETENTION_DAYS: ${MONITOR_RETENTION_DAYS:-30}
   MONITOR_FW_INTERVAL_MIN: ${MONITOR_FW_INTERVAL_MIN:-60}
   MONITOR_PANOS_VSYS: ${MONITOR_PANOS_VSYS:-vsys1}
+  # 脆弱性・サポート終了日の管理（既定は無効。有効にすると worker が外部へ HTTPS で接続する）
+  VULN_ENABLED: ${VULN_ENABLED:-false}
+  VULN_FETCH_HOUR: ${VULN_FETCH_HOUR:-4}
+  VULN_SOURCES: ${VULN_SOURCES:-paloalto,fortinet,kev,eol}
+  # 外部への接続（Webhook・メールの OAuth のトークン・脆弱性情報）。プロキシ（http:// だけ）・プロキシを通さない宛先・
+  # 追加で信頼する CA（ホストの certs-outbound/ に置いたファイルの名前。下の volumes で読み取り専用で渡す）
+  OUTBOUND_PROXY: ${OUTBOUND_PROXY:-}
+  OUTBOUND_NO_PROXY: ${OUTBOUND_NO_PROXY:-}
+  OUTBOUND_CA_FILE: ${OUTBOUND_CA_FILE:-}
+  # podman は、起動したプロセス（setup.sh など）のプロキシの環境変数をコンテナへ入れる。手で podman-compose up したときに
+  # プロキシの認証情報がコンテナの環境に残らないよう、空で明示する（アプリは OUTBOUND_* だけを使う。空は「なし」と同じ）
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  ALL_PROXY: ""
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
 
 x-backend-depends: &backend-depends
@@ -124,6 +141,9 @@ services:
       - config_repo:/app/configs
       - ssh_data:/data/ssh
       - terminal_logs:/data/terminal-logs
+      # 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE）。certs/（nginx の秘密鍵）とは別のディレクトリ。
+      # 3 つのコンテナで共有するので :z（小文字。大文字の Z は 1 つのコンテナ専用のラベルになり、ほかから読めなくなる）
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
@@ -141,6 +161,9 @@ services:
       - config_repo:/app/configs
       - ssh_data:/data/ssh
       - terminal_logs:/data/terminal-logs
+      # 外部への接続で追加で信頼する CA（OUTBOUND_CA_FILE）。certs/（nginx の秘密鍵）とは別のディレクトリ。
+      # 3 つのコンテナで共有するので :z（小文字。大文字の Z は 1 つのコンテナ専用のラベルになり、ほかから読めなくなる）
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     command: celery -A app.worker.celery_app worker --loglevel=info -c 4
 
@@ -150,6 +173,7 @@ services:
     environment: *backend-env
     volumes:
       - ./backend:/app
+      - ./certs-outbound:/etc/netconfig/outbound:ro,z
     depends_on: *backend-depends
     # DBのスケジュールを毎分確認するタスク（dispatch_due_schedules）を起動する
     command: celery -A app.worker.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
@@ -166,6 +190,13 @@ services:
     environment:
       # Vite 開発サーバーが /api を backend コンテナへ中継する
       API_PROXY_TARGET: http://backend:8000
+      # プロキシの環境変数は空で明示する（x-backend-env と同じ理由。nginx・vite は外へ出ない）
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
     depends_on:
       - backend
 

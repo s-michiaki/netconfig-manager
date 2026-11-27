@@ -13,7 +13,10 @@
 #   -f FILE            機器を1行1台で列挙したファイル（"HOST[:PORT]"、# 以降はコメント）
 #   -m prod|dev        構成（prod: 80・443番を使用 / dev: 3000・8000番を使用。既定 prod）
 #   -r                 hello-world コンテナを実際に起動して確認する（イメージを取得します）
+#   -c FILE            追加で信頼する CA（PEM。.env の OUTBOUND_CA_FILE より後。初回の導入で setup.sh が渡す）
 #   -h                 このヘルプ
+#
+# プロキシ: .env の OUTBOUND_PROXY（無ければ環境変数 https_proxy など）を通して、インターネットへの到達を確かめる
 #
 # 例:
 #   bash scripts/check_env.sh
@@ -48,7 +51,7 @@ NCM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/os.sh"
 # shellcheck source=lib/os.sh
 . "$NCM_LIB"
 
-usage() { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ---------------------------------------------------------------- 引数
 add_from_file() {
@@ -60,8 +63,9 @@ add_from_file() {
   done < "$1"
 }
 
-while getopts ":d:j:f:m:rh" opt; do
+while getopts ":d:j:f:m:c:rh" opt; do
   case "$opt" in
+    c) export OUTBOUND_CA_FILE="$OPTARG" ;;
     d) DEVICES+=("$OPTARG") ;;
     j) JUMPS+=("$OPTARG") ;;
     f) add_from_file "$OPTARG" ;;
@@ -186,15 +190,70 @@ fi
 # =============================================================================
 section "4. インターネット接続（ビルド時のダウンロード）"
 # =============================================================================
+# プロキシ・追加の CA（scripts/lib/proxy.sh。setup.sh と同じ読み方: .env → 環境変数）。値は伏せ字でだけ表示する
 PROXY_VARS="$(env | grep -iE '^(https?|no)_proxy=' | sed 's/=.*//' | tr '\n' ' ')"
-[ -n "$PROXY_VARS" ] && info "プロキシ環境変数: $PROXY_VARS（コンテナのビルドにも設定が必要な場合あり）"
+PX_LIB="$(dirname "$NCM_LIB")/proxy.sh"
+PX_SET=0; PX_CACERT=""
+if [ -f "$PX_LIB" ]; then
+  # shellcheck source=lib/proxy.sh
+  . "$PX_LIB"
+  if ncm_proxy_load "$(cd "$(dirname "$NCM_LIB")/../.." && pwd)"; then
+    ncm_proxy_apply --no-sudo
+    if ncm_proxy_is_set; then
+      PX_SET=1
+      ok "プロキシ: $(ncm_proxy_mask)（${_NCM_PX_SRC}。導入・更新とアプリが使います）"
+      info "プロキシを通さない宛先: $no_proxy"
+    else
+      info "プロキシ: なし（直接接続）"
+    fi
+    if [ -n "$(ncm_proxy_ca_path)" ]; then
+      PX_CACERT="${GIT_SSL_CAINFO:-}"   # OS の信頼ストア＋追加の CA の束（git と同じもの）
+      if ncm_proxy_ca_registered; then ok "追加の CA: $(ncm_proxy_ca_path)（OS の信頼ストアにも登録済み）"
+      else
+        warn "追加の CA: $(ncm_proxy_ca_path) が OS の信頼ストアに未登録（パッケージの導入・podman pull が証明書のエラーになる場合あり）"
+        while IFS= read -r line; do info "${line#       }"; done < <(_ncm_px_trust_hint "$(ncm_proxy_ca_path)")
+      fi
+    fi
+    for n in "${_NCM_PX_NOTES[@]}"; do warn "$n"; done
+  else
+    ng "$(ncm_proxy_error)（値は表示しません）"
+  fi
+  trap 'ncm_proxy_cleanup' EXIT
+fi
+[ -n "$PROXY_VARS" ] && info "プロキシ環境変数: $PROXY_VARS（setup.sh がコンテナのビルドにも渡します）"
 
+# 到達の確認。プロキシがあれば、届かない・407（認証）・CONNECT の拒否・証明書の検証の失敗を切り分ける
+cert_hint() {
+  if [ -n "$(declare -F ncm_proxy_ca_path >/dev/null && ncm_proxy_ca_path)" ]; then
+    info "追加の CA（$(ncm_proxy_ca_path)）が、プロキシの証明書の発行元か確かめてください"
+  else
+    info "HTTPS の中身を検査するプロキシなら、組織の CA（PEM）を certs-outbound/ に置き、.env の OUTBOUND_CA_FILE に名前を書いてください（README「プロキシ環境での導入」）"
+  fi
+}
 check_url() { # $1=name $2=url
-  local code
+  local out rc code conn args=(-s -o /dev/null -m 10 -w '%{http_code} %{http_connect}')
   if ! have curl; then warn "$1: curl が無いため確認できません"; return; fi
-  code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$2" 2>/dev/null)"
-  if [ -n "$code" ] && [ "$code" != "000" ]; then ok "$1 に接続可能 (HTTP $code)"
-  else ng "$1 に接続できません ($2)"; fi
+  [ -z "$PX_CACERT" ] || args+=(--cacert "$PX_CACERT")
+  out="$(curl "${args[@]}" "$2" 2>/dev/null)"; rc=$?
+  code="${out%% *}"; conn=""; [[ "$out" == *" "* ]] && conn="${out#* }"
+  if [ -n "$code" ] && [ "$code" != "000" ]; then ok "$1 に接続可能 (HTTP $code)"; return; fi
+  if [ "$PX_SET" -eq 1 ]; then
+    case "$conn" in
+      407) ng "$1: プロキシの認証に失敗しました（407）。ユーザー名・パスワードと、記号の URL エンコード（@ → %40 など）を確かめてください"; return ;;
+      ""|000|200) ;;
+      *) ng "$1: プロキシが $2 への接続を拒否しました（CONNECT に HTTP $conn）。プロキシの許可リストに加えてもらってください"; return ;;
+    esac
+    case "$rc" in
+      5) ng "$1: プロキシのホスト名を解決できません（OUTBOUND_PROXY のホスト名・DNS）"; return ;;
+      7) ng "$1: プロキシに接続できません（OUTBOUND_PROXY のホスト・ポート、サーバーからプロキシまでのファイアウォール）"; return ;;
+    esac
+  fi
+  case "$rc" in
+    60|77|83) ng "$1: 証明書を検証できません ($2)"; cert_hint; return ;;
+    35) ng "$1: TLS の接続に失敗しました ($2)"; [ "$PX_SET" -eq 0 ] || cert_hint; return ;;
+    28) ng "$1 に接続できません（応答がありません。$2）"; return ;;
+  esac
+  ng "$1 に接続できません ($2)"
 }
 check_url "Docker Hub"   "https://registry-1.docker.io/v2/"
 check_url "PyPI"         "https://pypi.org/simple/"

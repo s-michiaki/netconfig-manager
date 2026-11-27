@@ -4,7 +4,8 @@
 - ログインのセッション（パスワード・2 段階認証を通ったもの）でしか行えないもの:
   API トークンの発行・失効、パスワード変更、2 段階認証、ユーザー管理、メールサーバー・通知の設定（送信先・Webhook の秘密を含む）、
   認証情報（機器・踏み台・認証情報プロファイル・SNMP のパスワードや鍵）を登録・変更する操作、ターミナルの記録の中身、
-  外部 Git への push の実行、ターミナル・Ping の WebSocket（WebSocket の認証はログインのトークンだけを受け付ける）
+  外部 Git への push の実行・外部への接続の確認、ターミナル・Ping の WebSocket
+  （WebSocket の認証はログインのトークンだけを受け付ける）
 - そのほかは、発行した人のいまのロールの権限の範囲で使える（require(Perm.xxx) で判定）。
   範囲が read のトークンは、さらに GET だけ・閲覧の権限（READ_ONLY_PERMS）だけ
 - 新しい API を作っても、ここに足さない限りトークンでは呼べない（403「ログインして操作してください」）。
@@ -132,6 +133,15 @@ TOKEN_ALLOWED: frozenset[str] = frozenset({
     "GET /api/monitoring/fw/{device_id}/rules",
     "POST /api/monitoring/fw/{device_id}/collect",
     "GET /api/monitoring/fw/{device_id}/raw",
+    # 脆弱性・サポート終了日（閲覧だけ。確認済み・手入力・いま取得はログインが必要）
+    "GET /api/vulns/summary",
+    "GET /api/vulns/matches",
+    "GET /api/vulns/matches/export",
+    "GET /api/vulns/devices",
+    "GET /api/vulns/unknown",
+    "GET /api/vulns/advisories/{advisory_id}",
+    "GET /api/vulns/eol",
+    "GET /api/vulns/eol/devices",
 })
 
 # 範囲が read のトークンで呼べるメソッド（副作用の無いもの）

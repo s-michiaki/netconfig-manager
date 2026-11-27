@@ -20,6 +20,31 @@ from app.models.user import User
 from app.services.config_service import PLATFORMS
 
 router = APIRouter()
+VULN_EOL_DAYS = 90  # タイルの「サポート終了まで」の日数
+
+
+async def vuln_tile(db: AsyncSession, devices: list[Device]) -> dict:
+    """脆弱性のタイル: 未確認の該当（確定。stale を除く）の件数、うち悪用確認済み、
+    サポート終了まで 90 日以内（終了済みを含む）の機器の数"""
+    from app.models.vuln import VulnAdvisory, VulnMatch
+    from app.services import vuln_service
+
+    ids = {d.id for d in devices}
+    rows = (await db.execute(
+        select(VulnMatch.device_id, VulnAdvisory.kev).join(VulnAdvisory, VulnAdvisory.id == VulnMatch.advisory_id)
+        .where(VulnMatch.state == "open", VulnMatch.stale.is_(False), VulnMatch.confidence == "confirmed"))).all()
+    rows = [r for r in rows if r[0] in ids]
+    eol = await vuln_service.eol_rows(db)
+    today = vuln_service.local_today()
+    soon = ended = 0
+    for d in devices:
+        e = vuln_service.device_eol(eol, d, today)
+        days = [x["days_left"] for x in (e["os"], e["hardware"]) if x]
+        if days and min(days) <= VULN_EOL_DAYS:
+            soon += 1
+            ended += min(days) < 0
+    return {"open": len(rows), "kev": sum(1 for _, k in rows if k), "devices": len({d for d, _ in rows}),
+            "eol_soon": soon, "eol_ended": ended, "eol_days": VULN_EOL_DAYS}
 LIST_LIMIT = 10
 COMMENT_EXCERPT = 60  # 直近の変更に出すコメントの長さ
 KIND_LABELS = {"collect": "コンフィグ収集", "compliance": "コンプライアンスチェック"}
@@ -125,7 +150,11 @@ async def dashboard(db: AsyncSession = Depends(get_db), user: User = Depends(get
                "unsaved": sum(1 for d in devices if d.startup_state == "unsaved" and d.platform in startup_platforms)
                if settings.STARTUP_CHECK_ENABLED else 0}
 
+    # 脆弱性（VULN_ENABLED のときだけ。無効のときは項目ごと出さない）
+    vuln = await vuln_tile(db, devices) if settings.VULN_ENABLED else None
+
     return {
+        "vuln": vuln,
         "devices": {"total": len(devices), "active": len(active), "inactive": len(devices) - len(active),
                     "failing": len(failing), "never": len(never),
                     "ok": len(active) - len(failing) - len(never)},

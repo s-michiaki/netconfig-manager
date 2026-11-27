@@ -18,6 +18,10 @@
              使っていない・開発環境）では unknown にして、警告も通知もしない
   git_export : コンフィグ履歴の外部 Git への push（services/git_export.py）の最後の結果。設定していなければ unknown
   mail     : メール送信の設定と最後の送信の結果（有効にしていなければ unknown）
+  vuln     : 脆弱性・サポート終了日の外部からの取得（VULN_ENABLED のときだけ）。最後の成功・失敗している情報源・
+             STALE_DAYS 日以上取得できていなければ warn（画面に注意を出すだけで、通知はしない）
+  outbound : 外部への接続（core/outbound.py）。プロキシ（ホスト:ポートと認証の有無だけ）・追加の CA の件数と期限・
+             最後の「接続を確かめる」の結果。CA の期限切れ・30 日以内・確認の失敗は warn（画面に出すだけで、通知はしない）
   images   : コンテナのイメージ（DB・Redis・ビルドの土台）の作成日時。setup.sh が app.tools.image_report で伝える。
              古い（IMAGE_STALE_DAYS 日より前）・取り直せなかったら warn
 
@@ -53,6 +57,7 @@ HEARTBEAT_KEY = "netconfig:system:heartbeat"  # beat → worker の heartbeat �
 STATE_KEY = "netconfig:system:alerts"  # 通知済みの状態（項目ごと）
 IMAGES_KEY = "netconfig:system:images"  # setup.sh が伝えたコンテナのイメージ（名前・作成日時・取り直せなかったもの。JSON）
 BACKUP_KEY = "netconfig:system:backup"  # バックアップの記録（最後の結果・最後の成功・タイマーの登録状況。JSON）
+OUTBOUND_CHECK_KEY = "netconfig:system:outbound_check"  # 最後の「接続を確かめる」の結果（JSON。秘密は含めない）
 BEAT_STALE_SEC = 180  # heartbeat（毎分）がこの秒数より古ければ、スケジューラーが止まっているとみなす
 DISK_WARN_PCT, DISK_ERROR_PCT = 15, 5
 CERT_WARN_DAYS, CERT_ERROR_DAYS = 30, 7
@@ -383,6 +388,37 @@ async def check_images(now: datetime, redis_ok: bool = True) -> Component:
     return Component(key, label, "ok", f"{len(images)} 個のイメージ。どれも {days} 日以内に作られたものです", detail)
 
 
+async def check_vuln(db: AsyncSession, now: datetime) -> Component:
+    """脆弱性情報の取得（services/vuln_service.py）。無効なら unknown（画面にも出さない）"""
+    from app.models.vuln import VulnSource
+    from app.services import vuln_service
+
+    key, label = "vuln", "脆弱性情報の取得"
+    if not settings.VULN_ENABLED:
+        return Component(key, label, "unknown", "無効です（.env の VULN_ENABLED=true で有効）")
+    names = vuln_service.active_sources()
+    saved = {s.source: s for s in (await db.execute(select(VulnSource))).scalars()}
+    srcs = [{"source": n, "label": vuln_service.SOURCE_LABELS[n], "last_ok_at": saved[n].last_ok_at.isoformat()
+             if n in saved and saved[n].last_ok_at else None, "last_error": saved[n].last_error if n in saved else None}
+            for n in names]
+    oks = [s.last_ok_at for s in saved.values() if s.source in names and s.last_ok_at]
+    detail = {"last_success": max(oks).isoformat() if oks else None, "sources": srcs,
+              "failed": [s["label"] for s in srcs if s["last_error"]], "stale_days": vuln_service.STALE_DAYS}
+    if not names:
+        return Component(key, label, "unknown", "使う情報源がありません（VULN_SOURCES）", detail)
+    if detail["failed"]:
+        return Component(key, label, "warn", "取得に失敗している情報源があります: " + "、".join(detail["failed"]), detail)
+    never = [s["label"] for s in srcs if not s["last_ok_at"]]
+    if never and not oks:
+        return Component(key, label, "ok", f"まだ取得していません（毎日 {settings.VULN_FETCH_HOUR} 時以降に取得します）", detail)
+    old = [s["label"] for s in srcs if s["last_ok_at"] and now - datetime.fromisoformat(s["last_ok_at"])
+           > timedelta(days=vuln_service.STALE_DAYS)]
+    if old or never:
+        return Component(key, label, "warn", f"{vuln_service.STALE_DAYS} 日以上取得できていない情報源があります: "
+                         + "、".join(old + never), detail)
+    return Component(key, label, "ok", "取得できています", detail)
+
+
 async def check_git_export(redis_ok: bool = True) -> Component:
     key, label = "git_export", "外部 Git への push"
     if not git_export.enabled():
@@ -436,6 +472,54 @@ async def check_mail(db: AsyncSession, redis_ok: bool = True) -> Component:
     return Component(key, label, "ok", "送信できています", detail)
 
 
+async def record_outbound_check(result: dict) -> None:
+    try:
+        await login_limit.client().set(OUTBOUND_CHECK_KEY, json.dumps(result, ensure_ascii=False))
+    except (RedisError, OSError):
+        pass
+
+
+async def check_outbound(now: datetime, redis_ok: bool = True) -> Component:
+    """外部への接続の設定と、最後の「接続を確かめる」の結果。認証情報・プロキシの URL は出さない"""
+    from app.core import outbound
+
+    key, label = "outbound", "外部への接続"
+    detail: dict = outbound.summary()
+    warns: list[str] = []
+    if detail["proxy_error"]:
+        warns.append(detail["proxy_error"])
+    try:
+        ca = outbound.ca_info(now)
+    except ValueError as e:  # ファイル名が不正（起動時に確かめているので、実行中に変えたときだけ）
+        ca = {"file": settings.OUTBOUND_CA_FILE, "count": 0, "error": str(e)}
+    detail["ca"] = ca
+    if ca and ca.get("error"):
+        warns.append(ca["error"])
+    elif ca and ca["expired"]:
+        warns.append("追加の CA 証明書の期限が切れています（OUTBOUND_CA_FILE を新しい証明書にしてください）")
+    elif ca and ca["days_left"] <= outbound.CA_WARN_DAYS:
+        warns.append(f"追加の CA 証明書の期限まであと {ca['days_left']} 日です")
+    last = None
+    if redis_ok:
+        try:
+            raw = await login_limit.client().get(OUTBOUND_CHECK_KEY)
+            last = json.loads(raw) if raw else None
+        except (RedisError, OSError, ValueError):
+            last = None
+    detail["last_check"] = last
+    if last and last.get("result") != "ok":
+        warns.append(f"最後の接続の確認に失敗しました: {last.get('message') or last.get('label')}")
+    how = (f"プロキシ {detail['proxy']}（認証{'あり' if detail['proxy_auth'] else 'なし'}）を通して接続します"
+           if detail["proxy"] else "プロキシを使わず直接接続します")
+    if ca and not ca.get("error"):
+        how += f"。追加の CA {ca['count']} 件"
+    if warns:
+        return Component(key, label, "warn", "。".join([how, *warns]), detail, items=warns)
+    if not detail["proxy"] and not ca and not last:
+        return Component(key, label, "unknown", how + "（プロキシ・追加の CA は設定していません）", detail)
+    return Component(key, label, "ok", how, detail)
+
+
 async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[Component]:
     now = now or utcnow()
     database = await check_db(db)
@@ -444,8 +528,10 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     out = [database, redis_c, worker, check_beat(heartbeat, worker, now)]
     if database.status == "ok":
         out += [await check_schedules(db), await check_collect(db, now), await check_mail(db, redis_c.status == "ok")]
+    extra = [await check_vuln(db, now)] if database.status == "ok" and settings.VULN_ENABLED else []
     return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok"),
-            await check_git_export(redis_c.status == "ok"), await check_images(now, redis_c.status == "ok")]
+            await check_git_export(redis_c.status == "ok"), await check_images(now, redis_c.status == "ok"),
+            await check_outbound(now, redis_c.status == "ok"), *extra]
 
 
 def overall(components: list[Component]) -> str:
