@@ -139,7 +139,7 @@ class Env:
                           BACKUP_WORK_DIR=str(self.tmp / "bwork"), FAKE_EMPTY=str(self.src), FAKE_DOWN="", FAKE_PGFAIL="",
                           **extra)
         r = subprocess.run(["bash", str(script or self.install / "scripts" / "backup.sh")], env=e, capture_output=True,
-                           text=True, timeout=60)
+                           text=True, errors="replace", timeout=60)
         assert r.returncode == 0, r.stdout + r.stderr
         files = sorted(self.backups.glob("netconfig-backup-*"), key=lambda p: p.stat().st_mtime)
         return files[-1]
@@ -151,8 +151,9 @@ class Env:
                           RESTORE_WORK_DIR=str(self.tmp / "rwork"), FAKE_VOLROOT=str(self.vol), FAKE_MARK=MARK,
                           PATH=f"{self.rbin}:{os.environ['PATH']}", GNUPGHOME=self.gnupg, **extra)
         (self.tmp / "rwork").mkdir(exist_ok=True)
+        # gpg は壊れた入力に対して、エラーの文にバイナリの断片を出すことがある（UTF-8 として読めない）ので、読めない所は置き換える
         return subprocess.run(["bash", str(self.install / "scripts" / "restore.sh"), str(file)], env=e, input=stdin,
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, errors="replace", timeout=120)
 
     def calls(self):
         return self.log.read_text().splitlines()
