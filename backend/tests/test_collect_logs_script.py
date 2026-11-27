@@ -186,3 +186,20 @@ def test_works_when_things_are_broken(env):
     f = bundle(tmp_path)
     assert "見つかりません" in f["containers/ps.txt"] and ".env がありません" in f["app/env.txt"]
     assert "収集日時" in f["summary.txt"] and "system/df.txt" in f
+
+
+def test_output_is_never_readable_by_others_while_being_written(env):
+    """#39: 以前は保存先に tee で（umask のまま 644 で）書いてから chmod 600 していたので、その間はほかの人が読めた。
+    いまは自分だけが読める作業用のディレクトリで作り、install -m 600 で置く。書き込み中の権限を偽の tee・gzip で確かめる"""
+    tmp_path, e = env
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    # 保存先へ tee で書く形を使わない（使われたら目印を残す）
+    (stubs / "tee").write_text(f'#!/bin/bash\nfor a in "$@"; do [[ "$a" == {tmp_path}/out/* ]] && touch {tmp_path}/tee-used; done\nexec /usr/bin/tee "$@"\n')
+    (stubs / "tee").chmod(0o755)
+    r = run(e, PATH=f"{stubs}:{os.environ['PATH']}")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (tmp_path / "tee-used").exists()
+    [f] = list((tmp_path / "out").glob("netconfig-logs-*.tar.gz"))
+    assert f.stat().st_mode & 0o777 == 0o600
+    assert bundle(tmp_path)["summary.txt"]

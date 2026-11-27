@@ -18,6 +18,7 @@ interface MailServer {
   google_sa_email: string | null; google_authorized: boolean; google_authorized_at: string | null; google_redirect_uri: string;
   updated_at: string | null; updated_by: string | null;
   last_result: { at: string; ok: boolean; error: string | null } | null;
+  warnings?: string[]; // 設定の注意（暗号化なしのパスワード・証明書の未検証・宛先のドメインの制限なし）。送信は止めない
 }
 
 const AUTH_OPTIONS: [Auth, string, string][] = [
@@ -47,6 +48,7 @@ interface Form {
   username: string; from_address: string; from_name: string; subject_prefix: string; allowed_domains: string;
   ms_tenant_id: string; ms_client_id: string; google_client_id: string;
   password: string; ms_client_secret: string; google_client_secret: string; google_sa_json: string;
+  accept_insecure: boolean; // 暗号化なし＋パスワード認証を、危険を理解したうえで新しく保存する
 }
 
 function toForm(s: MailServer): Form {
@@ -55,6 +57,7 @@ function toForm(s: MailServer): Form {
     username: s.username, from_address: s.from_address, from_name: s.from_name, subject_prefix: s.subject_prefix,
     allowed_domains: s.allowed_domains, ms_tenant_id: s.ms_tenant_id, ms_client_id: s.ms_client_id,
     google_client_id: s.google_client_id, password: "", ms_client_secret: "", google_client_secret: "", google_sa_json: "",
+    accept_insecure: false,
   };
 }
 
@@ -174,12 +177,21 @@ export default function MailServerTab() {
   };
 
   const last = data.last_result;
+  const fromDomain = form.from_address.includes("@") ? form.from_address.split("@").pop()!.trim().toLowerCase() : "";
+  const plainPassword = form.auth === "password" && form.security === "none";
   return (
     <div className="card ntf-card mail-card">
       <p className="ntf-lead">
         通知をメールで送るための設定です。宛先は「自分の通知」「ユーザーグループ」で登録します。
         パスワード・シークレット・鍵は暗号化して保存し、画面には表示しません。
       </p>
+
+      {(data.warnings ?? []).length > 0 && (
+        <div className="mail-warnings" role="alert" data-testid="mail-warnings">
+          <b>設定の注意</b>（送信は続けます。システム状態にも表示します）
+          <ul>{(data.warnings ?? []).map((w) => <li key={w}>{w}</li>)}</ul>
+        </div>
+      )}
 
       <label className="form-check" style={{ marginBottom: 12 }}>
         <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
@@ -219,10 +231,19 @@ export default function MailServerTab() {
           </select>
         </div>
       </div>
-      {form.security !== "none" && (
+      {form.security !== "none" && (!isOauth || !form.verify_tls) && (
         <label className="form-check" style={{ marginBottom: 12 }}>
-          <input type="checkbox" checked={!form.verify_tls} onChange={(e) => set("verify_tls", !e.target.checked)} />
+          {/* OAuth 2.0 では新しく外せない（トークンを中間者に渡すため）。保存済みで外れているときは、付け直せるように表示する */}
+          <input type="checkbox" checked={!form.verify_tls} disabled={isOauth && form.verify_tls}
+                 onChange={(e) => set("verify_tls", !e.target.checked)} />
           サーバーの証明書を確認しない（社内の自己署名の証明書のときだけ。通信を盗み見られても気づけなくなります）
+          {isOauth && "。OAuth 2.0 では使えません。チェックを外して保存してください"}
+        </label>
+      )}
+      {plainPassword && (
+        <label className="form-check mail-insecure" style={{ marginBottom: 12 }}>
+          <input type="checkbox" checked={form.accept_insecure} onChange={(e) => set("accept_insecure", e.target.checked)} />
+          暗号化なしでパスワードを送ることを許可する（経路上で読み取られます。社内のリレーなどで、ほかに方法が無いときだけ）
         </label>
       )}
 
@@ -330,8 +351,17 @@ export default function MailServerTab() {
       {isOauth && <p className="ntf-muted mail-hint">OAuth 2.0 では、送信元は送信に使うメールアドレス（または送信を許可された別名）にしてください。</p>}
       <div className="form-group">
         <label className="form-label" htmlFor="mail-domains">宛先に使えるドメイン（カンマ区切り。空なら制限しない）</label>
-        <input id="mail-domains" value={form.allowed_domains} onChange={(e) => set("allowed_domains", e.target.value)} placeholder="example.com, example.co.jp" />
-        <p className="ntf-muted" style={{ marginTop: 4 }}>閲覧者も自分の宛先を登録できるため、社外のアドレスへ送らせないときに指定します（サブドメインも含みます）。</p>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input id="mail-domains" value={form.allowed_domains} onChange={(e) => set("allowed_domains", e.target.value)} placeholder="example.com, example.co.jp" />
+          {fromDomain && !form.allowed_domains.trim() && (
+            <button type="button" className="btn btn-sm" style={{ whiteSpace: "nowrap" }} onClick={() => set("allowed_domains", fromDomain)}>
+              送信元のドメイン（{fromDomain}）にする
+            </button>
+          )}
+        </div>
+        <p className="ntf-muted" style={{ marginTop: 4 }}>
+          閲覧者・オペレーターも自分の宛先を登録できます。空のままだと社外を含む任意のアドレスへ送れるため、組織のドメインを指定することをおすすめします（サブドメインも含みます）。
+        </p>
       </div>
 
       {error && <p className="form-error">{error}</p>}

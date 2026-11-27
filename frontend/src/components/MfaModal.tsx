@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { api, errorMessage } from "../api/client";
+import { api, errorMessage, setToken } from "../api/client";
 
 /**
  * 2 段階認証（ワンタイムパスワード）の設定。本人だけが操作する（管理者は「ユーザー管理」で解除だけできる）
- * - 未設定: 「設定を始める」→ QR コードを認証アプリで読み取る → 表示された 6 桁で確認 → 予備コードを控える
+ * - 未設定: パスワードを入れ直して「設定を始める」→ QR コードを認証アプリで読み取る → 表示された 6 桁で確認 → 予備コードを控える
  * - 設定済み: 予備コードの作り直し、解除（パスワードとコードで確認）
+ * 設定・解除すると、それまでのログイン（ほかの端末を含む）は切れる。この画面は返ってきた新しいトークンに差し替える
  */
 
 interface Setup { secret: string; uri: string; qr_svg: string; }
@@ -51,9 +52,13 @@ export default function MfaModal({ enabled, onClose, onChanged }: { enabled: boo
     }
   };
 
-  const start = () => run(async () => { setSetup((await api.post<Setup>("/auth/mfa/setup")).data); });
+  const start = () => run(async () => {
+    setSetup((await api.post<Setup>("/auth/mfa/setup", { password })).data);
+    setPassword("");
+  });
   const enable = () => run(async () => {
-    const r = await api.post<{ recovery_codes: string[] }>("/auth/mfa/enable", { code });
+    const r = await api.post<{ recovery_codes: string[]; access_token?: string }>("/auth/mfa/enable", { code });
+    if (r.data.access_token) setToken(r.data.access_token); // 設定する前のトークンは使えなくなる
     setRecovery(r.data.recovery_codes);
     setSetup(null);
     setCode("");
@@ -66,11 +71,12 @@ export default function MfaModal({ enabled, onClose, onChanged }: { enabled: boo
     setMode("main");
   });
   const disable = () => run(async () => {
-    await api.post("/auth/mfa/disable", { password, code });
+    const r = await api.post<{ access_token?: string }>("/auth/mfa/disable", { password, code });
+    if (r.data.access_token) setToken(r.data.access_token); // 解除する前のトークンは使えなくなる
     setPassword("");
     setCode("");
     setMode("main");
-    setNotice("2 段階認証を解除しました。次のログインからはパスワードだけで入れます");
+    setNotice("2 段階認証を解除しました。次のログインからはパスワードだけで入れます（ほかの端末のログインは切れました）");
     onChanged();
   });
 
@@ -103,10 +109,16 @@ export default function MfaModal({ enabled, onClose, onChanged }: { enabled: boo
         <p style={{ marginTop: 0 }}>
           ログインのときに、パスワードに加えて認証アプリのワンタイムパスワード（6 桁）を求めます。パスワードが漏れても、ほかの人がログインできなくなります。
         </p>
+        <p className="topo-muted topo-small">設定すると、ほかの端末でのログインは切れます（この画面はそのまま使えます）。</p>
+        <div className="form-group">
+          <label className="form-label" htmlFor="mfa-setup-pw">パスワード（本人の確認）</label>
+          <input id="mfa-setup-pw" type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+                 autoComplete="current-password" onKeyDown={(e) => { if (e.key === "Enter" && password && !busy) start(); }} />
+        </div>
         {error && <p className="form-error">{error}</p>}
         <div className="btn-row">
           <button className="btn" onClick={onClose}>閉じる</button>
-          <button className="btn btn-primary" onClick={start} disabled={busy}>設定を始める</button>
+          <button className="btn btn-primary" onClick={start} disabled={busy || !password}>設定を始める</button>
         </div>
       </>
     );

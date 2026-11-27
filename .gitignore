@@ -3,7 +3,7 @@ __pycache__/
 .ruff_cache/
 *.pyc
 .pytest_cache/
-node_modules/
+node_modules
 dist/
 # Playwright（画面テスト）の結果
 test-results/

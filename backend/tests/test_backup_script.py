@@ -43,7 +43,7 @@ def env(tmp_path):
     fake.chmod(0o755)
     (tmp_path / "empty").mkdir()
     e = {**os.environ, "INSTALL_DIR": str(install), "PROJECT_NAME": "ncm", "CONTAINER_CMD": str(fake),
-         "BACKUP_DIR": str(tmp_path / "backups"), "FAKE_EMPTY": str(tmp_path / "empty"),
+         "BACKUP_DIR": str(tmp_path / "backups"), "BACKUP_WORK_DIR": str(tmp_path / "work"), "FAKE_EMPTY": str(tmp_path / "empty"),
          "FAKE_LOG": str(tmp_path / "report.log"), "FAKE_DOWN": "", "FAKE_PGFAIL": ""}
     return tmp_path, e
 
@@ -222,3 +222,81 @@ def test_encryption_key_missing_fails(env):
     assert not list((tmp / "backups").glob("netconfig-backup-*"))  # 暗号化しないで作る、ということはしない
     line = reports(tmp)[-1]
     assert arg(line, "--status") == "failed" and "パスフレーズのファイル" in line
+
+
+# ------------------------------------------------------------------ #36: 平文の作業用のファイル
+def test_work_dir_is_outside_backup_dir_and_removed_before_post_command(env):
+    """BACKUP_DIR をディレクトリごと同期する BACKUP_POST_COMMAND でも、平文の作業用のファイル（.env・DB のダンプ）が送られない。
+    作業用のディレクトリは BACKUP_DIR の外に作り、アーカイブができたらすぐ（外部への保管より前に）消す"""
+    tmp, e = env
+    seen = tmp / "seen.txt"
+    cmd = f'{{ echo "== backup"; ls -A "{tmp}/backups"; echo "== work"; ls -A "{tmp}/work"; }} > "{seen}"'
+    pw = tmp / "backup.pass"
+    pw.write_text("test-passphrase-123\n")
+    pw.chmod(0o600)
+    extra = {"BACKUP_ENCRYPT_PASSPHRASE_FILE": str(pw)} if shutil.which("gpg") else {}
+    r = run(e, BACKUP_POST_COMMAND=cmd, **extra)
+    assert r.returncode == 0, r.stdout + r.stderr
+    backup_part, work_part = seen.read_text().split("== work\n")
+    names = backup_part.split("\n", 1)[1].split()
+    assert names and all(n.startswith("netconfig-backup-") or n == "last-result.json" for n in names), names
+    assert work_part.strip() == ""  # 作業用のディレクトリは、コマンドの実行より前に消えている
+    assert not list((tmp / "work").iterdir()) and not list((tmp / "backups").glob(".work-*"))
+
+
+def test_stale_work_dirs_are_removed_only_when_they_match(env):
+    """SIGKILL・電源断で残った作業用のディレクトリを、次の実行で消す。消すのは自分が作る名前の形のものだけ"""
+    tmp, e = env
+    backups, work = tmp / "backups", tmp / "work"
+    backups.mkdir()
+    work.mkdir()
+    old_ts = 1_600_000_000
+
+    def mkdir(p, old=True):
+        p.mkdir()
+        (p / "env").write_text("DEVICE_ENCRYPTION_KEY=secret\n")
+        if old:
+            os.utime(p, (old_ts, old_ts))
+        return p
+
+    stale_old_format = mkdir(backups / ".work-20260101-000000-AbC1")          # 以前の版が BACKUP_DIR に残したもの
+    stale_dead_pid = mkdir(work / "netconfig-backup-work.999999999.AbCdEf12")  # 動いていない PID
+    alive = mkdir(work / f"netconfig-backup-work.{os.getpid()}.AbCdEf12", old=False)  # 動いている PID（新しい）
+    recent_old_format = mkdir(backups / ".work-20260101-000000-ZzZz", old=False)      # 1 時間以内（動いているかもしれない）
+    decoys = [mkdir(backups / ".work-x"), mkdir(work / "netconfig-backup-work.1.short"), mkdir(work / "other-dir")]
+    target = tmp / "outside"
+    mkdir(target)
+    (backups / ".work-20260101-000000-LnK1").symlink_to(target)               # シンボリックリンクはたどらない・消さない
+    plain_file = backups / ".work-20260101-000000-FiLe"
+    plain_file.write_text("x")
+    r = run(e)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not stale_old_format.exists() and not stale_dead_pid.exists()
+    for p in (alive, recent_old_format, *decoys, target, plain_file):
+        assert p.exists(), p
+    assert (target / "env").exists() and (backups / ".work-20260101-000000-LnK1").is_symlink()
+    assert "前に途中で止まったバックアップの作業用ディレクトリを消します" in r.stdout
+
+
+@pytest.mark.skipif(shutil.which("gpg") is None, reason="gpg が必要")
+def test_passphrase_file_permissions_are_checked(env):
+    """#39: パスフレーズのファイルがほかの人にも読めるなら知らせる（バックアップは止めない）"""
+    tmp, e = env
+    pw = tmp / "backup.pass"
+    pw.write_text("test-passphrase-123\n")
+    pw.chmod(0o644)
+    r = run(e, BACKUP_ENCRYPT_PASSPHRASE_FILE=str(pw))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "[WARN] パスフレーズのファイル" in r.stdout and "chmod 600" in r.stdout
+    pw.chmod(0o600)
+    r = run(e, BACKUP_ENCRYPT_PASSPHRASE_FILE=str(pw))
+    assert r.returncode == 0 and "[WARN] パスフレーズのファイル" not in r.stdout
+
+
+def test_failure_while_writing_shows_free_space(env):
+    """作業場所の空きが足りずにダンプ・取り出しが失敗したときに分かるよう、空きを添える"""
+    tmp, e = env
+    r = run(e, FAKE_PGFAIL="1")
+    assert r.returncode != 0
+    assert f"作業場所 {tmp}/work の空き" in r.stdout and "MB" in r.stdout and "BACKUP_WORK_DIR" in r.stdout
+    assert "作業場所" in reports(tmp)[-1]

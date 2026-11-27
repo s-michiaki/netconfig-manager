@@ -18,6 +18,7 @@ from app.services.config_service import DeviceConnectionInfo
 
 def jump_info(j: JumpHost) -> JumpHostInfo:
     return JumpHostInfo(
+        id=j.id,
         name=j.name,
         hostname=j.hostname,
         port=j.port,

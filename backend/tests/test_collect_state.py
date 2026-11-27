@@ -7,6 +7,7 @@ import fake_sshd
 import fakeredis
 import pytest
 import redis
+from celery.exceptions import Retry
 from fastapi.testclient import TestClient
 
 from app import worker
@@ -109,10 +110,10 @@ def test_retry_shows_waiting_state(shared_redis):
         try:
             fail = worker.CollectResult(False, error="接続がタイムアウトしました", retryable=True)
             with mock.patch.object(worker, "collect_config_sync", return_value=fail), \
-                    mock.patch.object(worker.collect_device_config, "retry", side_effect=RuntimeError("retry")):
+                    mock.patch.object(worker.collect_device_config, "retry", side_effect=Retry("retry")):
                 try:
                     worker.collect_device_config.apply(args=(did, "manual", "admin", "cst-3"), throw=True).get()
-                except RuntimeError:
+                except Retry:
                     pass
             a = c.get("/api/devices/collect-status", headers=admin).json()["active"][did]
             assert a["state"] == "retry"

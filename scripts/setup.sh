@@ -226,6 +226,8 @@ setup_proxy "$INSTALL_DIR"
 
 ask "IP Address Please Enter [${IPADD}]: " Red_IPADD
 if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
+# URL と .env（sed の置き換え）に入れるので、ホスト名・IPv4・IPv6 の文字だけを許す
+[[ "$IPADD" =~ ^[A-Za-z0-9.:-]+$ ]] || { echo "IP Address が不正です（英数字と . : - だけ）: $IPADD"; exit 1; }
 
 # 2回目以降は .env の値を既定にする（Enter だけで今のポートを維持）
 if [ -f "$INSTALL_DIR/.env" ]; then
@@ -323,6 +325,10 @@ if [ -z "$OS_LIB" ]; then
 fi
 # shellcheck source=lib/os.sh
 if [ -r "$OS_LIB" ]; then . "$OS_LIB"; else . <(sudo cat "$OS_LIB"); fi
+# コンテナのビルドと作り直し（import_cert.sh・restore.sh と共通。無い＝古いチェックアウトなら、下の compose_build・compose_up が従来の手順で行う）
+COMPOSE_LIB="$(dirname "$OS_LIB")/compose.sh"
+# shellcheck source=lib/compose.sh
+if [ -r "$COMPOSE_LIB" ]; then . "$COMPOSE_LIB"; elif sudo test -r "$COMPOSE_LIB" 2>/dev/null; then . <(sudo cat "$COMPOSE_LIB"); fi
 
 echo "[INFO] OS: ${NCM_OS_PRETTY:-不明}（${NCM_OS_FAMILY}）"
 if [ "$NCM_OS_LEVEL" = "unsupported" ]; then echo "対象外の OS です: $NCM_OS_NOTE"; exit 1; fi
@@ -403,6 +409,27 @@ backup_env() {
     sudo mkdir -p "$ENV_BACKUP_DIR"
     sudo chmod 700 "$ENV_BACKUP_DIR"
     sudo install -m 600 "$INSTALL_DIR/.env" "$ENV_BACKUP_DIR/env-$TS"
+  fi
+}
+# コンテナのビルドと作り直し（scripts/lib/compose.sh。lib が古いときだけ従来の手順をここで行う。実行するコマンドは同じ）
+compose_build() {
+  if declare -F ncm_compose_build >/dev/null; then ncm_compose_build "$INSTALL_DIR" "$COMPOSE_FILE"; return; fi
+  px stage_build_ca "$INSTALL_DIR" || return 1
+  ncm_sudo_out env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" build 2>&1 | redact_out
+}
+compose_up() {
+  if declare -F ncm_compose_up >/dev/null; then ncm_compose_up "$INSTALL_DIR" "$COMPOSE_FILE"; return; fi
+  local up_env=()
+  if declare -F ncm_proxy_is_set >/dev/null && ncm_proxy_is_set; then
+    up_env=(-u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u no_proxy -u NO_PROXY)
+  fi
+  sudo env "${up_env[@]}" OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" up -d --force-recreate 2>&1 | redact_out
+}
+compose_fail_hint() { # $1 = 段階 $2 = いまの状態
+  if declare -F ncm_compose_fail_hint >/dev/null; then
+    ncm_compose_fail_hint "$1" "$INSTALL_DIR" "$COMPOSE_FILE" "bash $INSTALL_DIR/scripts/setup.sh" "$2"
+  else
+    echo "❌ 「$1」で止まりました。ログ: cd $INSTALL_DIR && sudo podman-compose -f $COMPOSE_FILE logs --tail 50 backend / 再実行: bash $INSTALL_DIR/scripts/setup.sh"
   fi
 }
 if [ "$FIRST_INSTALL" -eq 1 ] && sudo podman volume exists "${PROJECT_NAME}_postgres_data" 2>/dev/null; then
@@ -507,21 +534,12 @@ for img in $IMAGES; do
   fi
 done
 [ ${#PULL_FAILED[@]} -eq 0 ] || px fail_hint "イメージの取得（podman pull）"
-# 追加で信頼する CA を、ビルドの中の apt-get・pip・npm・apk に渡す（各ビルドコンテキストの build-ca/。無ければ消す）
-px stage_build_ca "$INSTALL_DIR"
-# OS_UPGRADE: Dockerfile の OS のパッケージの更新（apt-get upgrade / apk upgrade）を、キャッシュがあっても日に 1 回はやり直す
-# ビルドにはプロキシの環境変数を引き継ぐ（podman build は既定で RUN に渡すが、イメージには保存しない。README「確かめ方」）
+# ビルド（追加の CA の build-ca/ への配置・OS_UPGRADE・プロキシの引き継ぎ・出力の伏せ字）は scripts/lib/compose.sh（import_cert.sh・restore.sh と共通）
 # 出力は伏せ字のフィルタに通す（終了コードは podman-compose のもの。pipefail）
-ncm_sudo_out env OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" build 2>&1 | redact_out \
-  || { rc=$?; px fail_hint "コンテナのビルド"; exit "$rc"; }
+compose_build || { rc=$?; px fail_hint "コンテナのビルド"; compose_fail_hint "コンテナのビルド" "ビルドの前と同じ（動いているコンテナはそのまま）"; exit "$rc"; }
 # 起動には渡さない（podman は既定で、起動したプロセスのプロキシの環境変数をコンテナにも渡すため。認証情報が
 # podman inspect に残り、内向きの通信までプロキシへ向かう）。アプリは .env の OUTBOUND_PROXY だけを使う
-UP_ENV=()
-if declare -F ncm_proxy_is_set >/dev/null && ncm_proxy_is_set; then
-  UP_ENV=(-u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u no_proxy -u NO_PROXY)
-fi
-# podman-compose 1.0.6 は、実行する podman run の引数（-e SECRET_KEY=… -e OUTBOUND_PROXY=… など）を画面に出すので、伏せ字のフィルタに通す
-sudo env "${UP_ENV[@]}" OS_UPGRADE="$(date +%Y%m%d)" podman-compose -f "$COMPOSE_FILE" up -d --force-recreate 2>&1 | redact_out
+compose_up || { rc=$?; compose_fail_hint "コンテナの作り直し（up -d --force-recreate）" "イメージは新しくなったが、コンテナの一部が古いまま、または止まっている可能性があります"; exit "$rc"; }
 # 取り直し・作り直しで使われなくなった古いイメージ（名前の無いもの）を消す（ディスクの圧迫を防ぐ）
 sudo podman image prune -f >/dev/null 2>&1 || true
 
@@ -535,7 +553,8 @@ ncm_enable_autostart
 # 定期バックアップ（DB・コンフィグ履歴・.env など。scripts/backup.sh を systemd タイマーで実行）
 # =========================
 # 実行時刻は .env の BACKUP_ON_CALENDAR（systemd の OnCalendar 形式、既定 毎日 03:15）。off で無効
-BACKUP_ON_CALENDAR=$( (grep -E '^BACKUP_ON_CALENDAR=' "$INSTALL_DIR/.env" 2>/dev/null || true) | tail -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')
+# .env は root だけが読める（600）ので、sudo で読む（一般ユーザー + sudo で実行したときに、読めずに既定の時刻になっていた）
+BACKUP_ON_CALENDAR=$(env_get BACKUP_ON_CALENDAR "$INSTALL_DIR/.env" || true)
 BACKUP_ON_CALENDAR="${BACKUP_ON_CALENDAR:-*-*-* 03:15:00}"
 BACKUP_TIMER=""  # on / off（最後にアプリへ伝える。画面「システム状態」で、登録したのに動いていないことに気づけるように）
 if [ "$BACKUP_ON_CALENDAR" = "off" ]; then
@@ -547,6 +566,23 @@ elif ! systemd-analyze calendar "$BACKUP_ON_CALENDAR" >/dev/null 2>&1; then
 else
   BACKUP_TIMER="on"
   echo "[INFO] Enabling scheduled backup ($BACKUP_ON_CALENDAR)..."
+  # タイマーは root でリポジトリの中の backup.sh（と lib/os.sh）を実行する。root 以外が書き換えられると、その人が root の権限で
+  # コマンドを動かせてしまうので、所有者と書き込みの権限を確かめて知らせる（止めない。直し方を表示する）
+  WEAK=()
+  for f in "$INSTALL_DIR" "$INSTALL_DIR/scripts" "$INSTALL_DIR/scripts/lib" "$INSTALL_DIR/scripts/backup.sh" "$INSTALL_DIR/scripts/lib/os.sh"; do
+    st=$(stat -c '%u %a %U' "$f" 2>/dev/null || true)   # 所有者と権限はディレクトリをたどれれば読める（sudo は要らない）
+    [ -n "$st" ] || continue
+    read -r f_uid f_mode f_user <<<"$st"
+    if [ "$f_uid" != "0" ]; then WEAK+=("$f（所有者 $f_user）")
+    elif [[ "$f_mode" =~ ^[0-7]+$ ]] && [ $(( 8#$f_mode & 8#022 )) -ne 0 ]; then WEAK+=("$f（権限 $f_mode。グループかほかの人が書き込める）")
+    fi
+  done
+  if [ ${#WEAK[@]} -gt 0 ]; then
+    echo "[WARN] 定期バックアップは root で $INSTALL_DIR/scripts/backup.sh を実行しますが、次のものを root 以外が書き換えられます:"
+    for f in "${WEAK[@]}"; do echo "       - $f"; done
+    echo "       書き換えられる人は root の権限でコマンドを動かせるため、そのアカウントは root と同じように守ってください。"
+    echo "       root だけが書き換えられるようにするには（README「バックアップと復元」）: sudo chown -R root:root $INSTALL_DIR && sudo chmod -R go-w $INSTALL_DIR"
+  fi
   sudo tee "$SYSTEMD_UNIT_DIR/netconfig-backup.service" >/dev/null <<UNIT
 [Unit]
 Description=NetConfig Manager backup (DB / config history / .env)
@@ -580,7 +616,7 @@ echo "[INFO] Waiting for NetConfig Manager to become ready..."
 HEALTH_URL="http://localhost:${HTTP_PORT}/api/health"
 READY=0
 for _ in $(seq 1 60); do
-  if curl -fsSkL -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
+  if curl --noproxy '*' -fsSkL -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
   sleep 3
 done
 
@@ -607,8 +643,9 @@ fi
 echo "[INFO] Checking background workers (worker / scheduler)..."
 # compose のサービス名のラベルでコンテナを探す（scripts/backup.sh と同じ方法）
 BACKEND_CT=$(sudo podman ps -q --filter "label=com.docker.compose.service=backend" | head -1 || true)
+SELFCHECK_DONE=0
 if [ -z "$BACKEND_CT" ]; then
-  echo "[WARN] backend のコンテナが見つからないため、動作確認を省略しました"
+  echo "[WARN] backend のコンテナが見つからないため、動作確認（自己診断）を省略しました"
 elif ! sudo podman exec "$BACKEND_CT" python -m app.tools.selfcheck 2>&1 | sed 's/^/  /'; then
   echo ""
   echo "❌ 画面は起動しましたが、コンフィグ収集などのバックグラウンド処理が動いていません"
@@ -624,6 +661,15 @@ elif ! sudo podman exec "$BACKEND_CT" python -m app.tools.selfcheck 2>&1 | sed '
   echo "画面の「システム状態」でも確認できます。原因が分からない場合は、上のログを開発者に伝えてください。"
   echo "調査用のログをまとめるには: bash $INSTALL_DIR/scripts/collect_logs.sh"
   exit 1
+else
+  SELFCHECK_DONE=1
+fi
+
+# 証明書を置いているのに HTTPS で応答しないとき（証明書を読み込めないと、frontend は画面に入れなくならないよう HTTP で起動する）は知らせる
+if [ "$HTTPS_ENABLED" -eq 1 ] && ! curl --noproxy '*' -fsSk -m 5 "https://localhost:${HTTPS_PORT}/api/health" 2>/dev/null | grep -q '"ok"'; then
+  echo "[WARN] certs/ に証明書がありますが、HTTPS（${HTTPS_PORT} 番）で応答がありません。証明書を読み込めず HTTP で動いている可能性があります"
+  echo "       確かめ方: cd $INSTALL_DIR && sudo podman-compose -f $COMPOSE_FILE logs --tail 20 frontend（「証明書を読み込めません」の行）"
+  echo "       証明書を取り込み直す: bash $INSTALL_DIR/scripts/import_cert.sh"
 fi
 
 # 定期バックアップの登録状況をアプリへ伝える（失敗しても更新は続ける）
@@ -648,7 +694,14 @@ fi
 # 完了
 # =========================
 echo ""
-echo "✅ 完了"
+if [ "$SELFCHECK_DONE" -eq 1 ]; then
+  echo "✅ 完了"
+else
+  # 画面の応答は確かめたが、収集などのバックグラウンド処理が動くかは確かめていない
+  echo "⚠ 完了（自己診断は未実施: backend のコンテナが見つからなかったため、収集などのバックグラウンド処理が動くかを確かめていません）"
+  echo "   確かめ方: sudo podman ps -a で backend が動いているかを見て、画面の「システム状態」を開く。"
+  echo "   問題があれば: bash $INSTALL_DIR/scripts/collect_logs.sh"
+fi
 echo ""
 echo "■ アクセスURL"
 SHOW_URL=$(sudo sed -n 's/^PUBLIC_URL=//p' "$INSTALL_DIR/.env" | tail -1)

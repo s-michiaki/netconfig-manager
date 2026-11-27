@@ -141,7 +141,8 @@ def test_deactivate_and_password_reset_revoke_tokens(client, users):
     assert client.post("/api/auth/token", data={"username": "op1", "password": "password-1234"}).status_code == 401
     client.patch(f"/api/users/{oid}", json={"is_active": True}, headers=users["admin"])
     op = login(client, "op1", "password-1234")
-    r = client.patch(f"/api/users/{oid}", json={"password": "reset-pass-5678"}, headers=users["admin"])
+    r = client.patch(f"/api/users/{oid}", json={"password": "reset-pass-5678", "confirm_password": "initial-pass-123"},
+                     headers=users["admin"])
     assert r.status_code == 200
     assert client.get("/api/devices/", headers=op).status_code == 401  # リセット前のトークンは無効
     login(client, "op1", "reset-pass-5678")
@@ -280,12 +281,12 @@ def _open_terminal(client, did, tok):
     return ws
 
 
-def _closed_with(ws, text):
+def _closed_with(ws, text, code=4401):
     out = ""
     with pytest.raises(WebSocketDisconnect) as e:
         while True:
             out += ws.receive_text()
-    return e.value.code == 4401 and text in out
+    return e.value.code == code and text in out
 
 
 def _end_reason(client, admin, username):
@@ -312,7 +313,8 @@ def test_role_change_and_own_password_change_close_terminal(client, users):
 
     # オペレーター → 管理者はターミナルの権限が残るので切らない
     ws = _open_terminal(client, did, tok)
-    assert client.patch(f"/api/users/{uid}", json={"role": "admin"}, headers=admin).status_code == 200
+    assert client.patch(f"/api/users/{uid}", json={"role": "admin", "confirm_password": "initial-pass-123"},
+                        headers=admin).status_code == 200
     ws.send_text(json.dumps({"type": "input", "data": "\r"}))
     assert "R1#" in ws.receive_text()
     # 管理者 → 閲覧者で切る（ログインそのものは残る）
@@ -329,7 +331,8 @@ def test_role_change_and_own_password_change_close_terminal(client, users):
                     json={"current_password": "password-1234", "new_password": "changed-pass-777"},
                     headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 200
-    assert _closed_with(ws, "パスワードの変更")
+    # 操作に使ったトークンで開いたものは 4409（画面はトークンを消さない。ほかの端末のものは 4401）
+    assert _closed_with(ws, "パスワードの変更", code=4409)
     ws.__exit__(None, None, None)
     assert _end_reason(client, admin, "kick3") == "本人のパスワード変更で切断"  # 新しい順なので先頭が今回の記録
     client.delete(f"/api/devices/{did}", headers=admin)
@@ -360,7 +363,8 @@ def test_admin_safeguards(client, users):
     assert client.post("/api/users/", json={"username": "short", "password": "short"}, headers=admin).status_code == 422
     assert client.post("/api/users/", json={"username": "r", "password": "password-1234", "role": "root"}, headers=admin).status_code == 422
     # 別の管理者を作って削除できる
-    r = client.post("/api/users/", json={"username": "admin2", "password": "password-1234", "role": "admin"}, headers=admin)
+    r = client.post("/api/users/", json={"username": "admin2", "password": "password-1234", "role": "admin",
+                                         "confirm_password": "initial-pass-123"}, headers=admin)
     assert client.delete(f"/api/users/{r.json()['id']}", headers=admin).status_code == 204
 
 
@@ -376,6 +380,8 @@ PERMISSION_EXEMPT = {
     "POST /api/auth/mfa/disable",
     "GET /api/auth/me",
     "POST /api/auth/change-password",
+    "POST /api/auth/logout",
+    "POST /api/auth/logout-all",
     # 自分の API トークンの一覧・発行・失効（本人のものだけを扱う）
     "GET /api/auth/tokens",
     "POST /api/auth/tokens",

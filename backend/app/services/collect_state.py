@@ -4,7 +4,7 @@
 機器ごとの状態を Redis に短い期限つきで置き、デバイス管理の画面が読めるようにする。
 
 - queued  : 収集を依頼した（worker が取りかかるのを待っている）
-- running : worker が収集している（ほかの SSH 処理の終わりを待っている間も含む）
+- running : worker が収集している（ほかの SSH 処理の終わりを待つ間は、worker を占有せず queued に戻す）
 - retry   : 一時的な失敗で、少し待ってからやり直す
 終わったら消す。worker が途中で落ちても残り続けないよう、どの状態にも期限を付ける。
 """
@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 
 PREFIX = "netconfig:collect:state:"
 # 期限（秒）。queued: worker が止まっているときに「待ち」のまま残り続けないための上限
-# running: 収集のロック（900 秒）＋ほかの SSH 処理を待つ時間（300 秒）
+# running: worker の収集のタスクの時間の上限（worker.COLLECT_TIME_LIMITS の hard。約 8400 秒）より長く
+#          （長い収集の途中で「収集中」の表示が消えないように。テストで確かめる）
 # retry: やり直しまでの待ち時間（60 秒）に余裕を足したもの
-TTL = {"queued": 1800, "running": 1200, "retry": 300}
+TTL = {"queued": 1800, "running": 9000, "retry": 300}
 
 
 def key(device_id: str) -> str:

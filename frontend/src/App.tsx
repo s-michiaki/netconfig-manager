@@ -135,16 +135,33 @@ function writeNavOpen(username: string | undefined, ids: string[]) {
 function PasswordModal({ onClose }: { onClose: () => void }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
+  const [revokeTokens, setRevokeTokens] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(false);
+  const [allRevokeTokens, setAllRevokeTokens] = useState(false);
 
   const submit = async () => {
     setError("");
     try {
-      const r = await api.post("/auth/change-password", { current_password: current, new_password: next });
+      const r = await api.post("/auth/change-password", {
+        current_password: current, new_password: next, revoke_api_tokens: revokeTokens,
+      });
       // 変更前のトークンは無効になるので、返ってきた新しいトークンに差し替える
       setToken(r.data.access_token);
       setDone(true);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  };
+  // すべての端末（この画面も）からログアウトする。開いているターミナル・Ping 監視も切れる
+  const logoutAll = async () => {
+    if (!confirm("すべての端末からログアウトしますか？\nこの画面を含め、ログイン中の画面・開いているターミナルがすべて切れます。"
+      + (allRevokeTokens ? "API トークンもすべて失効します。" : ""))) return;
+    setError("");
+    try {
+      await api.post("/auth/logout-all", { revoke_api_tokens: allRevokeTokens });
+      clearToken();
+      window.location.href = "/login";
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -158,7 +175,7 @@ function PasswordModal({ onClose }: { onClose: () => void }) {
           <p style={{ marginBottom: 16 }}>パスワードを変更しました。</p>
         ) : (
           <>
-            <p className="topo-muted topo-small" style={{ marginTop: 0 }}>API トークンは失効しません（漏れた疑いがあるときは「API トークン」から失効させてください）。</p>
+            <p className="topo-muted topo-small" style={{ marginTop: 0 }}>変更すると、ほかの端末のログインは切れます（この画面はそのまま使えます）。</p>
             <div className="form-group">
               <label className="form-label">現在のパスワード</label>
               <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} />
@@ -167,9 +184,24 @@ function PasswordModal({ onClose }: { onClose: () => void }) {
               <label className="form-label">新しいパスワード（10文字以上）</label>
               <input type="password" value={next} onChange={(e) => setNext(e.target.value)} />
             </div>
+            <label className="form-check" style={{ marginBottom: 12 }}>
+              <input type="checkbox" checked={revokeTokens} onChange={(e) => setRevokeTokens(e.target.checked)} />
+              API トークンもすべて失効させる（漏れた疑いがあるとき。使っているスクリプトは止まります）
+            </label>
             {error && <p className="form-error">{error}</p>}
           </>
         )}
+        <div className="account-sessions">
+          <p className="form-label" style={{ marginBottom: 4 }}>ほかの端末のログイン</p>
+          <p className="topo-muted topo-small" style={{ marginTop: 0 }}>
+            ほかの PC などでログインしたままのときや、トークンが漏れた疑いがあるときに使います（パスワードは変わりません）。
+          </p>
+          <label className="form-check" style={{ marginBottom: 8 }}>
+            <input type="checkbox" checked={allRevokeTokens} onChange={(e) => setAllRevokeTokens(e.target.checked)} />
+            API トークンも失効させる
+          </label>
+          <button className="btn btn-danger btn-sm" onClick={logoutAll}>すべての端末からログアウト</button>
+        </div>
         <div className="btn-row">
           <button className="btn" onClick={onClose}>閉じる</button>
           {!done && (
@@ -232,7 +264,14 @@ function Layout() {
   const toggleGroup = (id: string) =>
     setNavOpen((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const logout = () => {
+  // この画面のログインを、サーバー側でも失効させてから捨てる（ほかの端末のログインはそのまま）。
+  // サーバーに届かなくても、画面のトークンは捨ててログイン画面へ戻る
+  const logout = async () => {
+    try {
+      await api.post("/auth/logout", null, { timeout: 5000 });
+    } catch {
+      /* 期限切れ・接続できないなど。画面側では捨てる */
+    }
     clearToken();
     window.location.href = "/login";
   };

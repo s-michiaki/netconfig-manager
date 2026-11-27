@@ -18,6 +18,7 @@ WebSocket のやりとり（すべて JSON）
 （services/ping_monitor.py）。ここでは対象の登録・解除と、状態・履歴の表示を扱う
 """
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -40,6 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import authenticate_token, require
+from app.api.terminal import _register, _unregister
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.permissions import Perm, has_permission
@@ -352,11 +354,15 @@ async def ping_ws(websocket: WebSocket):
     except (TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
         user = None
     if user is None:
-        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+        # 認証の前に相手が切断していると、close は送れない（例外のログを残さない）
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
         return
     if not has_permission(user.role, Perm.PING_USE):
         await websocket.close(code=WS_CLOSE_FORBIDDEN, reason="forbidden")
         return
+    # ターミナルと同じく、強制ログアウト・無効化・パスワードの変更・本人のログアウトなどで切れるよう登録する（#29）
+    live = _register(user.id, websocket, "ping", str(first.get("token", "")))
 
     runner: asyncio.Task | None = None
 
@@ -403,5 +409,6 @@ async def ping_ws(websocket: WebSocket):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        _unregister(user.id, live)
         if runner is not None:
             runner.cancel()

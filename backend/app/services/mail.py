@@ -61,6 +61,9 @@ AUTH_LABELS = {"none": "認証なし", "password": "SMTP Auth（パスワード�
                "google_sa": "Google（サービスアカウント）", "google_user": "Google（アカウントの同意）"}
 
 
+OAUTH_AUTHS = ("microsoft", "google_sa", "google_user")
+
+
 class MailError(Exception):
     """利用者に見せるエラー（日本語。秘密の値は含めない）"""
 
@@ -179,6 +182,25 @@ def _google_sa_key(cfg: MailConfig) -> dict:
         raise MailError("サービスアカウントの鍵（JSON）を読めません") from e
     if not isinstance(key, dict) or not key.get("client_email") or not key.get("private_key"):
         raise MailError("サービスアカウントの鍵（JSON）に client_email・private_key がありません")
+    if not isinstance(key["client_email"], str) or not isinstance(key["private_key"], str):
+        raise MailError("サービスアカウントの鍵（JSON）の client_email・private_key が文字列ではありません")
+    return key
+
+
+def _sign_assertion(key: dict, claims: dict) -> str:
+    """サービスアカウントの鍵で JWT に署名する。鍵が壊れている（途中で欠けた・別の形式）ときは MailError"""
+    try:
+        return jwt.encode(claims, key["private_key"], algorithm="RS256")
+    except Exception as e:  # noqa: BLE001 - InvalidKeyError・ValueError など、鍵の読み込みの失敗はすべて
+        # 例外の文には鍵の中身が入りうるので載せない（種類だけ）
+        raise MailError(f"サービスアカウントの鍵（private_key）で署名できません（{type(e).__name__}）。"
+                        "Google Cloud で作り直した鍵の JSON をそのまま貼り付けてください") from None
+
+
+def check_sa_key(cfg: "MailConfig") -> dict:
+    """保存の前の検査: JSON の形と、実際に署名できるか（#31。壊れた鍵を保存させない）"""
+    key = _google_sa_key(cfg)
+    _sign_assertion(key, {"iss": key["client_email"], "aud": GOOGLE_TOKEN_URL, "iat": 0, "exp": 1})
     return key
 
 
@@ -195,10 +217,10 @@ def fetch_token(cfg: MailConfig) -> tuple[str, int]:
     elif cfg.auth == "google_sa":
         key = _google_sa_key(cfg)
         now = int(time.time())
-        assertion = jwt.encode({
+        assertion = _sign_assertion(key, {
             "iss": key["client_email"], "sub": cfg.username, "scope": GOOGLE_SCOPE,
             "aud": GOOGLE_TOKEN_URL, "iat": now, "exp": now + 3600,
-        }, key["private_key"], algorithm="RS256")
+        })
         r = _post_form(GOOGLE_TOKEN_URL, {
             "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion})
     elif cfg.auth == "google_user":
@@ -211,10 +233,14 @@ def fetch_token(cfg: MailConfig) -> tuple[str, int]:
             "client_secret": cfg.google_client_secret, "refresh_token": cfg.google_refresh_token})
     else:
         raise MailError("OAuth 2.0 の認証方式ではありません")
-    token = r.get("access_token")
-    if not token:
+    token = r.get("access_token") if isinstance(r, dict) else None
+    if not token or not isinstance(token, str):
         raise MailError("トークンを取得できません（応答に access_token がありません）")
-    return token, int(r.get("expires_in") or 3600)
+    try:
+        ttl = int(r.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        ttl = 3600  # 期限が読めない応答でも送れるようにする（1 時間とみなす）
+    return token, ttl
 
 
 def get_token(cfg: MailConfig) -> str:
@@ -239,15 +265,36 @@ def clear_token_cache() -> None:
 
 # ---------------------------------------------------------------- メッセージ
 
+# 単語の境界（\b）には頼らない（日本語・数字・_ のすぐ後ろに続く URL も崩す）。全角の「：／／」「．」も対象。
+# 入れたゼロ幅スペースの後ろには、もう入れない（2 回かけても同じ）
+_SCHEME_RE = re.compile("(?<!\u200b)([:：])(?=[/／]{2})")
+_WWW_RE = re.compile("(?i)(www)(?=[.．])")
+
+
+def defang_links(s: str) -> str:
+    """文字列の中の URL（https://… ・www.…）が、通知の中でリンクにならないよう崩す（#32）。
+
+    `://` の前と `www` の後にゼロ幅スペースを入れる（見た目は変わらない）。スキームの名前は問わず、`://` の前には
+    すべて入れる（hxxps:// のような崩した書き方・大文字・日本語や数字のすぐ後ろでも）。Ping 監視の名前・機器のエラー文など、
+    利用者・機器が決められる値に偽のログイン画面の URL を入れて、公式の通知の中にリンクを出させないため。
+    正当なリンク（画面への URL）は呼び出し側が自分で組み立てるので、この関数は通さない
+    """
+    return _WWW_RE.sub("\\1\u200b", _SCHEME_RE.sub("\u200b\\1", s))
+
+
 
 def build_message(cfg: MailConfig, to: str, title: str, facts: list[tuple[str, str]] | None = None,
                   body: str | None = None, url: str | None = None, link_text: str | None = None) -> EmailMessage:
     """テキストと HTML の両方を入れたメール。件名・本文の値は改行などを取り除いてから入れる"""
     facts = facts or []
+    # 利用者・機器が決められる値の中の URL は、メールソフトがリンクにしないよう崩す（#32。正当なリンクは url だけ）
+    title, body = defang_links(title), defang_links(body) if body else body
+    facts = [(k, defang_links(v)) for k, v in facts]
     subject = " ".join(f"{cfg.subject_prefix} {title}".split())[:200]
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = formataddr((cfg.from_name or "NetConfig Manager", cfg.from_address))
+    # 送信者名に改行などがあると formataddr が例外を出すので、空白にそろえる（#31。保存の検査で弾くが、以前の保存分も）
+    msg["From"] = formataddr((" ".join((cfg.from_name or "").split()) or "NetConfig Manager", cfg.from_address))
     msg["To"] = to
     msg["Date"] = formatdate(localtime=False)
     msg["Message-ID"] = make_msgid(domain=cfg.from_address.rsplit("@", 1)[-1] or None)
@@ -293,11 +340,49 @@ def check_config(cfg: MailConfig) -> str | None:
         return "送信元のメールアドレスが設定されていません"
     if cfg.auth == "password" and not (cfg.username and cfg.password):
         return "SMTP Auth のユーザー名・パスワードが設定されていません"
-    if cfg.auth in ("microsoft", "google_sa", "google_user") and not cfg.username:
+    if cfg.auth in OAUTH_AUTHS and not cfg.username:
         return "送信に使うメールアドレス（ユーザー名）が設定されていません"
-    if cfg.auth in ("microsoft", "google_sa", "google_user") and cfg.security == "none":
+    if cfg.auth in OAUTH_AUTHS and cfg.security == "none":
         return "OAuth 2.0 では暗号化（STARTTLS か SSL/TLS）が必要です"
     return None
+
+
+def insecure_combo(auth: str, security: str, verify_tls: bool) -> str | None:
+    """新しく保存させない危険な組み合わせ（#32）。plain_password / oauth_noverify / None
+
+    plain_password: 暗号化なし＋パスワード認証（パスワードが平文で流れる）。明示の確認（accept_insecure）があれば保存できる
+    oauth_noverify: 証明書を検証しない＋OAuth 2.0（経路上の中間者にメールボックスの権限のトークンを渡す）。保存できない
+    すでにその組み合わせで保存されている設定は、送信を止めない（画面・システム状態に注意を出す。config_warnings）
+    """
+    if auth == "password" and security == "none":
+        return "plain_password"
+    if auth in OAUTH_AUTHS and not verify_tls and security != "none":
+        return "oauth_noverify"
+    return None
+
+
+DOMAIN_WARNING = ("宛先のドメインを制限していません（閲覧者・オペレーターも、自分の通知の宛先に社外を含む任意のアドレスを"
+                  "登録できます）。「宛先に使えるドメイン」を設定してください")
+
+
+def config_warnings(cfg: MailConfig) -> list[str]:
+    """メールサーバーの設定の注意（画面とシステム状態に出す。送信は止めない）"""
+    if not cfg.enabled:
+        return []
+    out: list[str] = []
+    combo = insecure_combo(cfg.auth, cfg.security, cfg.verify_tls)
+    if combo == "plain_password":
+        out.append("暗号化なしで SMTP Auth のパスワードを送っています（経路上で読み取られます）。"
+                   "STARTTLS か SSL/TLS にしてください")
+    elif combo == "oauth_noverify":
+        out.append("サーバーの証明書を検証せずに OAuth 2.0 のトークン（メールボックスの権限）を送っています。"
+                   "「証明書を確認する」を有効にしてください")
+    elif cfg.auth == "password" and not cfg.verify_tls and cfg.security != "none":
+        out.append("サーバーの証明書を検証せずにパスワードを送っています（経路上の中間者に渡すおそれがあります）。"
+                   "社内の自己署名の証明書でなければ、「証明書を確認する」を有効にしてください")
+    if not cfg.allowed_domains:
+        out.append(DOMAIN_WARNING)
+    return out
 
 
 def _tls_context(cfg: MailConfig) -> ssl.SSLContext:
@@ -341,9 +426,11 @@ def send_message(cfg: MailConfig, msg: EmailMessage) -> None:
     """1 通送る。失敗は MailError（日本語の説明）"""
     if problem := check_config(cfg):
         raise MailError(problem)
-    token = get_token(cfg) if cfg.auth in ("microsoft", "google_sa", "google_user") else None
-    ctx = _tls_context(cfg)
+    token = None
     try:
+        # トークンの取得も try の中（想定外の例外でも MailError にして、呼び出し側の記録・ほかの経路を止めない。#31）
+        token = get_token(cfg) if cfg.auth in OAUTH_AUTHS else None
+        ctx = _tls_context(cfg)
         if cfg.security == "ssl":
             smtp: smtplib.SMTP = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=TIMEOUT_SEC, context=ctx)
         else:
@@ -371,7 +458,11 @@ def send_message(cfg: MailConfig, msg: EmailMessage) -> None:
 
 
 def send_notification(cfg: MailConfig, to: str, payload: dict) -> str | None:
-    """通知を 1 通送る（notify.py から。スレッドで実行）。成功なら None、失敗なら説明。結果の記録は呼び出し元（record_last）"""
+    """通知を 1 通送る（notify.py から。スレッドで実行）。成功なら None、失敗なら説明。結果の記録は呼び出し元（record_last）
+
+    例外は外へ出さない（想定外の例外も失敗の説明にする。1 通の失敗で、その回のほかの宛先・Webhook の送信と
+    last_error・アクティビティ・システム状態の記録を止めないため。#31）
+    """
     try:
         if err := check_address(to, cfg.allowed_domains):
             raise MailError(err)
@@ -380,6 +471,15 @@ def send_notification(cfg: MailConfig, to: str, payload: dict) -> str | None:
         return None
     except MailError as e:
         return str(e)
+    except Exception as e:  # noqa: BLE001
+        return unexpected_error(e)
+
+
+def unexpected_error(e: BaseException) -> str:
+    """想定外の例外の説明（秘密の値を含みうるので、例外の文は載せず種類だけ。詳細はログに残す）"""
+    # 例外の文・トレースバック（ローカル変数・URL・トークンが入りうる）は出さない。種類だけ
+    logger.error("メールの送信で想定外のエラー（%s）", type(e).__name__)
+    return f"送信できません（想定外のエラー: {type(e).__name__}。サーバーのログを確認してください）"
 
 
 # ---------------------------------------------------------------- 結果の記録（システム状態）

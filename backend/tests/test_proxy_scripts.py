@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from test_os_scripts import ALMA, COMMANDS, PROXY_ENV, SUDO_STUB, UBUNTU
 from test_os_scripts import STUB as OS_STUB
-from test_setup_script import OLD_ENV, Box, all_installed, assert_safe, stub
+from test_setup_script import OLD_ENV, Box, all_installed, assert_safe, import_box, run_import, stub
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -1077,3 +1077,60 @@ def test_proxy_values_never_go_on_sudo_command_lines():
     for f in (PROXY_LIB, SCRIPTS / "setup.sh", SCRIPTS / "lib" / "os.sh"):
         code = [line for line in f.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith(("#", "echo"))]
         assert not [line for line in code if re.search(r"\bsudo\b.*\benv\b.*(kv|_proxy=|\$\{!)", line)], f
+
+
+# ------------------------------------------------------------------ import_cert.sh の作り直し（setup.sh と同じ手順。lib/compose.sh）
+def _import_with_proxy(tmp_path, compose_stub=True, **extra):
+    """compose_stub: 出力に秘密の値を出す偽の podman-compose（環境変数は記録しない）。False なら記録する偽物（test_setup_script の STUB）"""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    b = import_box(tmp_path, "alma", env=OLD_ENV + f"OUTBOUND_PROXY={AUTH_URL}\n")
+    if compose_stub:
+        stub(b.installed / "podman-compose", COMPOSE_STUB)
+        extra.setdefault("FAKE_COMPOSE_LINE", COMPOSE_LINE)
+    extra.setdefault("FAKE_ENV_LOG", str(b.tmp / "env.log"))
+    return b, run_import(b, **extra)
+
+
+def test_import_cert_recreate_uses_proxy_for_build_only_and_hides_secrets(tmp_path):
+    """PUBLIC_URL を変える（http → https）とコンテナを作り直す。以前は sudo podman-compose build をそのまま実行していたので、
+    プロキシを引き継がず（sudo が落とす）、OS_UPGRADE も無く、出力に秘密の値が出ていた"""
+    b, r = _import_with_proxy(tmp_path / "env", compose_stub=False)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert_proxy_passed(b, "podman-compose -f docker-compose.prod.yml build", AUTH_URL)
+    assert_proxy_not_passed(b, "podman-compose -f docker-compose.prod.yml up")
+    calls = b.calls()
+    build = next(c for c in calls if c.startswith("sudo") and "podman-compose -f docker-compose.prod.yml build" in c)
+    assert "OS_UPGRADE=" in build  # setup.sh と同じ層のキャッシュ（同じ日なら外へ出ない）
+    up = next(c for c in calls if c.startswith("sudo") and " up -d --force-recreate" in c)
+    assert "-u https_proxy" in up and "-u HTTP_PROXY" in up
+    assert calls.index(build) < calls.index(up)
+    no_leak(b, r)
+    # podman-compose の出力（podman run の -e キー=値）は伏せ字にする
+    b, r = _import_with_proxy(tmp_path / "out")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "OUTBOUND_PROXY=***" in r.stdout and "SECRET_KEY=***" in r.stdout
+    no_leak(b, r)
+
+
+@pytest.mark.parametrize("step", ["build", "up"])
+def test_import_cert_recreate_failure_explains_state(tmp_path, step):
+    """作り直しの失敗: 証明書と .env は変更済み・コンテナは古いまま、であることと、直し方を出して 1 で終わる"""
+    b, r = _import_with_proxy(tmp_path, FAKE_COMPOSE_FAIL=step, FAKE_COMPOSE_RC="3")
+    assert r.returncode == 1
+    assert "証明書の配置と .env の変更は済んでいますが、コンテナは古いままです" in r.stdout
+    assert f"bash {b.install}/scripts/setup.sh" in r.stdout and "logs --tail 50 backend" in r.stdout
+    if step == "build":
+        assert "「コンテナのビルド」で止まりました" in r.stdout and "コンテナのビルド に失敗しました" in r.stdout
+        assert b.count("podman-compose -f docker-compose.prod.yml up") == 0
+    else:
+        assert "「コンテナの作り直し（up -d --force-recreate）」で止まりました" in r.stdout
+    assert "✅ 完了" not in r.stdout
+    no_leak(b, r)
+
+
+def test_import_cert_stops_on_invalid_proxy_before_touching_anything(tmp_path):
+    b = import_box(tmp_path, "alma", env=OLD_ENV + "OUTBOUND_PROXY=https://proxy.example.test:3128\n")
+    text = (b.install / ".env").read_bytes()
+    r = run_import(b)
+    assert r.returncode == 1 and "値は表示していません" in r.stdout
+    assert (b.install / ".env").read_bytes() == text and not (b.install / "certs").exists() and not b.backup_dir.exists()

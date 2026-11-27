@@ -4,7 +4,7 @@
 2. 踏み台上で機器宛ての direct-tcpip チャネル（OpenSSH の ProxyJump / -J と同じ仕組み）を開く
 3. そのチャネルを Netmiko / Paramiko の sock として渡し、機器へは通常どおりSSH接続する
 
-踏み台自身のホスト鍵も known_hosts で検証する（ssh_hostkeys.py）。
+踏み台自身のホスト鍵も known_hosts で検証する（ssh_hostkeys.py。踏み台そのものは直接の接続なので、踏み台の区別なしの名前）。
 """
 from dataclasses import dataclass
 
@@ -30,6 +30,12 @@ class JumpHostInfo:
     password: str | None
     private_key: str | None
     key_passphrase: str | None
+    id: str | None = None  # 踏み台の ID（踏み台経由の機器のホスト鍵を、踏み台ごとに分けて記録するため）
+
+    @property
+    def scope(self) -> str:
+        """ホスト鍵の記録を分ける単位（ID。テストなどで ID が無いときは名前）"""
+        return self.id or self.name
 
 
 class JumpHostError(Exception):
@@ -48,7 +54,7 @@ def connect_jump(jump: JumpHostInfo) -> paramiko.SSHClient:
         raise JumpHostError(f"踏み台サーバ「{jump.name}」: {e}") from e
 
     client = paramiko.SSHClient()
-    load_known_hosts(client)
+    load_known_hosts(client, context={"target": "jump", "jump_id": jump.id, "jump_name": jump.name})
     try:
         # 鍵とパスワードの両方がある場合、Paramiko は鍵 → パスワードの順に試す
         client.connect(

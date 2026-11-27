@@ -70,6 +70,7 @@ test("閲覧者が選んだ世代のコンフィグをファイルに保存で�
 
   // 管理者の監査ログに記録が残る
   await page.getByRole("button", { name: "ログアウト" }).click();
+  await expect(page).toHaveURL(/\/login/); // サーバー側の失効（/auth/logout）を待ってから移る
   await login(page, USERS.admin);
   const token = await page.evaluate(() => localStorage.getItem("access_token"));
   const res = await page.request.get("/api/audit/logs?action=config.download", { headers: { Authorization: `Bearer ${token}` } });

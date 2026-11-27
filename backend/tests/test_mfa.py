@@ -44,16 +44,21 @@ def test_mfa_flow():
         h = {"Authorization": "Bearer " + r.json()["access_token"]}
         assert r.json()["mfa_required"] is False and c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is False
 
-        # 設定: QR コードを出して、認証アプリのコードで確認する
-        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        # 設定: パスワードを入れ直して QR コードを出し、認証アプリのコードで確認する
+        assert c.post("/api/auth/mfa/setup", headers=h).status_code == 422  # パスワードが無い
+        assert c.post("/api/auth/mfa/setup", json={"password": "wrong-pass-xx"}, headers=h).status_code == 422
+        s = c.post("/api/auth/mfa/setup", json={"password": "password-1234"}, headers=h).json()
         assert s["qr_svg"].startswith("<svg") and s["secret"] in s["uri"]
         assert c.post("/api/auth/mfa/enable", json={"code": "000000"}, headers=h).status_code == 422
         r = c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
         assert r.status_code == 200
         recovery = r.json()["recovery_codes"]
         assert len(recovery) == 10
+        # 設定する前のトークンは使えなくなり、新しいトークンが返る（#29）
+        assert c.get("/api/auth/me", headers=h).status_code == 401
+        h = {"Authorization": "Bearer " + r.json()["access_token"]}
         assert c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is True
-        assert c.post("/api/auth/mfa/setup", headers=h).status_code == 409
+        assert c.post("/api/auth/mfa/setup", json={"password": "password-1234"}, headers=h).status_code == 409
         users = {u["id"]: u for u in c.get("/api/users/", headers=admin).json()}
         assert users[uid]["mfa_enabled"] is True
 
@@ -81,18 +86,32 @@ def test_mfa_flow():
         # 解除（本人）: パスワードとコードで確認
         assert c.post("/api/auth/mfa/disable", json={"password": "wrong-pass-xx", "code": recovery[1]},
                       headers=h).status_code == 422
-        assert c.post("/api/auth/mfa/disable", json={"password": "password-1234", "code": recovery[1]},
-                      headers=h).status_code == 204
+        r = c.post("/api/auth/mfa/disable", json={"password": "password-1234", "code": recovery[1]}, headers=h)
+        assert r.status_code == 200
+        # 解除する前のトークンは使えなくなり、新しいトークンが返る（#29）
+        assert c.get("/api/auth/me", headers=h).status_code == 401
+        h = {"Authorization": "Bearer " + r.json()["access_token"]}
+        assert c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is False
         assert _token(c, name, "password-1234").json()["access_token"]
 
-        # 管理者による解除
-        s = c.post("/api/auth/mfa/setup", headers=h).json()
-        c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
+        # 管理者による解除（管理者のパスワードの入れ直しが必要）
+        s = c.post("/api/auth/mfa/setup", json={"password": "password-1234"}, headers=h).json()
+        h = {"Authorization": "Bearer " + c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])},
+                                                 headers=h).json()["access_token"]}
         assert _token(c, name, "password-1234").json()["mfa_required"]
-        r = c.post(f"/api/users/{uid}/mfa-reset", headers=admin)
+        assert c.post(f"/api/users/{uid}/mfa-reset", json={}, headers=admin).status_code == 422
+        assert c.post(f"/api/users/{uid}/mfa-reset", json={"confirm_password": ""}, headers=admin).status_code == 422
+        assert c.post(f"/api/users/{uid}/mfa-reset", json={"confirm_password": "wrong-pass-xx"},
+                      headers=admin).status_code == 422
+        assert c.get("/api/auth/me", headers=h).json()["mfa_enabled"] is True  # 誤りでは解除されない
+        r = c.post(f"/api/users/{uid}/mfa-reset", json={"confirm_password": "initial-pass-123"}, headers=admin)
         assert r.status_code == 200 and r.json()["mfa_enabled"] is False
-        assert c.post(f"/api/users/{uid}/mfa-reset", headers=admin).status_code == 409
-        assert c.post(f"/api/users/{uid}/mfa-reset", headers=h).status_code == 403
+        assert c.get("/api/auth/me", headers=h).status_code == 401  # 解除された人のトークンも使えなくなる
+        assert c.post(f"/api/users/{uid}/mfa-reset", json={"confirm_password": "initial-pass-123"},
+                      headers=admin).status_code == 409
+        h = {"Authorization": "Bearer " + _token(c, name, "password-1234").json()["access_token"]}
+        assert c.post(f"/api/users/{uid}/mfa-reset", json={"confirm_password": "password-1234"},
+                      headers=h).status_code == 403
         assert _token(c, name, "password-1234").json()["access_token"]
         acts = c.get("/api/audit/logs", params={"action": "user.mfa_reset"}, headers=admin).json()["items"]
         assert acts and acts[0]["target_name"] == name
@@ -107,7 +126,7 @@ def test_mfa_code_failures_are_limited():
         uid = c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"},
                      headers=admin).json()["id"]
         h = {"Authorization": "Bearer " + _token(c, name, "password-1234").json()["access_token"]}
-        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        s = c.post("/api/auth/mfa/setup", json={"password": "password-1234"}, headers=h).json()
         c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
         mfa_token = _token(c, name, "password-1234").json()["mfa_token"]
         codes = [c.post("/api/auth/mfa/verify", json={"mfa_token": mfa_token, "code": f"{i:06d}"}).status_code
@@ -143,7 +162,7 @@ def test_mfa_logins_do_not_fill_the_ip_counter(monkeypatch):
         uid = c.post("/api/users/", json={"username": name, "password": "password-1234", "role": "viewer"},
                      headers=admin).json()["id"]
         h = {"Authorization": "Bearer " + _token(c, name, "password-1234").json()["access_token"]}
-        s = c.post("/api/auth/mfa/setup", headers=h).json()
+        s = c.post("/api/auth/mfa/setup", json={"password": "password-1234"}, headers=h).json()
         c.post("/api/auth/mfa/enable", json={"code": _now_code(s["secret"])}, headers=h)
         # 接続元の上限（4 回）を超える 6 回、続けてログインに成功しても止まらない
         for i in range(6):

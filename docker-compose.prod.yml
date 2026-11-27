@@ -68,6 +68,8 @@ x-backend-env: &backend-env
   COMMAND_RUN_ENABLED: ${COMMAND_RUN_ENABLED:-true}
   COMMAND_RUN_MAX_DEVICES: ${COMMAND_RUN_MAX_DEVICES:-100}
   COMMAND_RUN_CONCURRENCY: ${COMMAND_RUN_CONCURRENCY:-10}
+  # 全体で同時に機器へ接続するコマンド実行の数（worker の -c 4 より小さく）。枠は API（投入）と worker の両方が数えるので、両方に渡す
+  COMMAND_RUN_WORKER_SLOTS: ${COMMAND_RUN_WORKER_SLOTS:-2}
   COMMAND_RUN_MAX_OUTPUT: ${COMMAND_RUN_MAX_OUTPUT:-200000}
   COMMAND_RUN_MAX_RUN_OUTPUT: ${COMMAND_RUN_MAX_RUN_OUTPUT:-20000000}
   COMMAND_RUN_MAX_ACTIVE_PER_USER: ${COMMAND_RUN_MAX_ACTIVE_PER_USER:-2}
@@ -164,7 +166,8 @@ services:
       - NET_RAW
     sysctls:
       net.ipv4.ping_group_range: "0 2147483647"
-    environment: *backend-env
+    environment:
+      <<: *backend-env
     volumes:
       - config_repo:/app/configs
       - ssh_data:/data/ssh

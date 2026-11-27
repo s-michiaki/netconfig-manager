@@ -6,7 +6,7 @@ Celeryワーカー定義
 - purge_audit_logs: beat から毎日起動され、保持期間を過ぎた監査ログ・ターミナル記録・コマンド実行の結果を削除する
   （失効・期限切れから 30 日を過ぎた API トークンも）
 - run_command_device: コマンド実行（表示コマンドの一括実行）の機器 1 台ぶん。実行前にもう一度コマンドを検証する
-- send_change_notification: コンフィグに変更があったときの通知（Discord / Slack / Teams）
+- send_change_notification: コンフィグに変更があったときの通知（Discord / Slack / Teams / メール）
 - send_violation_notification / send_failure_notification: 違反の発生・収集の失敗の通知
 - send_inventory_notification: 機器情報（OS バージョン・シリアル番号など）が変わったときの通知
 - send_drift_notification: 基準の世代からずれたとき（ずれなし → ずれあり）の通知
@@ -25,28 +25,41 @@ Celeryワーカー定義
 """
 import asyncio
 import logging
+import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 import redis
 from celery import Celery
+from celery.exceptions import Retry
 from celery.signals import worker_ready
 from croniter import croniter
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.core import outbound
+from app.core import outbound, ssh_hostkeys
 from app.core.config import settings
 from app.core.timeutil import utcnow
 from app.models import CollectLog, CommandResult, CommandRun, ConfigBaseline, ConfigSnapshot, Device, DeviceGroup, Schedule
 from app.models.command_run import STATUS_FAILED, STATUS_OK, STATUS_QUEUED, STATUS_RUNNING, STATUS_SKIPPED
 from app.services import api_tokens as api_tokens_svc
 from app.services import baseline as baseline_svc
-from app.services import collect_state, config_service, failure_batch, fw_hits, git_export, inventory, monitoring, system
+from app.services import (
+    collect_state,
+    config_service,
+    device_lock,
+    failure_batch,
+    fw_hits,
+    git_export,
+    inventory,
+    monitoring,
+    system,
+)
 from app.services import command_run as command_run_svc
+from app.services import hostkeys as hostkeys_svc
 from app.services import ping_monitor as ping_monitor_svc
 from app.services import report as report_svc
 from app.services import vuln_service as vuln_svc
@@ -89,9 +102,26 @@ celery_app = Celery(
 
 
 @worker_ready.connect
-def _log_outbound(**_kw) -> None:
-    """worker の起動時に、外部への接続の設定を 1 行（プロキシはホスト:ポートと認証の有無だけ）"""
+def _log_outbound(sender=None, **_kw) -> None:
+    """worker の起動時に、外部への接続の設定を 1 行（プロキシはホスト:ポートと認証の有無だけ）。
+    あわせて、コマンド実行の枠（COMMAND_RUN_WORKER_SLOTS）が worker の並列数に対して大きすぎないかを確かめる"""
     outbound.startup_log(logger)
+    check_command_slots(getattr(getattr(sender, "controller", None), "concurrency", None))
+    # 以前の版が Redis に残した待ち行列を、更新の直後から流す（5 分ごとの定期処理を待たない）
+    _recover_quietly()
+    _pump_quietly()
+
+
+def check_command_slots(concurrency: int | None) -> bool:
+    """枠が worker の並列数より 1 以上小さいか（ほかの処理の枠が残るか）。足りなければ警告を出して False。
+    1 未満は設定の読み込み（Field(ge=1)）で起動時にエラーになる"""
+    slots = settings.COMMAND_RUN_WORKER_SLOTS
+    if concurrency and slots >= concurrency:
+        logger.warning("COMMAND_RUN_WORKER_SLOTS=%d が worker の並列数（-c %d）以上です。コマンド実行が worker を使い切り、"
+                       "Ping 監視・収集・通知が止まることがあります。%d 以下にしてください", slots, concurrency,
+                       max(concurrency - 2, 1))
+        return False
+    return True
 
 
 celery_app.conf.update(
@@ -163,15 +193,92 @@ celery_app.conf.update(
 
 # このウィンドウ内に直近のcron発火時刻があれば実行する（beat の60秒間隔の揺らぎを吸収）
 SCHEDULE_WINDOW = timedelta(seconds=90)
-COLLECT_LOCK_TIMEOUT = 900
 VULN_FETCH_LOCK_TIMEOUT = 1800  # 脆弱性の取得の最大（vuln_service.MAX_FETCH_SECONDS = 約 16 分）より長くする（テストで確認）
-# 同じ機器へ SSH で入る処理（コンフィグ収集・FW ヒット数の取得）は1つずつにする。
-# FortiGate は接続のたびに console の output を変えて終了時に戻すため、重なると片方の出力がページングで止まる
-SSH_LOCK_WAIT = 300  # 収集は、ほかの SSH 処理が終わるのを最大この秒数待つ
+# 同じ機器へ SSH で入る処理（コンフィグ収集・コマンド実行・FW ヒット数の取得）は1つずつにする。
+# FortiGate は接続のたびに console の output を変えて終了時に戻すため、重なると片方の出力がページングで止まる。
+# ロック（機器の SSH・機器の収集）の期限は短く（device_lock.LOCK_TTL）し、処理の間は LockKeeper が延長し続ける
+# （処理が長くても途中で外れず、worker が落ちたときは短い時間で外れる）
+SSH_LOCK_WAIT = 300  # ほかの SSH 処理が終わるのを待つ最長（秒）
+# 待つ間は worker を占有しない（ブロックせず、この秒数後に再試行するタスクとして投入し直す）
+SSH_LOCK_RETRY_SEC = 15
+
+# ---- タスクの時間の上限（Celery の soft_time_limit / time_limit）
+# 正当な処理の最長より長くする。soft を超えると SoftTimeLimitExceeded（その機器を失敗にして後片付けする）、
+# hard（soft + TIME_LIMIT_GRACE）を超えると worker の子プロセスごと止める（ロックは延長が止まり LOCK_TTL で外れる）
+MAX_READ_TIMEOUT = 600  # 1 回の読み取りの応答待ちの最長（機器の read_timeout・SSH_READ_TIMEOUT の上限 le=600）
+# 接続の最長: 踏み台と機器のそれぞれで TCP（SSH_TIMEOUT）・バナー（SSH_TIMEOUT）・認証（SSH_AUTH_TIMEOUT）
+CONNECT_SECONDS = 2 * (2 * settings.SSH_TIMEOUT + settings.SSH_AUTH_TIMEOUT)
+# 接続直後の Netmiko の準備（プロンプトの確認・ページングの無効化・enable など）の読み取り。応答の遅い機器では
+# それぞれに応答待ち時間がかかる（read_timeout_override）
+SESSION_READS = 6
+TIME_LIMIT_MARGIN = 300  # Git への保存・コンプライアンスチェック・DB への保存などの余裕
+TIME_LIMIT_GRACE = 120  # soft から hard まで（後片付け・結果の保存の時間）
+
+
+def _time_limits(reads: int) -> tuple[int, int]:
+    """読み取り reads 回の処理の (soft, hard)"""
+    soft = CONNECT_SECONDS + (SESSION_READS + reads) * MAX_READ_TIMEOUT + TIME_LIMIT_MARGIN
+    return soft, soft + TIME_LIMIT_GRACE
+
+
+def _collect_reads() -> int:
+    """収集の 1 回の読み取りの最多（機種ごとの準備・収集・設定モードのコマンド＋機器台帳＋startup）"""
+    per_platform = max(len(sp.prep_commands) + len(sp.commands) + 2 * bool(sp.config_mode_commands)
+                       + len(sp.config_mode_commands) for sp in config_service.PLATFORMS.values())
+    return per_platform + max(len(cmds) for cmds, _ in inventory.SPECS.values()) + 1
+
+
+COLLECT_TIME_LIMITS = _time_limits(_collect_reads())
+COMMAND_TIME_LIMITS = _time_limits(command_run_svc.MAX_COMMANDS)  # 1 回に送れるコマンドは最大 5 個
+# 「実行中」のまま止まった機器を失敗にするまでの時間: コマンド実行の hard の上限 ＋ 後片付け・定期処理の間隔（5 分）の余裕。
+# 上限より短いと、まだ動いている機器を失敗にしてしまう（SSH_TIMEOUT などを延ばすと上限も延びる）
+COMMAND_STALE_RUNNING = timedelta(seconds=COMMAND_TIME_LIMITS[1] + 600)
+FW_HITS_TIME_LIMITS = _time_limits(2)  # FortiGate は 2 コマンド（show firewall policy・diagnose ...）、PAN-OS は 1
+
+
+class _WaitForLock(Exception):  # 制御のための内部の例外（ロックを待って再試行に回す）
+    pass
 
 
 def _ssh_lock(device_id: str):
-    return _redis().lock(f"netconfig:ssh:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
+    return device_lock.make_lock(_redis(), f"netconfig:ssh:{device_id}")
+
+
+def _lock_wait_limit() -> int:
+    """SSH ロックを待って再試行する回数の上限（SSH_LOCK_WAIT 秒ぶん）"""
+    return int(SSH_LOCK_WAIT // SSH_LOCK_RETRY_SEC)
+
+
+def _record_lock_lost(keeper: device_lock.LockKeeper, what: str, device_id: str, device_name: str | None,
+                      actor: str | None, ref: str | None) -> None:
+    """処理の途中でロックが外れていた（延長できなかった・解放のときに自分のロックでなかった）ことを残す"""
+    if not keeper.lost:
+        return
+    logger.warning("%sの途中でロックが外れていました device=%s locks=%s", what, device_id, keeper.lost)
+    try:
+        _run_async(_record("ssh.lock_lost", f"{what}の途中で、機器のロックが外れていました（同じ機器へのほかの処理と"
+                           "重なった可能性があります。Redis の状態を確認してください）", level="warning",
+                           device_id=device_id, device_name=device_name, detail={"locks": keeper.lost},
+                           actor=actor or SYSTEM_ACTOR, ref=ref))
+    except Exception:  # noqa: BLE001 - 記録の失敗で処理の結果を変えない
+        logger.exception("アクティビティログの記録に失敗しました")
+
+
+async def _save_hostkey_events(events: list[dict], actor: str, ref: str | None) -> None:
+    async with _sessionmaker()() as db:
+        hostkeys_svc.record_events(db, events, actor=actor, ref=ref)
+        await db.commit()
+
+
+def _flush_hostkey_events(actor: str | None, ref: str | None) -> None:
+    """TOFU で新しく登録したホスト鍵を、アクティビティ・監査ログに残す（SSH で接続したタスクの終わりに呼ぶ）"""
+    events = ssh_hostkeys.take_events()
+    if not events:
+        return
+    try:
+        _run_async(_save_hostkey_events(events, actor or SYSTEM_ACTOR, ref))
+    except Exception:  # noqa: BLE001 - 記録の失敗で処理の結果を変えない（ログには残る）
+        logger.exception("新しいホスト鍵の記録に失敗しました: %s", [e.get("recorded_as") for e in events])
 
 
 @lru_cache
@@ -182,9 +289,15 @@ def _sessionmaker() -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+# Redis が応答しないまま固まったときに、延長のスレッド・ロックの解放が止まり続けないよう、待ちに上限を付ける
+# （延長の間隔 device_lock.EXTEND_INTERVAL = 30 秒より十分短く。ロックの期限 120 秒の中で何度かやり直せる）
+REDIS_SOCKET_TIMEOUT = 5
+
+
 @lru_cache
 def _redis() -> redis.Redis:
-    return redis.Redis.from_url(settings.REDIS_URL)
+    return redis.Redis.from_url(settings.REDIS_URL, socket_timeout=REDIS_SOCKET_TIMEOUT,
+                                socket_connect_timeout=REDIS_SOCKET_TIMEOUT)
 
 
 def _run_async(coro):
@@ -422,22 +535,33 @@ async def _record(event: str, message: str, **kw) -> None:
         await db.commit()
 
 
-@celery_app.task(bind=True, max_retries=2, default_retry_delay=60)
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=60,
+                 soft_time_limit=COLLECT_TIME_LIMITS[0], time_limit=COLLECT_TIME_LIMITS[1])
 def collect_device_config(
-    self, device_id: str, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None
+    self, device_id: str, triggered_by: str = "manual", actor: str | None = None, ref: str | None = None,
+    lock_waits: int = 0, failures: int = 0,
 ):
     """単一デバイスのコンフィグを収集する
 
     actor: アクティビティログに残すきっかけ（手動ならユーザー名、スケジュールなら名前）
     ref: 同じ実行の記録をまとめる ID（一括収集・スケジュールでは親の ID、省略時はこのタスクの ID）
+    lock_waits: 今回の試行で、同じ機器への別の SSH 処理が終わるのを待って再試行した回数（毎回の試行で最大 SSH_LOCK_WAIT 秒。
+      失敗の再試行のときは 0 に戻す）
+    failures: 失敗による再試行の回数（max_retries と比べる。Celery の request.retries は待った回数も数えるので使わない）
     """
     started_at = utcnow()
     actor = _actor(triggered_by, actor)
     ref = ref or self.request.id
+    failure_retries = failures
+    r = _redis()
+    task_id = self.request.id or ""
 
-    # 同じ機器の収集が重なると git の index.lock が競合するため、機器単位でロックする
-    lock = _redis().lock(f"netconfig:collect:{device_id}", timeout=COLLECT_LOCK_TIMEOUT)
-    if not lock.acquire(blocking=False):
+    # 同じ機器の収集が重なると git の index.lock が競合するため、機器単位でロックする。
+    # ほかの SSH 処理を待っている収集がある間（収集のロックは放している）も、後から来た依頼はスキップする（以前と同じ動き）
+    lock = device_lock.make_lock(r, f"netconfig:collect:{device_id}")
+    waiting_by = r.get(_collect_wait_key(device_id))
+    waiting_by = waiting_by.decode() if isinstance(waiting_by, bytes) else waiting_by
+    if (waiting_by and waiting_by != task_id) or not lock.acquire(blocking=False):
         try:
             _run_async(_record("collect.skipped", "同じ機器の収集が実行中のため、スキップしました",
                                device_id=device_id, device_name=_run_async(_device_name(device_id)),
@@ -446,7 +570,10 @@ def collect_device_config(
             logger.exception("アクティビティログの記録に失敗しました")
         return {"success": False, "skipped": True, "error": "同じデバイスの収集が実行中です"}
 
-    will_retry = False
+    keeper = device_lock.LockKeeper()
+    keeper.hold("collect", lock)
+    will_retry = wait_for_ssh = False
+    device = None
     collect_state.mark(_redis(), device_id, "running", triggered_by)
     try:
         device = _run_async(_get_device(device_id))
@@ -461,23 +588,25 @@ def collect_device_config(
         ssh = _ssh_lock(device_id)
         if extra is None:
             result = CollectResult(False, error=IGNORE_LOAD_FAILED, retryable=True)
-        elif ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
+        elif ssh.acquire(blocking=False):
+            keeper.hold("ssh", ssh)
             try:
                 # 設定が無いときは引数を足さない（従来の呼び出しのまま）
                 result = (collect_config_sync(device, triggered_by, extra_ignore=extra) if extra
                           else collect_config_sync(device, triggered_by))
             finally:
-                try:
-                    ssh.release()
-                except redis.exceptions.LockError:
-                    pass
+                keeper.release(ssh)
+        elif lock_waits < _lock_wait_limit():
+            # 別の SSH 処理（コマンド実行・FW ヒット数の取得など）の途中。worker を占有して待たず、少し後に再試行する
+            wait_for_ssh = True
+            raise _WaitForLock
         else:
-            result = CollectResult(False, error="同じ機器への別の SSH 処理（FW ヒット数の取得など）が終わらないため、"
-                                                "収集できませんでした", retryable=True)
+            result = CollectResult(False, error="同じ機器への別の SSH 処理（コマンド実行・FW ヒット数の取得など）が"
+                                                "終わらないため、収集できませんでした", retryable=True)
         # 認証失敗などはリトライしても結果が変わらないので、一時的な失敗のみリトライする
-        will_retry = not result.success and result.retryable and self.request.retries < self.max_retries
+        will_retry = not result.success and result.retryable and failure_retries < self.max_retries
         inventory_changes = _run_async(_save_result(device, result, started_at, triggered_by, actor, ref,
-                                                    will_retry=will_retry, attempt=self.request.retries or 0))
+                                                    will_retry=will_retry, attempt=failure_retries))
         if result.success:
             try:
                 _run_async(_check_compliance(device_id, actor, ref))
@@ -525,20 +654,85 @@ def collect_device_config(
             # 送信（外部への HTTP）は別タスクにして、収集の完了を待たせない
             send_change_notification.delay(device_id, result.commit_hash, result.added, result.removed, triggered_by,
                                            ref)
+    except _WaitForLock:
+        pass  # 後片付け（finally）のあとで再試行に回す
     finally:
-        # やり直す場合は「再試行待ち」、それ以外（成功・失敗・例外）は状態を消す
+        # やり直す場合は「再試行待ち」、SSH ロックを待つ場合は「収集待ち」、それ以外（成功・失敗・例外）は状態を消す
         if will_retry:
             collect_state.mark(_redis(), device_id, "retry", triggered_by)
+        elif wait_for_ssh:
+            collect_state.mark(_redis(), device_id, "queued", triggered_by)
         else:
             collect_state.clear(_redis(), device_id)
+        if not wait_for_ssh:
+            _clear_collect_wait(r, device_id, task_id)
+        keeper.close()
+        _record_lock_lost(keeper, "収集", device_id, device.name if device else None, actor, ref)
+        _flush_hostkey_events(actor, ref)
+
+    # max_retries は今の回数より大きい値を必ず渡す（None はタスクの既定値の意味で、無制限ではない）。
+    # 回数の上限は lock_waits（待ち）・failures（失敗）で数える
+    allow = (self.request.retries or 0) + 1
+    if wait_for_ssh:
+        r.set(_collect_wait_key(device_id), task_id, ex=COLLECT_WAIT_MARK_TTL)  # 待っている印（後から来た依頼をスキップ）
         try:
-            lock.release()
-        except redis.exceptions.LockError:
-            pass
-
+            raise self.retry(args=(device_id, triggered_by, actor, ref),
+                             kwargs={"lock_waits": lock_waits + 1, "failures": failures},
+                             countdown=SSH_LOCK_RETRY_SEC, max_retries=allow)
+        except Retry:
+            raise
+        except Exception:  # noqa: BLE001 - 再試行を予約できない（broker の停止など）。「収集待ち」のまま残さない
+            logger.exception("収集の再試行を予約できませんでした device=%s", device_id)
+            return _give_up_collect(device, "ほかの SSH 処理を待ったあとの再試行を予約できなかったため、収集できませんでした",
+                                    started_at, triggered_by, actor, ref, failure_retries)
     if will_retry:
-        raise self.retry(exc=RuntimeError(result.error))
+        try:
+            # 失敗の再試行では、待ちの回数を 0 に戻す（次の試行でも、ほかの SSH 処理を最大 SSH_LOCK_WAIT 秒待てる）
+            raise self.retry(exc=RuntimeError(result.error), args=(device_id, triggered_by, actor, ref),
+                             kwargs={"lock_waits": 0, "failures": failures + 1}, max_retries=allow)
+        except Retry:
+            raise
+        except Exception:  # noqa: BLE001 - 再試行を予約できない。最終の失敗として残す
+            logger.exception("収集の再試行を予約できませんでした device=%s", device_id)
+            return _give_up_collect(device, f"{result.error}（再試行を予約できませんでした）", started_at, triggered_by,
+                                    actor, ref, failure_retries)
 
+    return result.as_dict()
+
+
+# 収集が SSH ロックを待っている印の期限。待つ上限（SSH_LOCK_WAIT）＋余裕（worker が埋まっていて再試行のタスクが
+# 届くのが遅れても、待ちの途中で印が切れて同じ機器の収集が重ならないように）。待つたびに付け直す
+COLLECT_WAIT_MARK_TTL = SSH_LOCK_WAIT + 300
+
+
+def _collect_wait_key(device_id: str) -> str:
+    return f"netconfig:collect:waiting:{device_id}"
+
+
+def _clear_collect_wait(r, device_id: str, task_id: str) -> None:
+    try:
+        cur = r.get(_collect_wait_key(device_id))
+        if cur is not None and (cur.decode() if isinstance(cur, bytes) else cur) == task_id:
+            r.delete(_collect_wait_key(device_id))
+    except redis.exceptions.RedisError:
+        pass  # 期限（COLLECT_WAIT_MARK_TTL）で消える
+
+
+def _give_up_collect(device, error: str, started_at, triggered_by: str, actor: str, ref: str, attempt: int) -> dict:
+    """再試行に回せなかった収集を、最終の失敗として残す（収集ログ・collect.failed・失敗の通知。状態は消す）"""
+    device_id = device.id
+    try:
+        _redis().delete(_collect_wait_key(device_id))
+    except redis.exceptions.RedisError:
+        pass
+    collect_state.clear(_redis(), device_id)
+    result = CollectResult(False, error=error)
+    try:
+        _run_async(_save_result(device, result, started_at, triggered_by, actor, ref, attempt=attempt))
+        if _run_async(_wants("failure")):
+            queue_failure_notification(device_id, error, triggered_by, ref)
+    except Exception:  # noqa: BLE001
+        logger.exception("収集の失敗を記録できませんでした device=%s", device_id)
     return result.as_dict()
 
 
@@ -546,6 +740,13 @@ async def _device_name(device_id: str) -> str | None:
     async with _sessionmaker()() as db:
         d = await db.get(Device, device_id)
         return d.name if d else None
+
+
+async def _device_state(device_id: str) -> tuple[str | None, bool]:
+    """機器の名前と、有効かどうか（無ければ (None, False)）"""
+    async with _sessionmaker()() as db:
+        d = await db.get(Device, device_id)
+        return (d.name, bool(d.is_active)) if d else (None, False)
 
 
 @celery_app.task
@@ -729,18 +930,22 @@ def collect_fw_hits_all():
     return {"devices": len(ids)}
 
 
-@celery_app.task
+@celery_app.task(soft_time_limit=FW_HITS_TIME_LIMITS[0], time_limit=FW_HITS_TIME_LIMITS[1])
 def collect_fw_hits_device(device_id: str, actor: str | None = None, ref: str | None = None):
     """1台の FW のルールのヒット数を取得して保存する"""
     # コンフィグ収集と同じ機器の SSH ロックを使う。収集中なら今回は取得しない（次の定期取得で取る）
     lock = _ssh_lock(device_id)
     if not lock.acquire(blocking=False):
         return {"skipped": True}
+    keeper = device_lock.LockKeeper()
+    keeper.hold("ssh", lock)
+    device = None
     try:
         device = _run_async(_get_device(device_id))
         if device is None:
             return {"error": "not found"}
         res = fw_hits.collect_fw_hits(device)
+        keeper.release(lock)  # 機器への接続は終わり。保存の前に放す
 
         async def save():
             async with _sessionmaker()() as db:
@@ -754,10 +959,9 @@ def collect_fw_hits_device(device_id: str, actor: str | None = None, ref: str | 
         _run_async(save())
         return {"rules": len(res.rules), "error": res.error}
     finally:
-        try:
-            lock.release()
-        except redis.exceptions.LockError:
-            pass
+        keeper.close()
+        _record_lock_lost(keeper, "FW ヒット数の取得", device_id, device.name if device else None, actor, ref)
+        _flush_hostkey_events(actor, ref)
 
 
 async def _wants(event: str) -> bool:
@@ -1015,27 +1219,171 @@ def purge_audit_logs():
 # ---------------------------------------------------------------- コマンド実行（表示コマンドの一括実行）
 
 
+# ---- 投入の流れ（枠が空いたときだけ投入する。待つタスクを回し続けない）
+# 1. enqueue_command_run: 実行の全機器を、その実行の待ち行列（Redis のリスト）に入れ、実行を「待っている実行」
+#    （CMD_QUEUE_KEY。値は最後に投入した時刻）に加えてから pump_command_queue を呼ぶ
+# 2. pump_command_queue: 同時実行の枠（COMMAND_RUN_WORKER_SLOTS 個）の空きを見て、空きの数だけ投入する。
+#    投入する機器は「最後に投入した時刻がいちばん古い実行」の先頭から 1 台ずつ（古い実行から順に、実行の間で交互に）。
+#    1 つの実行で同時に動かすのは COMMAND_RUN_CONCURRENCY 台まで。投入するときに枠を予約し（値は「実行 ID:乱数」）、
+#    予約をタスクに渡す。タスクは予約をそのまま引き継いで（延長して）使う
+# 3. 機器 1 台の処理が終わる・待ちに戻る（枠を放す）たびに、タスクが pump_command_queue を呼ぶ。
+#    取りこぼし（投入の失敗・worker の再起動など）は、5 分ごとの fail_stale_command_runs も pump して拾う
+CMD_QUEUE_KEY = "netconfig:cmdrun:queue"
+CMD_PUMP_LOCK = "netconfig:cmdrun:pump"
+# 予約した枠の期限（秒）。タスクが worker に届くまでの待ち（worker が収集などで埋まっている間）を見込む。
+# タスクが始まれば LockKeeper の延長（LOCK_TTL）に切り替わる。タスクが失われたときは、この時間で枠が空く
+SLOT_RESERVE_TTL = 600
+PENDING_TTL = 24 * 3600
+
+
 def _pending_key(run_id: str) -> str:
     return f"netconfig:cmdrun:{run_id}:pending"
 
 
+PENDING_PATTERN = "netconfig:cmdrun:*:pending"  # 以前の版も同じ名前の待ち行列を使っている
+ORPHANS_KEY = "netconfig:cmdrun:orphans"  # 保険の処理が「失われたかもしれない」と見た機器と、最初に見た時刻
+
+
+def _retrying_key(result_id: str) -> str:
+    return f"netconfig:cmdrun:retrying:{result_id}"
+
+
+def _slot_key(i: int) -> str:
+    return f"netconfig:cmdrun:slot:{i}"
+
+
+def _pending_entry(result_id: str, lock_waits: int = 0) -> str:
+    return f"{result_id}|{lock_waits}" if lock_waits else result_id
+
+
+def _parse_entry(raw) -> tuple[str, int]:
+    text = raw.decode() if isinstance(raw, bytes) else raw
+    rid, _, waits = text.partition("|")
+    return rid, int(waits) if waits.isdigit() else 0
+
+
 def enqueue_command_run(run_id: str, result_ids: list[str]) -> None:
-    """実行の各機器のタスクを投入する。同時に走らせるのは COMMAND_RUN_CONCURRENCY 台までで、
-    残りは Redis の待ち行列に置き、機器のタスクが終わるたびに次の 1 台を投入する"""
-    n = settings.COMMAND_RUN_CONCURRENCY
-    first, rest = result_ids[:n], result_ids[n:]
-    if rest:
-        r = _redis()
-        r.rpush(_pending_key(run_id), *rest)
-        r.expire(_pending_key(run_id), 24 * 3600)
-    for rid in first:
-        run_command_device.delay(rid)
+    """実行の各機器を待ち行列に入れ、枠が空いている数だけ投入する（残りは枠が空くたびに投入される）"""
+    r = _redis()
+    if result_ids:
+        r.rpush(_pending_key(run_id), *result_ids)
+        r.expire(_pending_key(run_id), PENDING_TTL)
+        r.zadd(CMD_QUEUE_KEY, {run_id: time.time()}, nx=True)
+    pump_command_queue()
 
 
-def _dispatch_next_command(run_id: str) -> None:
-    raw = _redis().lpop(_pending_key(run_id))
-    if raw:
-        run_command_device.delay(raw.decode() if isinstance(raw, bytes) else raw)
+def _requeue_command(run_id: str, result_id: str, lock_waits: int) -> None:
+    """枠が取れなかった機器を、その実行の待ち行列の先頭に戻す（順番を守る）"""
+    r = _redis()
+    r.lpush(_pending_key(run_id), _pending_entry(result_id, lock_waits))
+    r.expire(_pending_key(run_id), PENDING_TTL)
+    r.zadd(CMD_QUEUE_KEY, {run_id: 0}, nx=True)
+
+
+def _slot_token(run_id: str, result_id: str) -> str:
+    """枠の予約の値（実行 ID:結果 ID:乱数）。どの実行・どの機器が枠を持っているかを、保険の処理が見分けられるように"""
+    return f"{run_id}:{result_id}:{uuid.uuid4().hex}"
+
+
+def _slot_values(r) -> list[str | None]:
+    vals = r.mget([_slot_key(i) for i in range(settings.COMMAND_RUN_WORKER_SLOTS)])
+    return [v.decode() if isinstance(v, bytes) else v for v in vals]
+
+
+def _slot_holders(r) -> list[str | None]:
+    """枠ごとの持ち主の実行 ID（空いていれば None）"""
+    return [v.split(":", 1)[0] if v else None for v in _slot_values(r)]
+
+
+def pump_command_queue() -> int:
+    """空いている枠の数だけ、待っている機器を投入する。投入した台数を返す（同時に 1 つだけ動かす）"""
+    r = _redis()
+    pump = r.lock(CMD_PUMP_LOCK, timeout=30, blocking_timeout=10, thread_local=False)
+    if not pump.acquire():
+        logger.warning("コマンド実行の投入の順番を取れませんでした（5 分ごとの定期処理でやり直します）")
+        return 0
+    sent = 0
+    try:
+        for _ in range(10_000):  # 念のための上限（待ち行列が壊れていても回り続けない）
+            holders = _slot_holders(r)
+            free = [i for i, h in enumerate(holders) if h is None]
+            if not free:
+                break
+            picked = None
+            for raw in r.zrange(CMD_QUEUE_KEY, 0, -1):  # 最後に投入した時刻の古い順
+                run_id = raw.decode() if isinstance(raw, bytes) else raw
+                if not r.llen(_pending_key(run_id)):
+                    r.zrem(CMD_QUEUE_KEY, run_id)
+                    continue
+                if holders.count(run_id) >= settings.COMMAND_RUN_CONCURRENCY:
+                    continue
+                picked = run_id
+                break
+            if picked is None:
+                break
+            entry = r.lpop(_pending_key(picked))
+            if entry is None:
+                continue
+            rid, waits = _parse_entry(entry)
+            token = _slot_token(picked, rid)
+            if not r.set(_slot_key(free[0]), token, nx=True, ex=SLOT_RESERVE_TTL):
+                r.lpush(_pending_key(picked), entry)  # ほかの処理が先に取った。数え直す
+                continue
+            r.zadd(CMD_QUEUE_KEY, {picked: time.time()})
+            try:
+                run_command_device.delay(rid, lock_waits=waits, slot=free[0], slot_token=token)
+            except Exception:
+                # 投入できなかった（broker の停止など）。予約を戻し、機器を待ち行列の先頭へ戻す（定期処理でやり直す）
+                _drop_reservation(free[0], token)
+                r.lpush(_pending_key(picked), entry)
+                raise
+            sent += 1
+    finally:
+        try:
+            pump.release()
+        except redis.exceptions.LockError:
+            logger.warning("コマンド実行の投入の順番のロックが途中で外れていました")
+    return sent
+
+
+def _drop_reservation(slot: int | None, token: str | None) -> None:
+    """予約した枠を、まだ自分の予約のままなら放す（ほかの処理が取り直した枠は消さない）"""
+    if slot is None or not token:
+        return
+    lock = device_lock.make_lock(_redis(), _slot_key(slot))
+    lock.local.token = token.encode()
+    try:
+        lock.release()
+    except redis.exceptions.LockError:
+        pass  # すでに放した・期限が切れてほかの処理が取った
+
+
+def _pump_quietly(run_id: str | None = None) -> bool:
+    """投入する。投入の処理が最後まで動いたら True（broker に送れないなどで失敗したら False）"""
+    try:
+        pump_command_queue()
+        return True
+    except Exception:  # noqa: BLE001 - 投入の失敗で、この機器の結果を変えない（5 分ごとの定期処理でやり直す）
+        logger.exception("コマンド実行の次の機器を投入できませんでした run=%s", run_id)
+        return False
+
+
+def _take_command_slot(run_id: str, result_id: str, slot: int | None, token: str | None):
+    """投入のときに予約された枠を引き継ぐ（無い・期限が切れていたら空いている枠を取る）。取れなければ None"""
+    r = _redis()
+    if slot is not None and token:
+        lock = device_lock.make_lock(r, _slot_key(slot))
+        lock.local.token = token.encode()
+        try:
+            lock.reacquire()  # 期限を LOCK_TTL に戻す（以後は LockKeeper が延長する）
+            return lock
+        except redis.exceptions.LockError:
+            logger.warning("コマンド実行の枠の予約が切れていました（空いている枠を取り直します）slot=%s", slot)
+    for i in range(settings.COMMAND_RUN_WORKER_SLOTS):
+        lock = device_lock.make_lock(r, _slot_key(i))
+        if lock.acquire(blocking=False, token=_slot_token(run_id, result_id)):
+            return lock
+    return None
 
 
 async def _claim_command_result(result_id: str) -> dict | None:
@@ -1047,13 +1395,24 @@ async def _claim_command_result(result_id: str) -> dict | None:
             return None
         run = await db.get(CommandRun, res.run_id)
         info: dict = {"run_id": res.run_id, "claimed": False, "commands": list(run.commands) if run else []}
-        if res.status != STATUS_QUEUED or run is None:
+        if run is None:
             return info
-        res.status = STATUS_RUNNING
-        res.started_at = utcnow()
+        # 読んでから書くのではなく、「待機中なら実行中にする」を 1 つの UPDATE で行い、変えた行数で判定する
+        # （同じ機器のタスクが 2 つ動いても、取れるのは 1 つだけ。SQLite・PostgreSQL のどちらでも同じ）
+        claimed = await db.execute(
+            update(CommandResult).where(CommandResult.id == result_id, CommandResult.status == STATUS_QUEUED)
+            .values(status=STATUS_RUNNING, started_at=utcnow()).execution_options(synchronize_session=False))
         await db.commit()
-        info["claimed"] = True
+        info["claimed"] = claimed.rowcount == 1
         return info
+
+
+async def _unclaim_command_result(result_id: str) -> None:
+    """待つため、「実行中」にした結果を「待機中」に戻す（まだ機器へは接続していない）"""
+    async with _sessionmaker()() as db:
+        await db.execute(update(CommandResult).where(CommandResult.id == result_id, CommandResult.status == STATUS_RUNNING)
+                         .values(status=STATUS_QUEUED, started_at=None))
+        await db.commit()
 
 
 async def _load_command_device(result_id: str) -> tuple[DeviceConnectionInfo | None, bool]:
@@ -1096,18 +1455,37 @@ async def _finish_command_run(run_id: str) -> None:
         await db.commit()
 
 
-@celery_app.task
-def run_command_device(result_id: str):
+LOCK_WAIT_FAILED = "同じ機器への別の SSH 処理（収集など）が終わらないため、実行できませんでした"
+RETRY_FAILED = "待ったあとの再試行を予約できなかったため、実行できませんでした"
+
+
+@celery_app.task(bind=True, soft_time_limit=COMMAND_TIME_LIMITS[0], time_limit=COMMAND_TIME_LIMITS[1])
+def run_command_device(self, result_id: str, lock_waits: int = 0, slot: int | None = None,
+                       slot_token: str | None = None):
     """コマンド実行の 1 台ぶん。機器へ接続する直前に、コマンドをもう一度検証する（キューの値を信用しない）。
     失敗しても再試行はしない（同じコマンドを何度も機器へ送らない）。
-    「実行中」にしたあとは、何があっても（例外でも）その機器を失敗にし、必ず次の機器を投入する"""
-    info = _run_async(_claim_command_result(result_id))
-    if info is None:
-        return {"error": "not found"}
-    run_id, commands = info["run_id"], info["commands"]
+    「実行中」にしたあとは、何があっても（例外でも）その機器を失敗か待機中にし、必ず枠を放して次の機器を投入する。
+
+    slot / slot_token: pump_command_queue が予約した同時実行の枠（引き継いで使う）。枠が取れなければ機器へ接続せず、
+    待ち行列の先頭へ戻す（枠が空いたときに投入され直す）。
+    同じ機器への別の SSH 処理（収集など）の途中なら、ブロックせず、枠を放して SSH_LOCK_RETRY_SEC 後に再試行する
+    （lock_waits: 待った回数。SSH_LOCK_WAIT 秒ぶん待っても空かなければ失敗）
+    """
+    keeper = device_lock.LockKeeper()
+    info = None
+    run_id = None
+    retry_after: int | None = None  # SSH ロックを待って再試行するときの秒数
     try:
+        info = _run_async(_claim_command_result(result_id))
+        if info is None:
+            return {"error": "not found"}
+        run_id, commands = info["run_id"], info["commands"]
         if not info["claimed"]:
             return {"skipped": True}
+        try:
+            _redis().delete(_retrying_key(result_id))
+        except redis.exceptions.RedisError:
+            pass  # 期限で消える
 
         def save(status, raw=None, error=None):
             _run_async(_save_command_result(result_id, run_id, commands, status, raw, error))
@@ -1116,7 +1494,15 @@ def run_command_device(result_id: str):
             except Exception:  # noqa: BLE001
                 logger.exception("コマンド実行の終了判定に失敗しました run=%s", run_id)
 
+        device = None
         try:
+            slot_lock = _take_command_slot(run_id, result_id, slot, slot_token)
+            if slot_lock is None:
+                # 枠が空いていない（予約が切れた・直接投入された）。接続せずに待ち行列の先頭へ戻す
+                _run_async(_unclaim_command_result(result_id))
+                _requeue_command(run_id, result_id, lock_waits)
+                return {"status": "waiting"}
+            keeper.hold("slot", slot_lock)
             device, active = _run_async(_load_command_device(result_id))
             if not settings.COMMAND_RUN_ENABLED:
                 save(STATUS_SKIPPED, error="コマンド実行が無効になっているため、実行しませんでした")
@@ -1134,47 +1520,206 @@ def run_command_device(result_id: str):
                 save(STATUS_SKIPPED, error=f"送れないコマンドのため、実行しませんでした（{e}）")
                 return {"status": STATUS_SKIPPED}
             ssh = _ssh_lock(device.id)
-            if not ssh.acquire(blocking=True, blocking_timeout=SSH_LOCK_WAIT):
-                save(STATUS_FAILED, error="同じ機器への別の SSH 処理（収集など）が終わらないため、実行できませんでした")
+            if not ssh.acquire(blocking=False):
+                if lock_waits < _lock_wait_limit():
+                    _run_async(_unclaim_command_result(result_id))
+                    # 再試行を待っている印（保険の処理がこの機器を「失われた」とみなして入れ直さないように）
+                    _redis().set(_retrying_key(result_id), "1", ex=SLOT_RESERVE_TTL)
+                    retry_after = SSH_LOCK_RETRY_SEC
+                    return {"status": "waiting"}
+                save(STATUS_FAILED, error=LOCK_WAIT_FAILED)
                 return {"status": STATUS_FAILED}
+            keeper.hold("ssh", ssh)
             try:
                 raw = config_service.run_commands(device, commands)
             except Exception as e:  # noqa: BLE001 - 失敗の理由を日本語にして結果に残す（再試行しない）
                 msg, _ = describe_failure(e, device)
                 save(STATUS_FAILED, error=msg)
                 return {"status": STATUS_FAILED}
-            finally:
-                try:
-                    ssh.release()
-                except redis.exceptions.LockError:
-                    pass
             save(STATUS_OK, raw=raw)
             return {"status": STATUS_OK}
         except Exception as e:  # noqa: BLE001 - 想定外の失敗でも、この機器を「実行中」のままにしない（出力は入れない）
             logger.exception("コマンド実行に失敗しました result=%s", result_id)
+            retry_after = None
             try:
                 save(STATUS_FAILED, error=f"内部エラーのため実行できませんでした（{type(e).__name__}）")
             except Exception:  # noqa: BLE001 - 保存もできないときは、古い結果の整理（fail_stale）が失敗にする
                 logger.exception("コマンド実行の結果を保存できませんでした result=%s", result_id)
             return {"status": STATUS_FAILED}
+        finally:
+            if device is not None:
+                keeper.close()  # 枠・SSH ロックを放してから、記録・次の投入
+                _record_lock_lost(keeper, "コマンド実行", device.id, device.name, None, run_id)
+            _flush_hostkey_events(None, run_id)
     finally:
-        try:
-            _dispatch_next_command(run_id)
-        except Exception:  # noqa: BLE001 - 次の投入の失敗で、この機器の結果を変えない（残りは fail_stale が失敗にする）
-            logger.exception("コマンド実行の次の機器を投入できませんでした run=%s", run_id)
+        keeper.close()
+        _drop_reservation(slot, slot_token)  # 着手しなかった（結果が無い・着手済み）ときも、予約した枠を放す
+        if retry_after is not None:
+            _pump_quietly(run_id)  # 放した枠をほかの機器に回す
+            try:
+                # max_retries は今の回数より大きい値を必ず渡す（None はタスクの既定値（3）の意味で、無制限ではない）。
+                # 待つ回数の上限は lock_waits で数える
+                raise self.retry(args=(result_id,), kwargs={"lock_waits": lock_waits + 1}, countdown=retry_after,
+                                 max_retries=(self.request.retries or 0) + 1)
+            except Retry:
+                raise
+            except Exception:  # noqa: BLE001 - 再試行を予約できない（broker の停止など）。待機中のまま残さない
+                logger.exception("コマンド実行の再試行を予約できませんでした result=%s", result_id)
+                try:
+                    _run_async(_save_command_result(result_id, run_id, info["commands"], STATUS_FAILED,
+                                                    error=RETRY_FAILED))
+                    _run_async(_finish_command_run(run_id))
+                except Exception:  # noqa: BLE001
+                    logger.exception("コマンド実行の結果を保存できませんでした result=%s", result_id)
+        _pump_quietly(run_id)
 
 
-async def _fail_stale_runs() -> int:
+async def _fail_stale_runs(waiting_runs: set[str], system_active: bool) -> int:
     async with _sessionmaker()() as db:
-        n = await command_run_svc.fail_stale(db)
+        n = await command_run_svc.fail_stale(db, stale_running=COMMAND_STALE_RUNNING, waiting_runs=waiting_runs,
+                                             system_active=system_active)
         await db.commit()
         return n
 
 
+def _waiting_runs() -> tuple[set[str], bool]:
+    """枠を待っている（待ち行列に機器がある・枠を予約している）実行と、枠を使っている処理があるか"""
+    r = _redis()
+    holders = _slot_holders(r)
+    waiting = {h for h in holders if h}
+    for raw in r.zrange(CMD_QUEUE_KEY, 0, -1):
+        run_id = raw.decode() if isinstance(raw, bytes) else raw
+        if r.llen(_pending_key(run_id)):
+            waiting.add(run_id)
+    return waiting, any(holders)
+
+
+async def _queued_results() -> list[tuple[str, str]]:
+    """待機中（queued）の機器の（結果 ID, 実行 ID）。終わった実行のものは除く"""
+    async with _sessionmaker()() as db:
+        rows = await db.execute(
+            select(CommandResult.id, CommandResult.run_id).join(CommandRun, CommandRun.id == CommandResult.run_id)
+            .where(CommandResult.status == STATUS_QUEUED, CommandRun.finished_at.is_(None)))
+        return [(a, b) for a, b in rows.all()]
+
+
+async def _run_created(run_ids: list[str]) -> dict[str, datetime]:
+    if not run_ids:
+        return {}
+    async with _sessionmaker()() as db:
+        rows = await db.execute(select(CommandRun.id, CommandRun.created_at).where(CommandRun.id.in_(run_ids)))
+        return {row[0]: row[1] for row in rows.all()}
+
+
+def recover_command_queue(now: float | None = None) -> dict:
+    """投入の取りこぼしを拾う（5 分ごとの fail_stale_command_runs と、worker の起動時に呼ぶ）。
+
+    1. 待ち行列（netconfig:cmdrun:*:pending）に機器があるのに「待っている実行」（CMD_QUEUE_KEY）に入っていない実行を
+       加える（以前の版が残した待ち行列・ZSET だけが消えたとき）。スコアは実行の作成時刻（無ければ今）
+    2. DB では待機中なのに、どの待ち行列にも、枠の予約・実行中の枠にも、SSH ロックを待つ再試行の印にも無い機器
+       （LPOP のあと投入の前に落ちた・Redis の再起動で待ち行列が消えた）を、SLOT_RESERVE_TTL 秒より長く続けて
+       そう見えたものだけ、その実行の待ち行列の末尾へ入れ直す
+    戻り値: {"runs": 加えた実行の数, "requeued": 入れ直した機器の数}
+    """
+    r = _redis()
+    # 起動時の呼び出しと 5 分ごとの呼び出しが重なっても、同じ機器を 2 回戻さないよう、全体を 1 つずつにする
+    # （取れなければ、いま動いているほうに任せて何もしない。期限は処理が途中で落ちたときに残らないため）
+    token = uuid.uuid4().hex
+    if not r.set(RECOVER_LOCK, token, nx=True, ex=RECOVER_LOCK_TTL):
+        return {"runs": 0, "requeued": 0, "skipped": True}
+    try:
+        return _recover_command_queue(r, now)
+    finally:
+        try:
+            cur = r.get(RECOVER_LOCK)
+            if cur is not None and (cur.decode() if isinstance(cur, bytes) else cur) == token:
+                r.delete(RECOVER_LOCK)
+        except redis.exceptions.RedisError:
+            pass  # 期限で外れる
+
+
+RECOVER_LOCK = "netconfig:cmdrun:recover-lock"
+RECOVER_LOCK_TTL = 60
+
+
+def _recover_command_queue(r, now: float | None) -> dict:
+    now = now if now is not None else time.time()
+    pending: dict[str, set[str]] = {}
+    for raw in r.scan_iter(match=PENDING_PATTERN, count=500):
+        key = raw.decode() if isinstance(raw, bytes) else raw
+        run_id = key[len("netconfig:cmdrun:"):-len(":pending")]
+        entries = r.lrange(key, 0, -1)
+        if entries:
+            pending[run_id] = {_parse_entry(e)[0] for e in entries}
+    queued_runs = {(x.decode() if isinstance(x, bytes) else x) for x in r.zrange(CMD_QUEUE_KEY, 0, -1)}
+    missing = [run_id for run_id in pending if run_id not in queued_runs]
+    created = _run_async(_run_created(missing))
+    for run_id in missing:
+        ts = created[run_id].replace(tzinfo=UTC).timestamp() if run_id in created else now
+        r.zadd(CMD_QUEUE_KEY, {run_id: ts}, nx=True)
+    # 2. 失われた機器
+    in_queue = set().union(*pending.values()) if pending else set()
+    in_slots = {v.split(":")[1] for v in _slot_values(r) if v and v.count(":") >= 2}
+    seen = {(k.decode() if isinstance(k, bytes) else k): float(v) for k, v in r.hgetall(ORPHANS_KEY).items()}
+    still: set[str] = set()
+    requeued = 0
+    candidates = [(rid, run_id) for rid, run_id in _run_async(_queued_results())
+                  if rid not in in_queue and rid not in in_slots]
+    pipe = r.pipeline(transaction=False)  # 再試行の印は 1 回の往復でまとめて確かめる
+    for rid, _ in candidates:
+        pipe.exists(_retrying_key(rid))
+    retrying = pipe.execute() if candidates else []
+    for (rid, run_id), has_mark in zip(candidates, retrying, strict=True):
+        if has_mark:
+            continue
+        still.add(rid)
+        first = seen.get(rid)
+        if first is None:
+            r.hset(ORPHANS_KEY, rid, now)
+        elif now - first > SLOT_RESERVE_TTL:
+            # 予約（SLOT_RESERVE_TTL 秒で切れる）よりも長く、どこにも無い。投入されないまま失われたとみなして戻す。
+            # 万一まだ動いているタスクがあっても、着手（_claim_command_result）は 1 つしか取れない
+            r.rpush(_pending_key(run_id), rid)
+            r.expire(_pending_key(run_id), PENDING_TTL)
+            r.zadd(CMD_QUEUE_KEY, {run_id: 0}, nx=True)
+            r.hdel(ORPHANS_KEY, rid)
+            still.discard(rid)
+            requeued += 1
+            logger.warning("投入されないままだったコマンド実行の機器を待ち行列へ戻しました result=%s", rid)
+    gone = [rid for rid in seen if rid not in still]
+    if gone:
+        r.hdel(ORPHANS_KEY, *gone)
+    return {"runs": len(missing), "requeued": requeued}
+
+
+def _recover_quietly() -> None:
+    try:
+        recover_command_queue()
+    except Exception:  # noqa: BLE001 - 保険の処理の失敗で、定期処理・起動を止めない
+        logger.exception("コマンド実行の取りこぼしの確認に失敗しました")
+
+
 @celery_app.task
 def fail_stale_command_runs() -> int:
-    """worker の停止などで終わらなくなったコマンド実行の機器を失敗にする（5 分ごと）"""
-    n = _run_async(_fail_stale_runs())
+    """worker の停止などで終わらなくなったコマンド実行の機器を失敗にする（5 分ごと）。
+    あわせて、取りこぼした機器を待ち行列へ戻し（recover_command_queue）、枠が空いていれば投入する（保険）。
+
+    順序は recover → pump → fail_stale（失敗にする判定は、投入できる機器を投入してから）。worker の再起動のあとは、
+    枠（LOCK_TTL で空く）より DB の「実行中」が長く残るため、先に判定すると、この回で投入されるはずの実行を失敗にしてしまう。
+    さらに、投入の処理が最後まで動き（broker に送れた）、いま空いている枠があって待ち行列に機器が残っている（この回か
+    次の回で投入される）なら、待っている実行は失敗にしない。投入できない（broker・worker が動いていない）ときは、
+    今までどおり動きの時刻だけで判断する（待っている実行が永久に残らない）
+    """
+    _recover_quietly()
+    pumped = _pump_quietly()
+    try:
+        waiting, active = _waiting_runs()
+        if pumped and not active and waiting:
+            active = any(h is None for h in _slot_holders(_redis()))  # 空いた枠がある（この回か次の回で投入される）
+    except redis.exceptions.RedisError:
+        logger.warning("コマンド実行の待ち行列を読めませんでした（待っている実行も、動きの時刻だけで判断します）")
+        waiting, active = set(), False
+    n = _run_async(_fail_stale_runs(waiting, active))
     if n:
         logger.warning("止まっていたコマンド実行の機器 %d 台を失敗にしました", n)
     return n
@@ -1301,10 +1846,17 @@ def dispatch_schedules_at(now: datetime) -> dict:
                 continue
             device_name, msg = None, f"グループ「{gname}」の{what}を開始しました"
         else:
-            device_name = _run_async(_device_name(target))
+            device_name, active = _run_async(_device_state(target))
             if device_name is None:
                 _run_async(_record("schedule.invalid", f"スケジュール「{name}」の対象機器が削除されています",
                                    detail={"target": target}, actor=actor))
+                continue
+            if not active and not compliance:
+                # 一括・グループの収集と同じく、無効な機器は収集しない（スケジュールは残す。飛ばしたことを記録する）
+                _run_async(_record("collect.skipped", f"スケジュール「{name}」: 機器が無効のため、収集しませんでした",
+                                   device_id=target, device_name=device_name,
+                                   detail={"cron": cron_expression, "target": target, "reason": "inactive"},
+                                   actor=actor, ref=ref))
                 continue
             msg = f"{what}を開始しました"
         # 開始の記録を先に残す（タスクの記録と同じ ref でまとまる）

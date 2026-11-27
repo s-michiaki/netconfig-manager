@@ -20,6 +20,10 @@
 #   BACKUP_POST_COMMAND=                        作成後に実行するコマンド（rsync・scp など。ファイルは $BACKUP_FILE）
 #   BACKUP_ENCRYPT_PASSPHRASE_FILE=             暗号化のパスフレーズを書いたファイル（例 /root/netconfig-backup.pass）。
 #                                               空なら暗号化しない。**バックアップと別の場所にも保管すること**（無いと復元できない）
+#                                               root だけが読める（所有者 root・600 か 400）ことを確かめ、違えば警告する
+#   BACKUP_WORK_DIR=/var/tmp                    作業用のディレクトリ（DB のダンプなどを平文で一時的に置く）を作る場所。
+#                                               BACKUP_DIR の外に、root だけが読める（700）ディレクトリを作り、アーカイブができたらすぐ消す。
+#                                               DB のダンプとコンフィグ履歴が入るだけの空きが要る（/tmp が tmpfs の環境で溢れないよう /var/tmp）
 #
 # 結果は backend コンテナの app.tools.backup_report でアプリに伝える（画面「システム状態」・異常の通知）。
 # 終了コード: 0 = 成功、1 = 失敗（バックアップを作れなかった）、2 = サーバー内には作れたが、外部への保管に失敗
@@ -52,6 +56,7 @@ BACKUP_COPY_REQUIRE_MOUNT="${BACKUP_COPY_REQUIRE_MOUNT:-$(env_value BACKUP_COPY_
 BACKUP_COPY_KEEP_DAYS="${BACKUP_COPY_KEEP_DAYS:-$(env_value BACKUP_COPY_KEEP_DAYS "$BACKUP_KEEP_DAYS")}"
 BACKUP_POST_COMMAND="${BACKUP_POST_COMMAND:-$(env_value BACKUP_POST_COMMAND "")}"
 BACKUP_ENCRYPT_PASSPHRASE_FILE="${BACKUP_ENCRYPT_PASSPHRASE_FILE:-$(env_value BACKUP_ENCRYPT_PASSPHRASE_FILE "")}"
+BACKUP_WORK_DIR="${BACKUP_WORK_DIR:-$(env_value BACKUP_WORK_DIR /var/tmp)}"
 ENCRYPTED="no"
 [ -n "$BACKUP_ENCRYPT_PASSPHRASE_FILE" ] && ENCRYPTED="yes"
 POST_TIMEOUT=3600  # BACKUP_POST_COMMAND の制限時間（秒）
@@ -121,17 +126,58 @@ report() { # $1 = ok / failed, $2 = 文
   fi
 }
 
+# 作業用のディレクトリ（平文の DB のダンプ・.env・証明書の秘密鍵が入る）を消す。アーカイブができた直後と、終了時に呼ぶ
+remove_work() {
+  if [ -n "$WORK" ]; then rm -rf --one-file-system -- "$WORK"; WORK=""; fi
+}
+
+# 前に途中で止まった（SIGKILL・メモリ不足・電源断）バックアップの作業用ディレクトリを消す
+#   消すのは、このスクリプトが作る名前の形のディレクトリだけ（シンボリックリンク・ほかのファイルには触れない）:
+#     BACKUP_WORK_DIR の netconfig-backup-work.<PID>.<8 文字>（その PID が動いていないもの。動いていても 1 日より古いもの）
+#     BACKUP_DIR の .work-YYYYmmdd-HHMMSS-<4 文字>（以前の版が BACKUP_DIR の中に作っていたもの。1 時間より古いもの）
+remove_stale_work() {
+  local d name pid
+  if [ -d "$BACKUP_WORK_DIR" ]; then
+    while IFS= read -r -d '' d; do
+      name=$(basename "$d")
+      [[ "$name" =~ ^netconfig-backup-work\.([0-9]+)\.[A-Za-z0-9]{8}$ ]] || continue
+      pid="${BASH_REMATCH[1]}"
+      if kill -0 "$pid" 2>/dev/null && [ -z "$(find "$d" -maxdepth 0 -mmin +1440 2>/dev/null)" ]; then continue; fi
+      log "[INFO] 前に途中で止まったバックアップの作業用ディレクトリを消します: $d"
+      rm -rf --one-file-system -- "$d" || log "[WARN] 消せませんでした: $d"
+    done < <(find "$BACKUP_WORK_DIR" -mindepth 1 -maxdepth 1 -type d -user "$(id -u)" -name 'netconfig-backup-work.*' -print0 2>/dev/null)
+  fi
+  if [ -d "$BACKUP_DIR" ]; then
+    while IFS= read -r -d '' d; do
+      name=$(basename "$d")
+      [[ "$name" =~ ^\.work-[0-9]{8}-[0-9]{6}-[A-Za-z0-9]{4}$ ]] || continue
+      log "[INFO] 以前の版が保存先に残した作業用ディレクトリ（平文）を消します: $d"
+      rm -rf --one-file-system -- "$d" || log "[WARN] 消せませんでした: $d"
+    done < <(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -user "$(id -u)" -name '.work-*' -mmin +60 -print0 2>/dev/null)
+  fi
+  return 0
+}
+
+# 空きの表示（MB。分からなければ ?）
+free_mb() { local a; a=$(df -P -k "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'); [[ "$a" =~ ^[0-9]+$ ]] && echo "$((a / 1024))" || echo "?"; }
+
 on_exit() {
   local rc=$?
-  [ -n "$WORK" ] && rm -rf "$WORK"
+  local space_hint=""
+  # 作業場所・保存先の空きが足りないと、ダンプ・取り出し・アーカイブの書き込みで失敗する。分かるように空きを添える
+  case "$STAGE" in
+    "DB のダンプ"|"コンフィグ履歴などの取り出し"|".env・証明書の取り出し"|"アーカイブの作成"*)
+      space_hint="作業場所 $BACKUP_WORK_DIR の空き $(free_mb "$BACKUP_WORK_DIR") MB・保存先 $BACKUP_DIR の空き $(free_mb "$BACKUP_DIR") MB。空きが足りなければ BACKUP_WORK_DIR・BACKUP_DIR を空きのある場所に" ;;
+  esac
+  remove_work
   if [ -n "$GNUPG_TMP" ]; then
     GNUPGHOME="$GNUPG_TMP" gpgconf --kill gpg-agent >/dev/null 2>&1 || true
     rm -rf "$GNUPG_TMP"
   fi
   [ -n "$OUT" ] && rm -f "$OUT.part"
   if [ "$rc" -ne 0 ] && [ "$REPORTED" -eq 0 ]; then
-    log "[ERROR] バックアップに失敗しました（「$STAGE」で失敗。終了コード $rc）"
-    report failed "「$STAGE」で失敗しました（終了コード $rc）。サーバーの journalctl -u netconfig-backup.service を確認してください"
+    log "[ERROR] バックアップに失敗しました（「$STAGE」で失敗。終了コード $rc）${space_hint:+。$space_hint}"
+    report failed "「$STAGE」で失敗しました（終了コード $rc）。${space_hint:+$space_hint。}サーバーの journalctl -u netconfig-backup.service を確認してください"
   fi
 }
 trap on_exit EXIT
@@ -158,6 +204,13 @@ if [ "$ENCRYPTED" = "yes" ]; then
     report failed "暗号化のパスフレーズのファイル（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が無いか空です"
     exit 1
   fi
+  # パスフレーズのファイルは root（実行している人）だけが読めること。違っても止めない（今までのバックアップを止めないため）が、知らせる
+  pass_st=$(stat -L -c '%u %a' "$BACKUP_ENCRYPT_PASSPHRASE_FILE" 2>/dev/null || true)
+  read -r pass_uid pass_mode <<<"$pass_st"
+  if [ "${pass_uid:-}" != "$(id -u)" ] || ! [[ "${pass_mode:-}" =~ ^[0-7]+$ ]] || [ $(( 8#$pass_mode & 8#077 )) -ne 0 ]; then
+    log "[WARN] パスフレーズのファイル（$BACKUP_ENCRYPT_PASSPHRASE_FILE）が root だけが読める形ではありません（所有者 uid ${pass_uid:-?}・権限 ${pass_mode:-?}）。"
+    log "       ほかの人が読めると暗号化の意味がありません: sudo chown root:root $BACKUP_ENCRYPT_PASSPHRASE_FILE && sudo chmod 600 $BACKUP_ENCRYPT_PASSPHRASE_FILE"
+  fi
 fi
 
 STAGE="保存先の準備"
@@ -165,7 +218,15 @@ umask 077
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 TS=$(date +%Y%m%d-%H%M%S)
-WORK=$(mktemp -d "$BACKUP_DIR/.work-$TS-XXXX")
+# 作業用のディレクトリは BACKUP_DIR の外に作る（BACKUP_DIR をディレクトリごと同期する BACKUP_POST_COMMAND で、
+# 平文の作業用のファイルまで外へ送らないように）。mktemp -d は 700 で作る
+remove_stale_work
+mkdir -p "$BACKUP_WORK_DIR"
+case "$(cd "$BACKUP_WORK_DIR" && pwd -P)/" in
+  "$(cd "$BACKUP_DIR" && pwd -P)/"*)
+    log "[WARN] BACKUP_WORK_DIR（$BACKUP_WORK_DIR）が BACKUP_DIR の中にあります。保存先を同期すると、作業中の平文のファイルも送られる可能性があります" ;;
+esac
+WORK=$(mktemp -d "$BACKUP_WORK_DIR/netconfig-backup-work.$$.XXXXXXXX")
 
 OUT_NAME="netconfig-backup-$TS.tar.gz"
 [ "$ENCRYPTED" = "yes" ] && OUT_NAME="$OUT_NAME.gpg"
@@ -216,6 +277,8 @@ else
   tar -C "$WORK" -czf "$OUT.part" .
 fi
 mv "$OUT.part" "$OUT"
+# 平文の作業用のファイルはすぐに消す（外部への保管・BACKUP_POST_COMMAND の最大 1 時間のあいだ残さない）
+remove_work
 log "[INFO] 作成しました: $OUT（$(du -h "$OUT" | cut -f1)）"
 # ここから先の失敗では、作ったバックアップを消さない（成功として扱い、外部への保管の失敗は別に伝える）
 STAGE="後片付け"

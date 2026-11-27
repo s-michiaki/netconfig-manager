@@ -878,7 +878,6 @@ async def send_now(db: AsyncSession, setting: NotificationSetting, user: User, k
     report = await preview_report(db, setting, user, kind, now_local)
     cfg = await mail.load_config(db) if setting.emails else None
     targets = notify.setting_targets(setting)
-    results = await asyncio.gather(
-        *(asyncio.to_thread(notify._send, k, url, build_payload(k, report), cfg) for k, url in targets))
+    results = await notify.send_all([(k, url, build_payload(k, report)) for k, url in targets], cfg)
     await mail.record_last([err for (k, _), err in zip(targets, results, strict=True) if k == "email"])
     return {(f"email:{url}" if k == "email" else k): err for (k, url), err in zip(targets, results, strict=True)}

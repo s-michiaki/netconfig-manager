@@ -8,10 +8,9 @@
 #   スクリプトの 'unsafe-inline' / 'unsafe-eval' は付けない（XSS 対策の本体。トークンを localStorage に置いているため）
 #   WebSocket（ターミナル・Ping 監視）は同じホストへの ws: / wss: なので connect-src 'self' で通る
 #   CSV・コンフィグ・PNG などのダウンロード（blob: の URL を <a download> で開く）は CSP の対象外
-# /docs（Swagger UI。backend の FastAPI が返す）だけは、CDN（cdn.jsdelivr.net）のスクリプト・CSS と
-#   HTML 内のスクリプトを使うため緩める（画面と同じ CSP では真っ白になる）。/openapi.json は JSON なので画面と同じでよい
+# 以前は /docs（Swagger UI）だけ CDN（cdn.jsdelivr.net）のスクリプトを許す別の値にしていたが、/docs は中継しなくなったので例外は無い
+#   （外部のスクリプトを、画面と同じオリジンで読ませない。#39）。パスで値を変えるときは、この map にキーを足す
 # location ごとに add_header を書くと server の add_header（HSTS など）が継承されなくなるため、map で値だけを切り替える
 map $uri $ncm_csp {
     default "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
-    /docs   "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://fastapi.tiangolo.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 }

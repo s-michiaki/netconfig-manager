@@ -44,7 +44,7 @@ def test_legacy_db_is_stamped_and_upgraded(monkeypatch, with_users):
     migrate.run_migrations()  # 2回目は何もしない（冪等）
 
     con = sqlite3.connect(path)
-    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0040_vuln_notify"
+    assert con.execute("select version_num from alembic_version").fetchone()[0] == "0041_startup_diff_encrypted"
     cols = [r[1] for r in con.execute("pragma table_info(devices)")]
     assert "jump_host_id" in cols and "private_key" in cols and "credential_profile_id" in cols
     # 既存の機器はプロファイルなし・ユーザー名はそのまま（今までどおり機器側の認証情報で接続する）
@@ -102,3 +102,31 @@ def test_0040_marks_only_notifiable_existing_matches(monkeypatch):
     assert got["m1"] and got["m3"] and got["m2"] is None and got["m4"] is None
     command.downgrade(cfg, "0039_rule_remediation")
     command.upgrade(cfg, "head")
+
+
+def test_0041_startup_diff_downgrade_drops_only_encrypted_values(monkeypatch):
+    """0041: 列の型は変わらず、既存の平文の差分は残る（アプリが平文も読める。次の比較で暗号化される）。
+    downgrade では、前の版が読めない暗号化された差分だけを消す（状態・行数は残す）"""
+    from alembic import command
+
+    path = f"{TMP}/m0041.db"
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+    cfg = migrate._alembic_config()
+    command.upgrade(cfg, "0040_vuln_notify")
+    con = sqlite3.connect(path)
+    for did, diff in (("d1", "--- startup\n+++ running\n+plain"), ("d2", None)):
+        con.execute("insert into devices (id, name, hostname, platform, port, username, password, is_active, created_at,"
+                    " updated_at, startup_state, startup_added, startup_removed, startup_diff)"
+                    " values (?, ?, '192.0.2.1', 'cisco_ios', 22, 'u', 'p', 1, '2026-01-01', '2026-01-01', 'unsaved', 1, 0, ?)",
+                    (did, did, diff))
+    con.commit()
+    command.upgrade(cfg, "head")
+    assert con.execute("select startup_diff from devices where id='d1'").fetchone()[0].endswith("+plain")  # 平文は残る
+    con.execute("update devices set startup_diff='enc:gAAAA-x' where id='d2'")  # 新しい版が暗号化して書いた値
+    con.commit()
+    command.downgrade(cfg, "0040_vuln_notify")
+    rows = dict(con.execute("select id, startup_diff from devices").fetchall())
+    assert rows["d1"].endswith("+plain") and rows["d2"] is None
+    assert con.execute("select startup_state, startup_added from devices where id='d2'").fetchone() == ("unsaved", 1)
+    command.upgrade(cfg, "head")
+    con.close()

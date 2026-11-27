@@ -11,6 +11,11 @@
   同じ接続元（NAT の内側など）から普通にログインする人が多くても止まらないように。
   2 段階認証のログインは、パスワード（/token）と確認コード（/mfa/verify）で 2 回数えるので、成功したら 2 回分戻す
   （間違えたコードの分は戻さない）
+- ログイン済みの本人の確認（パスワード変更・2 段階認証・API トークンの発行・管理者の確認。app/api/auth.py の
+  begin_step_up）は、「ユーザー名 × 接続元」の単位だけで数え・止める（per_ip=False）。接続元全体のカウンタには数えない
+  （XSS などで本人のブラウザから誤りを繰り返されても、同じ NAT の内側のほかの人のログインを止めないように）。
+  「ユーザー名 × 接続元」はログインと共有するので、ログインと本人確認で試せる回数の合計に上限がかかる。
+  本人確認に成功しても、それまでの誤りの回数は消さない（成功の 1 回分だけ戻す。step_up_success）
 - ユーザー名だけでは止めない（他人が管理者を締め出せてしまうため）。接続元 IP は nginx が付ける値を使う
 - 存在しないユーザー名でも同じように数え・止めるので、応答からユーザーの有無は分からない
 - Redis に接続できないときは制限せずにログインを通す（警告をログに出す）。Redis が止まっても管理者が入れるように
@@ -48,9 +53,14 @@ def _keys(username: str, ip: str | None) -> list[tuple[str, int]]:
     return [(f"user:{user}:{ip}", settings.LOGIN_MAX_FAILURES), (f"ip:{ip}", settings.LOGIN_MAX_FAILURES_PER_IP)]
 
 
-async def begin_attempt(username: str, ip: str | None) -> tuple[int, list[str]]:
-    """照合の前に試行を数える。（止める場合の残り秒数（通すなら 0）, 今回ロックした単位 "user" / "ip"）"""
+async def begin_attempt(username: str, ip: str | None, per_ip: bool = True) -> tuple[int, list[str]]:
+    """照合の前に試行を数える。（止める場合の残り秒数（通すなら 0）, 今回ロックした単位 "user" / "ip"）
+
+    per_ip=False: 「ユーザー名 × 接続元」だけで数え・止める（ログイン済みの本人の確認）
+    """
     keys = _keys(username, ip)
+    if not per_ip:
+        keys = keys[:1]
     try:
         r = client()
         ttls = [await r.ttl(f"{PREFIX}:lock:{k}") for k, _ in keys]
@@ -78,7 +88,10 @@ async def begin_attempt(username: str, ip: str | None) -> tuple[int, list[str]]:
 
 
 async def record_success(username: str, ip: str | None, attempts: int = 1) -> None:
-    """成功した試行は数えない。attempts: 成功までに数えた試行のうち、成功の分（2 段階認証は 2）"""
+    """ログインの完了（パスワードと、2 段階認証があるならそのコードまで通ったとき）。その利用者×接続元の回数を消す。
+
+    attempts: 成功までに数えた試行のうち、成功の分（2 段階認証は 2）。接続元の回数はその分だけ戻す
+    """
     (user_key, _), (ip_key, _) = _keys(username, ip)
     try:
         r = client()
@@ -87,6 +100,29 @@ async def record_success(username: str, ip: str | None, attempts: int = 1) -> No
             await r.delete(f"{PREFIX}:fail:{ip_key}")
     except RedisError as e:
         logger.warning("ログインの試行回数の消去に失敗しました: %s", e)
+
+
+async def step_up_success(username: str, ip: str | None) -> None:
+    """本人の確認（begin_attempt(per_ip=False)）に成功した。**成功したその 1 回分だけ**を戻し、それまでの誤りは残す。
+
+    消してしまうと、確認コードの誤りと、知っているパスワードでの本人確認の成功を交互に送って、回数の上限を
+    すり抜けられる（総当たりを続けられる）。誤りの回数が消えるのは、ログインの完了（record_success）と時間の経過だけ。
+    成功の分を戻すのは、正しい操作を続けるだけの人が止まらないようにするため
+    """
+    key = f"{PREFIX}:fail:{_keys(username, ip)[0][0]}"
+    try:
+        r = client()
+        # DECR だけにする（DELETE はしない）。消すと、同時に数えたほかの誤り（DECR と DELETE の間の INCR）まで消える。
+        # 0 のキーは期限（begin_attempt が付けた）で消える
+        n = await r.decr(key)
+        if n < 0:
+            # 期限でキーが消えたあとに減らした（期限なしの -1 ができた）。1 足して戻し、期限を付ける（同時の INCR は残る）
+            pipe = r.pipeline(transaction=True)
+            pipe.incr(key)
+            pipe.expire(key, settings.LOGIN_FAILURE_WINDOW_MIN * 60, nx=True)
+            await pipe.execute()
+    except RedisError as e:
+        logger.warning("本人の確認の試行回数の更新に失敗しました: %s", e)
 
 
 async def token_failure(ip: str | None) -> tuple[int, bool]:

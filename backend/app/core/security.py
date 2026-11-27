@@ -1,5 +1,6 @@
 """パスワードハッシュとJWT"""
 import hashlib
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
@@ -37,11 +38,13 @@ def password_fingerprint(hashed_password: str) -> str:
 def create_access_token(user_id: str, hashed_password: str, token_version: int = 0) -> str:
     """ロールはトークンに入れず、リクエストごとにDBから読む（ロール変更を即時反映するため）
 
-    tv: users.token_version（管理者による強制ログアウト・無効化で上がる）。照合は app/api/deps.py
+    tv: users.token_version（管理者による強制ログアウト・無効化・2 段階認証の設定・解除などで上がる）。照合は app/api/deps.py
+    jti: トークンごとに異なる値（同じ秒に発行しても別のトークンになる。本人のログアウトはトークン単位で失効させるため）
     """
     now = datetime.now(UTC)
     payload = {
         "sub": user_id,
+        "jti": secrets.token_urlsafe(12),
         "pwv": password_fingerprint(hashed_password),
         "tv": token_version,
         "iat": now,

@@ -124,7 +124,8 @@ test("ほかの管理者のプロファイルは編集・割り当てできず�
       headers: admin, data: { name: NAME, username: "netops", password: "e2e-secret-pw" },
     })).status()).toBe(201);
     expect((await page.request.post("/api/users/", {
-      headers: admin, data: { username: OTHER.name, password: OTHER.password, role: "admin" },
+      // 管理者のユーザーの作成は、操作する管理者のパスワードの入れ直しが必要（#29）
+      headers: admin, data: { username: OTHER.name, password: OTHER.password, role: "admin", confirm_password: USERS.admin.password },
     })).status()).toBe(201);
     await openNav(page, "/credential-profiles");
     const row = page.locator("tr", { hasText: NAME });

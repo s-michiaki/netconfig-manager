@@ -514,7 +514,7 @@ def ctx(world, client):
 
         def user(role):
             name = f"rpt-{role}-{uid()}"
-            u = c.post("/api/users/", json={"username": name, "password": PW, "role": role}, headers=admin).json()
+            u = c.post("/api/users/", json={"username": name, "password": PW, "role": role, "confirm_password": "initial-pass-123"}, headers=admin).json()
             made.append(u["id"])
             return {"id": u["id"], "name": name, "h": login(c, name, PW)}
 

@@ -88,6 +88,9 @@ def test_worker_down_and_redis_down(ctx, monkeypatch):
             raise RedisConnectionError("down")
         get = hgetall = hset = ttl = ping
 
+        async def exists(self, *keys):
+            raise RedisConnectionError("down")
+
         def pipeline(self, **kw):
             raise RedisConnectionError("down")
     monkeypatch.setattr(login_limit, "_client", Down())

@@ -10,6 +10,7 @@ import fakeredis
 import pytest
 import regex
 import regex_cases
+from celery.exceptions import Retry
 from conftest import TMP
 from fastapi.testclient import TestClient
 
@@ -455,10 +456,9 @@ def test_worker_retryable_failures(client, env, redis_):
     port, _, _ = fake_sshd.start()
     d = _device(client, env, port=port)
     with mock.patch.object(worker, "_get_ignore_patterns", side_effect=RuntimeError("db down")), \
-            mock.patch.object(worker.collect_device_config, "retry", side_effect=RuntimeError("retry")) as retry, \
-            pytest.raises(RuntimeError, match="retry"):
-        worker.collect_device_config.apply(args=(d["id"],)).get()
-    assert retry.called
+            mock.patch.object(worker.collect_device_config, "retry", side_effect=Retry("retry")) as retry:
+        assert worker.collect_device_config.apply(args=(d["id"],)).state == "RETRY"
+    assert retry.called and retry.call_args.kwargs["kwargs"] == {"lock_waits": 0, "failures": 1}
     assert _activity("collect.failed", d["id"])[0][0] == "warning"  # 再試行する失敗は警告
     client.delete(f"/api/devices/{d['id']}", headers=env["admin"])
 
@@ -521,3 +521,26 @@ def test_collect_signature_unchanged():
     import inspect
     assert list(inspect.signature(cs.collect_config_sync).parameters)[:2] == ["device", "triggered_by"]
     assert list(inspect.signature(cs.normalize_config).parameters)[:2] == ["text", "platform"]
+
+
+@pytest.mark.parametrize("reason,retry", [("invalid", False), ("too_heavy", False), ("timeout", True), ("unavailable", True)])
+def test_collect_retries_only_when_the_skip_may_pass_next_time(monkeypatch, reason, retry):
+    """使えなかったルールがあれば保存しない。再試行するのは、やり直して直りうるもの（時間切れ・確かめられない）だけ。
+    正規表現そのものが不正・重すぎるものは、何度やっても同じなので再試行しない（すぐに失敗にして通知する）"""
+    def fake_normalize(raw, platform, extra, skipped, stats):
+        skipped.append(ir.Skipped("^x(", reason))
+        return raw
+
+    monkeypatch.setattr(cs, "fetch_config", lambda d: ("hostname R1\n", None, None))
+    monkeypatch.setattr(cs, "normalize_config", fake_normalize)
+    d = cs.DeviceConnectionInfo(id=str(uuid.uuid4()), name="r1", hostname="192.0.2.1", platform="cisco_ios", port=22,
+                                username="u", password="p", enable_secret=None)
+    res = cs.collect_config_sync(d, extra_ignore=["^x("])
+    assert res.success is False and res.retryable is retry and res.ignore_skipped
+
+    # 理由が混ざっているときは、直りうるものが 1 つでもあれば再試行する
+    def mixed(raw, platform, extra, skipped, stats):
+        skipped.extend([ir.Skipped("^a(", "invalid"), ir.Skipped("^b", "timeout")])
+        return raw
+    monkeypatch.setattr(cs, "normalize_config", mixed)
+    assert cs.collect_config_sync(d, extra_ignore=["^a(", "^b"]).retryable is True

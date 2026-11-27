@@ -39,6 +39,8 @@ EVENTS: dict[str, tuple[str, str]] = {
     "notify.failed": ("通知の失敗", "error"),
     "inventory.changed": ("機器情報の変化", "info"),
     "monitor.fw_failed": ("FW ヒット数の取得失敗", "warning"),
+    "ssh.lock_lost": ("機器のロックが途中で外れた", "warning"),
+    "ssh.hostkey_added": ("SSH ホスト鍵の新規登録（TOFU）", "info"),
     "ping.down": ("Ping監視: 応答なし", "error"),
     "ping.up": ("Ping監視: 復旧", "info"),
     "system.purge": ("古いログの削除", "info"),
@@ -53,7 +55,7 @@ EVENTS: dict[str, tuple[str, str]] = {
 CATEGORIES = {
     "collect": "収集", "schedule": "スケジュール", "compliance": "コンプライアンス", "notify": "通知", "inventory": "機器台帳",
     "ignore": "無視する行", "baseline": "基準の世代", "startup": "保存し忘れ",
-    "monitor": "モニタリング", "ping": "Ping監視",
+    "monitor": "モニタリング", "ping": "Ping監視", "ssh": "SSH",
     "system": "システム", "backup": "バックアップ", "export": "外部 Git",
 }
 LEVELS = ("info", "warning", "error")

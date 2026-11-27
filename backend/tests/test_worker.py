@@ -119,7 +119,8 @@ def test_compliance_schedule(r):
                                           "kind": "compliance"}, headers=h)
     assert sch.status_code == 201, sch.text
     assert sch.json()["kind"] == "compliance"
-    assert c.post("/api/schedules/", json={"name": "y", "cron_expression": "0 1 * * *"}, headers=h).json()["kind"] == "collect"
+    other = c.post("/api/schedules/", json={"name": "y", "cron_expression": "0 1 * * *"}, headers=h).json()
+    assert other["kind"] == "collect"
 
     # 収集し直さずにコンフィグを差し替えておく → スケジュールの再検査で違反が解消する
     cs.save_config(d["id"], "hostname X\n", "test")
@@ -142,4 +143,63 @@ def test_compliance_schedule(r):
     msg = db.execute("select message from activity_logs where ref=? and event='compliance.run'", (ref,)).fetchone()[0]
     assert "1 台" in msg and "解消 1 件" in msg
     c.delete(f"/api/compliance/rules/{rule['id']}", headers=h)
+    # 作ったスケジュール・機器は消す（残すと、同じ時刻（4:23）にスケジュールを判定するほかのテストで、差し替えていない
+    # run_compliance_checks.delay が本物の broker へ投げられる）
+    for sid in (sch.json()["id"], other["id"]):
+        assert c.delete(f"/api/schedules/{sid}", headers=h).status_code == 204
+    c.delete(f"/api/devices/{d['id']}", headers=h)
     c.__exit__(None, None, None)
+
+
+def test_inactive_device_is_not_collected_manually_or_by_single_device_schedule(r):
+    """一括・グループの収集と同じく、無効にした機器は収集しない。
+    手動の 1 台の収集は理由の分かるエラー（409）で断り、対象が機器 1 台のスケジュールは飛ばしてアクティビティに残す"""
+    from app.models import Schedule
+    c, did = _client_device(22)
+    tok = c.post("/api/auth/token", data={"username": "admin", "password": "initial-pass-123"}).json()["access_token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    sid = None
+    try:
+        assert c.put(f"/api/devices/{did}", json={"is_active": False}, headers=h).status_code == 200
+        with mock.patch.object(worker.collect_device_config, "delay") as delay:
+            res = c.post(f"/api/devices/{did}/collect", headers=h)
+        assert res.status_code == 409 and "無効な機器" in res.json()["detail"] and not delay.called
+        assert not r.exists(f"netconfig:collect:state:{did}")  # 「収集待ち」にもしない
+
+        async def add():
+            async with worker._sessionmaker()() as db:
+                s = Schedule(name="無効機器", cron_expression="41 2 * * *", target=did)
+                db.add(s)
+                await db.commit()
+                return s.id
+        sid = asyncio.run(add())
+        now = datetime(2026, 10, 29, 2, 41, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+        with mock.patch.object(worker, "enqueue_collect") as enq, mock.patch.object(worker, "_active_schedules",
+                                                                                     new=lambda: _only(sid)):
+            assert worker.dispatch_schedules_at(now)["dispatched"] == []
+        assert not enq.called
+        db = sqlite3.connect(f"{TMP}/t.db")
+        row = db.execute("select message, actor from activity_logs where event='collect.skipped' and device_id=?",
+                         (did,)).fetchone()
+        assert "無効" in row[0] and row[1] == "スケジュール「無効機器」"
+        # 有効に戻せば、手動でもスケジュールでも収集する
+        assert c.put(f"/api/devices/{did}", json={"is_active": True}, headers=h).status_code == 200
+        with mock.patch.object(worker.collect_device_config, "delay") as delay:
+            assert c.post(f"/api/devices/{did}/collect", headers=h).status_code == 200 and delay.called
+        later = datetime(2026, 10, 30, 2, 41, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+        with mock.patch.object(worker, "enqueue_collect") as enq, mock.patch.object(worker, "_active_schedules",
+                                                                                     new=lambda: _only(sid)):
+            assert worker.dispatch_schedules_at(later)["dispatched"] == [sid]
+        assert enq.called
+    finally:
+        if sid:
+            sqlite3.connect(f"{TMP}/t.db").execute("delete from schedules where id=?", (sid,)).connection.commit()
+        c.delete(f"/api/devices/{did}", headers=h)
+        c.__exit__(None, None, None)
+
+
+async def _only(sid):
+    async with worker._sessionmaker()() as db:
+        from app.models import Schedule
+        s = await db.get(Schedule, sid)
+        return [(s.id, s.cron_expression, s.target, s.name, s.kind or "collect")]

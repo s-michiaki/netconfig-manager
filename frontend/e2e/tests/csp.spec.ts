@@ -20,16 +20,17 @@ function collectViolations(page: Page) {
   return found;
 }
 
-test("本番と同じ CSP が付いている（/docs だけ別の値）", async ({ page }) => {
+test("本番と同じ CSP が付いている（/docs も同じ値）", async ({ page }) => {
   const top = await page.request.get("/");
   expect(top.headers()["content-security-policy"]).toBe(csp.app);
   // スクリプトは同じサーバーのものだけ（インライン・eval は許可しない）
   expect(csp.app).toMatch(/script-src 'self';/);
   expect(csp.app).not.toContain("unsafe-eval");
   expect(csp.app).not.toMatch(/script-src[^;]*unsafe-inline/);
-  // /docs（Swagger UI）は CDN を使うため別の値。中身は CDN に依存するのでヘッダーだけ確かめる
+  // /docs（以前の Swagger UI）は backend へ中継しない（#39）。画面と同じ CSP で、CDN のスクリプトは許さない
   const docs = await page.request.get("/docs");
-  expect(docs.headers()["content-security-policy"]).toBe(csp.docs);
+  expect(docs.headers()["content-security-policy"]).toBe(csp.app);
+  expect(csp.app).not.toContain("cdn.jsdelivr.net");
 });
 
 test("CSP を付けても全画面・書き出し・ダウンロード・WebSocket が動く", async ({ page }) => {

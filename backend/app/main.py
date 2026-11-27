@@ -37,6 +37,7 @@ from app.api import (
 )
 from app.api.deps import get_current_user, require, require_session
 from app.core import outbound
+from app.core.api_docs import install_api_docs
 from app.core.config import settings
 from app.core.crypto import encrypt, is_encrypted
 from app.core.database import AsyncSessionLocal, engine
@@ -69,6 +70,36 @@ async def _encrypt_legacy_passwords() -> None:
             logger.warning("平文で保存されていた %d 台分の機器パスワードを暗号化しました", migrated)
 
 
+LEGACY_DIFF_BATCH = 200  # 平文の差分を暗号化するときに 1 回に読む・書く行数
+
+
+async def _encrypt_legacy_startup_diffs() -> None:
+    """0041 より前に平文で保存された startup の差分（devices.startup_diff）を暗号化する。
+
+    暗号化済み（enc: で始まる）の行は読まないので二重に暗号化しない（何度呼んでも同じ）。行数が多くても、平文の行だけを
+    LEGACY_DIFF_BATCH 行ずつまとめて書き直す。失敗しても起動は止めない（ログに残し、次の起動・次の収集で暗号化される）
+    """
+    migrated = 0
+    try:
+        while True:
+            async with engine.begin() as conn:
+                rows = (await conn.execute(text(
+                    "SELECT id, startup_diff FROM devices WHERE startup_diff IS NOT NULL AND startup_diff NOT LIKE 'enc:%' "
+                    "ORDER BY id LIMIT :n"), {"n": LEGACY_DIFF_BATCH})).all()
+                if not rows:
+                    break
+                await conn.execute(text("UPDATE devices SET startup_diff = :diff WHERE id = :id AND startup_diff = :old"),
+                                   [{"id": i, "diff": encrypt(d), "old": d} for i, d in rows if not is_encrypted(d)])
+                migrated += len(rows)
+            if len(rows) < LEGACY_DIFF_BATCH:
+                break
+    except Exception:  # noqa: BLE001 - 起動は止めない（差分は付加情報。次の収集でも暗号化される）
+        logger.exception("平文の startup の差分を暗号化できませんでした（%d 台は済み）", migrated)
+        return
+    if migrated:
+        logger.warning("平文で保存されていた %d 台分の startup の差分を暗号化しました", migrated)
+
+
 async def _migrate_legacy_repos() -> None:
     async with AsyncSessionLocal() as db:
         for device_id, name in (await db.execute(select(Device.id, Device.name))).all():
@@ -85,6 +116,7 @@ async def lifespan(app: FastAPI):
     # DBスキーマを最新化（Alembic）。Alembic 導入前のDBも自動で引き継ぐ
     await asyncio.to_thread(run_migrations)
     await _encrypt_legacy_passwords()
+    await _encrypt_legacy_startup_diffs()
     await _migrate_legacy_repos()
     async with AsyncSessionLocal() as db:
         await auth.ensure_initial_admin(db)
@@ -99,8 +131,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.66.1",
+    version="1.67.0",
     lifespan=lifespan,
+    # Swagger UI・ReDoc（CDN のスクリプトを読む）は使わない。API の一覧は DOCS_ENABLED のときだけ、外部のスクリプトを
+    # 使わない /docs と /openapi.json を出す（下の install_api_docs）。本番では python -m app.tools.api_list で見る
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 if settings.cors_origins:
@@ -155,6 +192,9 @@ app.include_router(
 # WebSocket は接続後の最初のメッセージでトークンを検証する（terminal.py 参照）
 app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])
 app.include_router(ping.ws_router, prefix="/api/ping", tags=["ping"])
+# API の一覧（/docs）と OpenAPI のスキーマ（/openapi.json）は、開発用に DOCS_ENABLED のときだけ（app/core/api_docs.py）
+if settings.DOCS_ENABLED:
+    install_api_docs(app)
 
 
 @app.get("/api/health")

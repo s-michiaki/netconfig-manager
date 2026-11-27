@@ -37,6 +37,8 @@ ACTIONS = {
     "auth.mfa_enable": "2 段階認証の設定",
     "auth.mfa_disable": "2 段階認証の解除（本人）",
     "auth.mfa_recovery": "2 段階認証の予備コードの作り直し",
+    "auth.logout": "ログアウト",
+    "auth.logout_all": "すべての端末からログアウト",
     "user.create": "ユーザー作成",
     "user.update": "ユーザー変更",
     "user.delete": "ユーザー削除",
@@ -120,6 +122,8 @@ ACTIONS = {
     "vuln.fetch": "脆弱性情報の取得（いま取得）",
     "command.run": "コマンド実行",
     "command.export": "コマンド実行結果の出力",
+    "command.view": "コマンド実行結果の閲覧（ほかの人の実行）",
+    "ssh.hostkey_added": "SSH ホスト鍵の新規登録（TOFU）",
 }
 
 MAX_DETAIL_LENGTH = 4000

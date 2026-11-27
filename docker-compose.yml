@@ -38,6 +38,8 @@ x-backend-env: &backend-env
   LOGIN_FAILURE_WINDOW_MIN: ${LOGIN_FAILURE_WINDOW_MIN:-10}
   LOGIN_LOCK_MIN: ${LOGIN_LOCK_MIN:-15}
   API_TOKENS_ENABLED: ${API_TOKENS_ENABLED:-true}
+  # API の一覧（http://localhost:8000/docs・/openapi.json）。開発用の構成だけ既定で有効（本番の構成には渡さない）
+  DOCS_ENABLED: ${DOCS_ENABLED:-true}
   API_TOKEN_MAX_DAYS: ${API_TOKEN_MAX_DAYS:-365}
   COMPLIANCE_REGEX_TIMEOUT: ${COMPLIANCE_REGEX_TIMEOUT:-2}
   COMPLIANCE_CHECK_CONCURRENCY: ${COMPLIANCE_CHECK_CONCURRENCY:-2}
@@ -64,6 +66,8 @@ x-backend-env: &backend-env
   COMMAND_RUN_ENABLED: ${COMMAND_RUN_ENABLED:-true}
   COMMAND_RUN_MAX_DEVICES: ${COMMAND_RUN_MAX_DEVICES:-100}
   COMMAND_RUN_CONCURRENCY: ${COMMAND_RUN_CONCURRENCY:-10}
+  # 全体で同時に機器へ接続するコマンド実行の数（worker の -c 4 より小さく）。枠は API（投入）と worker の両方が数えるので、両方に渡す
+  COMMAND_RUN_WORKER_SLOTS: ${COMMAND_RUN_WORKER_SLOTS:-2}
   COMMAND_RUN_MAX_OUTPUT: ${COMMAND_RUN_MAX_OUTPUT:-200000}
   COMMAND_RUN_MAX_RUN_OUTPUT: ${COMMAND_RUN_MAX_RUN_OUTPUT:-20000000}
   COMMAND_RUN_MAX_ACTIVE_PER_USER: ${COMMAND_RUN_MAX_ACTIVE_PER_USER:-2}
@@ -155,7 +159,8 @@ services:
       - NET_RAW
     sysctls:
       net.ipv4.ping_group_range: "0 2147483647"
-    environment: *backend-env
+    environment:
+      <<: *backend-env
     volumes:
       - ./backend:/app
       - config_repo:/app/configs

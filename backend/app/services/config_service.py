@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import git
+from celery.exceptions import SoftTimeLimitExceeded
 from netmiko import (
     ConnectHandler,
     NetmikoAuthenticationException,
@@ -511,7 +512,8 @@ def _with_session(device: DeviceConnectionInfo, work, prep: bool = True):
         "conn_timeout": settings.SSH_TIMEOUT,  # TCP 接続
         "banner_timeout": settings.SSH_TIMEOUT,  # SSH バナー受信
         "auth_timeout": settings.SSH_AUTH_TIMEOUT,
-        "alt_host_keys": True,
+        # 踏み台経由の機器は known_hosts を Netmiko に読ませず、HostKeyPolicy.prepare で踏み台ごとの記録だけを入れる
+        "alt_host_keys": not device.jump,
         "alt_key_file": settings.SSH_KNOWN_HOSTS,
         "auto_connect": False,
     }
@@ -540,7 +542,19 @@ def _with_session(device: DeviceConnectionInfo, work, prep: bool = True):
 
     conn = ConnectHandler(**params)
     # Netmiko 既定の AutoAddPolicy を known_hosts 検証ポリシーに差し替えてから接続する
-    conn.key_policy = HostKeyPolicy()
+    policy = HostKeyPolicy(device.jump.scope if device.jump else None,
+                           {"target": "device", "device_id": device.id, "device_name": device.name,
+                            "via": device.jump.name if device.jump else None})
+    conn.key_policy = policy
+    if device.jump:
+        build = conn._build_ssh_client
+
+        def _build_with_jump_keys():  # SSHClient を作った直後（接続の前）に、比べる鍵を入れる
+            client = build()
+            policy.prepare(client, device.hostname, device.port)
+            return client
+
+        conn._build_ssh_client = _build_with_jump_keys
     if device.private_key and device.platform.startswith("paloalto"):
         # PAN-OS ドライバは use_keys=False だとキーボード対話認証（パスワード）専用のクライアントを使い、
         # 鍵を無視する。生成時に use_keys=True を渡すと鍵ファイルの存在を要求されるため（秘密鍵は
@@ -548,6 +562,8 @@ def _with_session(device: DeviceConnectionInfo, work, prep: bool = True):
         conn.use_keys = True
     try:
         conn._open()
+        if getattr(conn, "remote_conn_pre", None) is not None:
+            policy.after_connect(conn.remote_conn_pre)
         if spec.supports_enable and (device.enable_secret or spec.auto_enable):
             conn.enable()
         if prep:
@@ -576,6 +592,9 @@ def _host_key_error(e: BaseException) -> BaseException | None:
 
 def describe_failure(e: BaseException, device: DeviceConnectionInfo) -> tuple[str, bool]:
     """接続・コマンド実行の失敗を、画面に出す説明と「再試行で直る見込みがあるか」にする"""
+    if isinstance(e, SoftTimeLimitExceeded):
+        # worker のタスクの時間の上限（worker.py の soft_time_limit）。同じ処理をやり直しても長さは変わらない
+        return "処理の時間の上限を超えたため中断しました（応答待ち時間・コマンドの数を見直してください）", False
     if isinstance(e, JumpHostError):
         return str(e), e.retryable
     if isinstance(e, PrivateKeyError):
@@ -630,10 +649,12 @@ def collect_config_sync(
     stats: dict = {}
     config_text = normalize_config(raw, device.platform, extra_ignore, skipped, stats)
     if skipped:
-        # 飛ばしたルールがあるまま保存すると、消える回と消えない回が混ざって偽の変更になる。
-        # 保存せず、再試行できる失敗にする（時間切れは機器や worker の負荷で一時的に起きることもある）
-        from app.services.ignore_rules import skipped_message
-        return CollectResult(success=False, error=skipped_message(skipped), retryable=True, ignore_skipped=skipped)
+        # 飛ばしたルールがあるまま保存すると、消える回と消えない回が混ざって偽の変更になる。保存せずに失敗にする。
+        # 再試行するのは、やり直して直りうるもの（時間切れ・重さを確かめられなかった。機器や worker の負荷で一時的に
+        # 起きることもある）があるときだけ。正規表現そのものが不正・重すぎるものは、やり直しても同じなので再試行しない
+        from app.services.ignore_rules import SKIP_TIMEOUT, SKIP_UNAVAILABLE, skipped_message
+        retryable = any(sk.reason in (SKIP_TIMEOUT, SKIP_UNAVAILABLE) for sk in skipped)
+        return CollectResult(success=False, error=skipped_message(skipped), retryable=retryable, ignore_skipped=skipped)
     if not config_text.strip():
         return CollectResult(success=False, error="取得したコンフィグが空でした")
 

@@ -116,3 +116,47 @@ test("画面を開いたときの読み込みの応答が遅れて届いても�
     await cleanup(page);
   }
 });
+
+test("宛先のドメインの制限なし・暗号化なしのパスワードに注意を出し、新しく保存するときは確認を求める", async ({ page }) => {
+  await login(page);
+  await cleanup(page);
+  const headers = await authHeaders(page);
+  try {
+    // 宛先のドメインを制限していない設定（以前からの既定）。送信は止めずに注意を出す
+    expect((await page.request.put("/api/mail/server", {
+      headers, data: { enabled: true, auth: "password", host: "smtp.example.test", port: 587, security: "starttls",
+                       username: "notify@example.test", password: "smtp-pass-e2e", from_address: "notify@example.test",
+                       allowed_domains: "" },
+    })).status()).toBe(200);
+    // システム状態は正常のまま、文だけ出す（既定の設定で恒常的に注意にしない）
+    await openNav(page, "/system");
+    const notesCard = page.locator(".sys-card", { hasText: "通信の設定の注意" });
+    await expect(notesCard).toContainText("宛先のドメインを制限していません");
+    await expect(notesCard.locator(".badge")).toHaveText("正常");
+    await openNav(page, "/notifications");
+    await page.getByRole("tab", { name: "メールサーバー" }).click();
+    const warnings = page.getByTestId("mail-warnings");
+    await expect(warnings).toContainText("宛先のドメインを制限していません");
+    // 送信元のドメインで制限する（ボタンで入る）
+    await page.getByRole("button", { name: "送信元のドメイン（example.test）にする" }).click();
+    await expect(page.getByLabel(/宛先に使えるドメイン/)).toHaveValue("example.test");
+
+    // 暗号化なし＋パスワードは、確認のチェックが無いと保存できない
+    await page.getByLabel("暗号化").selectOption("none");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator(".form-error")).toContainText("平文");
+    await page.getByLabel(/暗号化なしでパスワードを送ることを許可する/).check();
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator(".ntf-ok")).toHaveText("保存しました");
+    await expect(warnings).toContainText("暗号化なしで SMTP Auth のパスワードを送っています");
+    await expect(warnings).not.toContainText("宛先のドメインを制限していません");
+
+    // システム状態にも出る
+    await openNav(page, "/system");
+    await expect(notesCard).toContainText("暗号化なし");
+    await expect(notesCard.locator(".badge")).toHaveText("注意");
+  } finally {
+    await cleanup(page);
+    await page.request.put("/api/mail/server", { headers, data: { enabled: false, security: "starttls", password: "" } });
+  }
+});

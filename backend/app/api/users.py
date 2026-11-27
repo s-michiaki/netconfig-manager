@@ -5,17 +5,17 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, StringConstraints
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.api_tokens import TokenInfo, list_for
-from app.api.auth import NewPassword, clear_mfa
+from app.api.auth import NewPassword, clear_mfa, confirm_password
 from app.api.deps import get_current_user
-from app.api.terminal import close_user_sessions
+from app.api.terminal import ALL_KINDS, close_user_sessions
 from app.core.database import get_db
 from app.core.permissions import ROLE_LABELS, ROLE_PERMISSIONS, Perm, Role
 from app.core.security import hash_password
@@ -39,6 +39,8 @@ class UserCreate(BaseModel):
     password: NewPassword
     role: Role = Role.VIEWER
     is_active: bool = True
+    # 操作する管理者のいまのパスワード（管理者のロールのユーザーを作るときに必要。#29）
+    confirm_password: str | None = None
 
 
 class UserUpdate(BaseModel):
@@ -46,6 +48,12 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     # 指定すると管理者によるパスワードリセット（そのユーザーの既存トークンは無効になる）
     password: NewPassword | None = None
+    # 操作する管理者のいまのパスワード（パスワードのリセット・管理者への変更のときに必要。#29）
+    confirm_password: str | None = None
+
+
+class AdminConfirm(BaseModel):
+    confirm_password: str  # 操作する管理者のいまのパスワード
 
 
 class UserResponse(BaseModel):
@@ -91,13 +99,29 @@ async def _get_or_404(db: AsyncSession, user_id: str) -> User:
     return user
 
 
+def lock_admins_stmt():
+    """有効な管理者の行をすべてロックする（PostgreSQL の SELECT ... FOR UPDATE。SQLite では付かない）。
+
+    管理者 A と B が互いを同時に降格・無効化・削除しても、両方の確認が通って管理者が 0 人にならないように（#29）。
+    対象の人も含めてロックし、ID の順に取る（同時の操作どうしが同じ順で待つので、デッドロックしない）。
+    後から来た方は先の操作の確定を待ち、確定後の値で数え直される（READ COMMITTED の FOR UPDATE の動き）
+    """
+    return (select(User.id).where(User.role == Role.ADMIN.value, User.is_active.is_(True))
+            .order_by(User.id).with_for_update())
+
+
 async def _other_active_admins(db: AsyncSession, exclude_id: str) -> int:
-    q = (
-        select(func.count())
-        .select_from(User)
-        .where(User.role == Role.ADMIN.value, User.is_active.is_(True), User.id != exclude_id)
-    )
-    return (await db.execute(q)).scalar_one()
+    ids = (await db.execute(lock_admins_stmt())).scalars().all()
+    return sum(1 for i in ids if i != exclude_id)
+
+
+async def _confirm_admin(db: AsyncSession, request: Request, me: User, value: str | None, what: str,
+                         action: str, target: User | None = None) -> None:
+    """操作する管理者のパスワードの入れ直し（回数の制限つき。auth.confirm_password）"""
+    if not value:
+        raise HTTPException(status_code=422, detail=f"{what}には、あなた（操作する管理者）のパスワードの入力が必要です")
+    t = {"target_type": "user", "target_id": target.id, "target_name": target.username} if target else {}
+    await confirm_password(db, request, me, value, action=action, what=what, target=t)
 
 
 @router.get("/roles", response_model=list[RoleInfo])
@@ -117,11 +141,14 @@ async def list_users(db: AsyncSession = Depends(get_db)):
 
 @router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
+    request: Request,
     payload: UserCreate,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
     audit: Audit = Depends(get_audit),
 ):
+    if payload.role == Role.ADMIN:
+        await _confirm_admin(db, request, me, payload.confirm_password, "管理者のユーザーの作成", "user.create")
     user = User(
         id=str(uuid.uuid4()),
         username=payload.username,
@@ -144,6 +171,7 @@ async def create_user(
 
 @router.patch("/{user_id}", response_model=UserResponse)
 async def update_user(
+    request: Request,
     user_id: str,
     payload: UserUpdate,
     db: AsyncSession = Depends(get_db),
@@ -152,6 +180,16 @@ async def update_user(
 ):
     user = await _get_or_404(db, user_id)
     is_self = user.id == me.id
+    if payload.password and is_self:
+        raise HTTPException(status_code=400, detail="自分のパスワードは「パスワード変更」から変更してください")
+    promoting = payload.role == Role.ADMIN and user.role != Role.ADMIN.value
+    # 管理者のロールのまま無効になっている人を有効に戻すのも、実質は管理者の権限を付ける操作（昇格と同じに扱う）
+    reactivating_admin = (payload.is_active is True and not user.is_active
+                          and (payload.role.value if payload.role else user.role) == Role.ADMIN.value)
+    if payload.password or promoting or reactivating_admin:
+        what = ("パスワードのリセット" if payload.password else "管理者への変更" if promoting
+                else "管理者の有効化")
+        await _confirm_admin(db, request, me, payload.confirm_password, what, "user.update", user)
 
     demoting = payload.role is not None and payload.role != Role.ADMIN
     deactivating = payload.is_active is False
@@ -183,8 +221,6 @@ async def update_user(
             # API トークンも失効させる（有効に戻したときに、以前のトークンが使えるようにならないように）
             revoke_tokens = True
     if payload.password:
-        if is_self:
-            raise HTTPException(status_code=400, detail="自分のパスワードは「パスワード変更」から変更してください")
         user.hashed_password = await run_in_threadpool(hash_password, payload.password)
         changes.append("password reset")
         revoke = revoke or "パスワードのリセット"
@@ -199,7 +235,8 @@ async def update_user(
     await db.commit()
     await db.refresh(user)
     if revoke:
-        await close_user_sessions(user.id, revoke)
+        # ロールの変更だけなら、ターミナルだけ切る（Ping監視はどのロールでも使えるので、ログインと同じく切らない）
+        await close_user_sessions(user.id, revoke, ("terminal",) if revoke == "ロールの変更" else ALL_KINDS)
     if changes:
         logger.info("ユーザー更新 by=%s user=%s %s", me.username, user.username, ", ".join(changes))
     return _to_response(user, await api_tokens.count_active(db, user.id))
@@ -207,19 +244,31 @@ async def update_user(
 
 @router.post("/{user_id}/mfa-reset", response_model=UserResponse)
 async def reset_mfa(
+    request: Request,
     user_id: str,
+    payload: AdminConfirm,
     db: AsyncSession = Depends(get_db),
     me: User = Depends(get_current_user),
     audit: Audit = Depends(get_audit),
 ):
-    """2 段階認証を解除する（本人が認証アプリも予備コードも無くしたとき）。本人は次のログインからパスワードだけで入れる"""
+    """2 段階認証を解除する（本人が認証アプリも予備コードも無くしたとき）。本人は次のログインからパスワードだけで入れる。
+
+    操作する管理者のパスワードを入れ直す。自分自身は対象にできない（本人の解除 /auth/mfa/disable はコードも確かめる。
+    管理者のトークンだけで、自分の 2 段階認証を外させない。#29）。解除した人のログイン中のトークンは使えなくする
+    """
     user = await _get_or_404(db, user_id)
+    if user.id == me.id:
+        raise HTTPException(status_code=400, detail="自分の 2 段階認証は、サイドバーの「2 段階認証」から解除してください"
+                                                    "（パスワードと確認コードで確かめます）")
     if not user.mfa_enabled:
         raise HTTPException(status_code=409, detail="このユーザーは 2 段階認証を設定していません")
+    await _confirm_admin(db, request, me, payload.confirm_password, "2 段階認証の解除", "user.mfa_reset", user)
     clear_mfa(user)
+    user.token_version = (user.token_version or 0) + 1
     audit("user.mfa_reset", target_type="user", target_id=user.id, target_name=user.username)
     await db.commit()
     await db.refresh(user)
+    await close_user_sessions(user.id, "2 段階認証の強制解除")
     logger.info("2 段階認証の解除 by=%s user=%s", me.username, user.username)
     return _to_response(user, await api_tokens.count_active(db, user.id))
 

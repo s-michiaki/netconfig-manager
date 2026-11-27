@@ -2,12 +2,14 @@
 
 実機は無いので、tests/fake_sshd.py の出力で確かめる（実機の出力は未確認）
 """
+import sqlite3
 import uuid
 from unittest import mock
 
 import fake_sshd
 import fakeredis
 import pytest
+from conftest import TMP
 from fastapi.testclient import TestClient
 from test_device_auth import dev
 
@@ -279,6 +281,18 @@ def test_worker_state_notification_and_api(sent):
             assert c.get(f"/api/devices/{did}/startup-diff").status_code == 401
             for ev in events("startup.unsaved"):
                 assert "保存済みの説明" not in str(ev)  # 記録には行数だけ
+            # #35: DB の生の値は暗号化されている（DB のダンプから差分の秘密の行を読めない）
+            raw_db = sqlite3.connect(f"{TMP}/t.db").execute("select startup_diff from devices where id=?", (did,)).fetchone()[0]
+            assert raw_db.startswith("enc:") and "保存済みの説明" not in raw_db
+            # この版より前の平文の値も読める（次に比べ直したときに暗号化される）
+            con = sqlite3.connect(f"{TMP}/t.db")
+            con.execute("update devices set startup_diff=? where id=?", ("--- startup\n+++ running\n+平文の差分", did))
+            con.commit()
+            assert "平文の差分" in c.get(f"/api/devices/{did}/startup-diff", headers=vh).json()["diff"]
+            assert collect()["success"]
+            raw_db = con.execute("select startup_diff from devices where id=?", (did,)).fetchone()[0]
+            assert raw_db.startswith("enc:") and "平文の差分" not in raw_db
+            con.close()
 
             # unsaved のままの間は通知しない
             assert collect()["success"] and mine() == []
@@ -399,3 +413,38 @@ def test_notification_settings_validation_and_default():
             assert r.status_code == 422
         finally:
             assert c.delete(f"/api/users/{uid_}", headers=admin).status_code == 204
+
+
+def test_legacy_plaintext_startup_diffs_are_encrypted_on_startup(monkeypatch):
+    """0041 より前の平文の差分は、起動時にまとめて暗号化する。暗号化済みの行はそのまま（二重に暗号化しない）。何度実行しても同じ"""
+    import asyncio
+
+    from app import main
+    from app.core.crypto import decrypt, encrypt
+
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    already = encrypt("--- startup\n+++ running\n+暗号化済み")
+    con = sqlite3.connect(f"{TMP}/t.db")
+    for i, (did, diff) in enumerate(zip(ids, ("--- startup\n+++ running\n+平文1 secret x", "+平文2", already), strict=True)):
+        con.execute("insert into devices(id,name,hostname,platform,port,username,password,is_active,created_at,updated_at,"
+                    "startup_state,startup_diff) values(?,?,?,?,22,'u','enc:x',1,'2026-01-01','2026-01-01','unsaved',?)",
+                    (did, f"legacy-diff-{i}-{did[:6]}", "192.0.2.10", "cisco_ios", diff))
+    con.commit()
+
+    def rows():
+        return [con.execute("select startup_diff from devices where id=?", (d,)).fetchone()[0] for d in ids]
+
+    try:
+        monkeypatch.setattr(main, "LEGACY_DIFF_BATCH", 1)  # まとめて処理する区切りも通す
+        with TestClient(app):  # 起動時の処理で暗号化される
+            pass
+        first = rows()
+        assert all(v.startswith("enc:") for v in first) and not any("平文" in v for v in first)
+        assert decrypt(first[0]).endswith("平文1 secret x") and decrypt(first[1]) == "+平文2"
+        assert first[2] == already  # 暗号化済みの行は書き直さない
+        asyncio.run(main._encrypt_legacy_startup_diffs())  # 2 回目は何もしない
+        assert rows() == first
+    finally:
+        con.execute(f"delete from devices where id in ({','.join('?' * len(ids))})", ids)
+        con.commit()
+        con.close()

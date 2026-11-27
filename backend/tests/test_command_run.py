@@ -81,6 +81,31 @@ ALLOWED = [
     ("netscaler", "show ns runningConfig | grep add"),
     ("extreme_exos", "show ports"),
     ("dell_os10", "show running-configuration"),
+    # #34 の拒否を足しても、正当な表示コマンドは通る（インタフェース名の「/」・IP アドレスのプレフィックス・IPv6 アドレス）
+    ("huawei", "display interface GigabitEthernet0/0/1"),
+    ("huawei", "display ip routing-table 10.0.0.0 24"),
+    ("huawei", "display ipv6 routing-table 2001:db8::1"),
+    ("huawei", "display ipv6 routing-table 2001:db8::/32"),
+    ("hp_comware", "display interface Ten-GigabitEthernet1/0/1"),
+    ("hp_comware", "display mac-address 0011-2233-4455"),
+    ("vyos", "show ip route 10.0.0.0/24"),
+    ("vyos", "show ipv6 route 2001:db8::/32"),
+    ("ubiquiti_edgerouter", "show ip route 192.0.2.0/24"),
+    ("checkpoint_gaia", "show route destination 10.0.0.0/24"),
+    ("dell_os9", "show interfaces tengigabitethernet 0/1"),
+    ("cisco_ios", "show interfaces Te1/0/1"),
+    ("cisco_ios", "show ip route 10.0.0.0 255.0.0.0"),
+    # Cisco の show diag・show diagnostic（diagnostic-information が無い機種では、diagnostic- まで書いたものだけ拒否）
+    ("cisco_ios", "show diag"),
+    ("cisco_ios", "show diagnostic result module all"),
+    ("cisco_nxos", "show diagnostic content module 1"),
+    # 分割ポート・チャネル化したインタフェース（「:」の前に「/」がある）・RD・時刻
+    ("huawei", "display interface Serial1/0/0:0"),
+    ("huawei_vrpv8", "display interface 100GE1/0/1:1"),
+    ("hp_comware", "display interface FortyGigE1/0/1:1"),
+    ("huawei", "display bgp vpnv4 all routing-table 100:1"),
+    ("huawei", "display alarm history start-time 2024-01-01 10:00:00"),
+    ("huawei", "display dialer"),
 ]
 
 # (機種, コマンド): 送れない（設定を変える・機器の状態を変える・ファイルへ出す・シェルなどへ抜ける）
@@ -255,10 +280,25 @@ EXTRA_DENIED = (
     + [(p, c) for p in ("huawei", "huawei_vrpv8", "hp_comware")
        for c in ("display diagnostic-information", "display diagnostic-information flash:/diag.txt", "dis diag",
                  "dis diagnostic-information x.txt", "display diagnostic", "dis diagn | include a")]
-    + [(p, c) for p in ("cisco_ios", "juniper_junos", "vyos", "dell_os10") for c in ("show diag", "show diagnostic-information")]
+    + [(p, c) for p in ("cisco_ios", "juniper_junos", "vyos", "dell_os10")
+       for c in ("show diagnostic-information", "show diagnostic-info", "show diagnostic-")]
+    + [(p, c) for p in ("huawei", "huawei_vrpv8", "hp_comware") for c in ("dis di", "display di x", "dis cur | include dia")]
     # 省略形の機種では tec 以上の前方一致（tech-support の省略形）も拒否
     + [(p, c) for p in ("cisco_ios", "cisco_nxos", "arista_eos", "huawei", "hp_comware")
        for c in ("sh tec", "show tec", "show tech", "sho tech-s")]
+    # #34: 先頭の語の省略形を許さない機種でも、引数の tec（tech-support の省略形）は拒否する（IOS 風の CLI が解釈しうる）
+    + [(p, c) for p in ("dell_os9", "ruckus_fastiron", "aruba_os", "dell_os10", "hp_procurve", "extreme_exos", "vyos")
+       for c in ("show tec", "show TEC", "show tec | include a")]
+    # #34: Huawei・Comware の dia（diagnostic-information の省略形）と、記憶装置名・ファイル名らしい語
+    + [(p, c) for p in ("huawei", "huawei_vrpv8", "hp_comware")
+       for c in ("dis dia", "dis dia flash:/x.txt", "display dia", "dis dia x.txt", "display current-configuration flash:",
+                 "display x flash:/x.txt", "display x cfcard:", "display x sd1:", "display x slot1#flash:", "display x usb0:",
+                 "display x /x", "display x config.cfg", "display x backup.zip", "display x vrpcfg.zip", "dis cur x.log",
+                 "display logbuffer cfa0:", "display saved-configuration cfa0:/a", "display x CFA0:", "display x flash:a")]
+    # #34: シェル経由の機種は、本体の語で「/」（ファイルのパス）を拒否する（README の「show file /path は通らない」）
+    + [(p, c) for p in SHELL
+       for c in ("show file /config/config.boot", "show file /etc/shadow", "show log file /var/log/messages", "show x a/b",
+                 "show x /", "show x ../x", "show x 10.0.0.0/24/x")]
     # NX-OS・Arista は絞り込み語の短縮を認めない（完全一致のみ）
     + [(p, c) for p in ("cisco_nxos", "arista_eos")
        for c in ("show run | i vlan", "show run | inc vlan", "show run | e vlan", "show run | b vlan", "show run | sec vlan")]
@@ -705,6 +745,29 @@ def test_results_are_encrypted_grouped_and_exported(env):
 
 
 
+def test_viewing_others_run_outputs_is_audited(env):
+    """#34: ほかの人の実行の出力を開いたら監査ログ（command.view）に残す。自分の実行・進み具合の確認（outputs=false）は残さない。
+    出力そのものは監査ログに入れない"""
+    c = env["c"]
+    d = _device(env)
+    run_id = _run(env, [d["id"]], ["show clock"]).json()["id"]  # cmd-op の実行
+    _put_result(run_id, d["id"], d["name"], ["VIEWSECRET"])
+
+    def views():
+        items = c.get("/api/audit/logs", params={"action": "command.view"}, headers=env["admin"]).json()["items"]
+        return [x for x in items if x["target_id"] == run_id]
+
+    assert c.get(f"/api/commands/runs/{run_id}", headers=env["op"]).status_code == 200  # 自分の実行
+    assert c.get(f"/api/commands/runs/{run_id}?outputs=false", headers=env["admin"]).status_code == 200  # 進み具合
+    assert views() == []
+    assert "VIEWSECRET" in json.dumps(c.get(f"/api/commands/runs/{run_id}", headers=env["admin"]).json())
+    got = views()
+    assert len(got) == 1 and got[0]["username"] == "admin" and "VIEWSECRET" not in json.dumps(got)
+    det = json.loads(got[0]["detail"]) if isinstance(got[0]["detail"], str) else got[0]["detail"]
+    assert det == {"created_by": "cmd-op", "devices": 1}
+    assert "command.view" in c.get("/api/audit/actions", headers=env["admin"]).json()
+
+
 def test_csv_export_neutralizes_formulas(env):
     c = env["c"]
     d = _device(env)
@@ -734,6 +797,15 @@ def r():
 
 def _exec(result_id):
     return worker.run_command_device.apply(args=(result_id,)).get()
+
+
+def _exec_call(call):
+    """投入（pump_command_queue）が呼んだ delay と同じ引数（予約した枠つき）で実行する"""
+    return worker.run_command_device.apply(args=call.args, kwargs=call.kwargs).get()
+
+
+def _sent(delay):
+    return [c.args[0] for c in delay.call_args_list]
 
 
 def _row(run_id, device_id):
@@ -900,16 +972,17 @@ def test_worker_concurrency_dispatches_next_when_one_finishes(env, r):
     devs = [_device(env, port=port) for _ in range(4)]
     run_id = _run(env, [d["id"] for d in devs], ["show clock"]).json()["id"]
     ids = [_result_id(run_id, d["id"]) for d in devs]
-    with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 2), \
+    with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 2), mock.patch.object(settings, "COMMAND_RUN_WORKER_SLOTS", 3), \
             mock.patch.object(worker.run_command_device, "delay") as delay:
         worker.enqueue_command_run(run_id, ids)
-        assert [c.args[0] for c in delay.call_args_list] == ids[:2]  # 同時に投入するのは 2 台まで
+        assert _sent(delay) == ids[:2]  # 1 つの実行で同時に投入するのは 2 台まで（枠は 3 つ空いていても）
         assert r.llen(worker._pending_key(run_id)) == 2
+        first = list(delay.call_args_list)
         delay.reset_mock()
-        assert _exec(ids[0]) == {"status": "ok"}  # 1 台終わると、待っていた次の 1 台が投入される
-        assert [c.args[0] for c in delay.call_args_list] == [ids[2]]
-        assert _exec(ids[1]) == {"status": "ok"}
-        assert [c.args[0] for c in delay.call_args_list] == [ids[2], ids[3]]
+        assert _exec_call(first[0]) == {"status": "ok"}  # 1 台終わると、待っていた次の 1 台が投入される
+        assert _sent(delay) == [ids[2]]
+        assert _exec_call(first[1]) == {"status": "ok"}
+        assert _sent(delay) == [ids[2], ids[3]]
         assert r.llen(worker._pending_key(run_id)) == 0
 
 
@@ -1049,11 +1122,12 @@ def test_worker_failure_in_load_connection_info_still_dispatches_next(env, r):
     run_id, ids, devs = _two_results(env, port)
     with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 1), mock.patch.object(worker.run_command_device, "delay") as delay:
         worker.enqueue_command_run(run_id, ids)
-        assert [c.args[0] for c in delay.call_args_list] == [ids[0]]
+        assert _sent(delay) == [ids[0]]
+        call = delay.call_args
         delay.reset_mock()
         with mock.patch.object(worker, "load_connection_info", side_effect=RuntimeError("db down")):
-            assert _exec(ids[0]) == {"status": "failed"}
-        assert [c.args[0] for c in delay.call_args_list] == [ids[1]]  # 次の機器が流れる
+            assert _exec_call(call) == {"status": "failed"}
+        assert _sent(delay) == [ids[1]]  # 次の機器が流れる
     row = _row(run_id, devs[0]["id"])
     assert row["status"] == "failed" and "内部エラー" in row["error"] and "RuntimeError" in row["error"] and row["outputs"] is None
     assert "db down" not in row["error"]
@@ -1075,9 +1149,10 @@ def test_worker_failure_when_saving_still_fails_the_device_and_dispatches_next(e
 
     with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 1), mock.patch.object(worker.run_command_device, "delay") as delay:
         worker.enqueue_command_run(run_id, ids)
+        call = delay.call_args
         delay.reset_mock()
         with mock.patch.object(worker, "_save_command_result", flaky):
-            assert _exec(ids[0]) == {"status": "failed"}
+            assert _exec_call(call) == {"status": "failed"}
         assert [c.args[0] for c in delay.call_args_list] == [ids[1]]
     row = _row(run_id, devs[0]["id"])
     assert row["status"] == "failed" and "内部エラー" in row["error"] and row["outputs"] is None
@@ -1085,9 +1160,10 @@ def test_worker_failure_when_saving_still_fails_the_device_and_dispatches_next(e
     run2, ids2, devs2 = _two_results(env, port)
     with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 1), mock.patch.object(worker.run_command_device, "delay") as delay:
         worker.enqueue_command_run(run2, ids2)
+        call = delay.call_args
         delay.reset_mock()
         with mock.patch.object(worker, "_save_command_result", side_effect=RuntimeError("db down")):
-            assert _exec(ids2[0]) == {"status": "failed"}
+            assert _exec_call(call) == {"status": "failed"}
         assert [c.args[0] for c in delay.call_args_list] == [ids2[1]]
     assert _row(run2, devs2[0]["id"])["status"] == "running"
 
@@ -1126,9 +1202,10 @@ def test_post_save_failure_does_not_overwrite_success(env, r):
     run_id, ids, devs = _two_results(env, port)
     with mock.patch.object(settings, "COMMAND_RUN_CONCURRENCY", 1), mock.patch.object(worker.run_command_device, "delay") as delay:
         worker.enqueue_command_run(run_id, ids)
+        call = delay.call_args
         delay.reset_mock()
         with mock.patch.object(worker, "_finish_command_run", side_effect=RuntimeError("db down")):
-            assert _exec(ids[0]) == {"status": "ok"}
+            assert _exec_call(call) == {"status": "ok"}
         assert [c.args[0] for c in delay.call_args_list] == [ids[1]]  # 次の機器も流れる
     row = _row(run_id, devs[0]["id"])
     assert row["status"] == "ok" and row["outputs"] is not None

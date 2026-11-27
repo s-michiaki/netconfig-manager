@@ -46,17 +46,24 @@ function UserModal({
   const [role, setRole] = useState(user?.role ?? "viewer");
   const [isActive, setIsActive] = useState(user?.is_active ?? true);
   const [password, setPassword] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  // 重い操作（管理者のユーザーの作成・管理者への変更・無効な管理者の有効化・パスワードのリセット）は、
+  // 操作する管理者のパスワードを入れ直す
+  const needConfirm = isEdit
+    ? !!password || (role === "admin" && (user.role !== "admin" || (!user.is_active && isActive)))
+    : role === "admin";
 
   const save = async () => {
     setSaving(true);
     setError("");
+    const confirm_password = needConfirm ? confirmPw : undefined;
     try {
       if (isEdit) {
-        await api.patch(`/users/${user.id}`, { role, is_active: isActive, password: password || undefined });
+        await api.patch(`/users/${user.id}`, { role, is_active: isActive, password: password || undefined, confirm_password });
       } else {
-        await api.post("/users/", { username, password, role, is_active: isActive });
+        await api.post("/users/", { username, password, role, is_active: isActive, confirm_password });
       }
       onSaved();
       onClose();
@@ -68,7 +75,7 @@ function UserModal({
   };
 
   const selected = roles.find((r) => r.role === role);
-  const canSave = isEdit ? !password || password.length >= 10 : username && password.length >= 10;
+  const canSave = (isEdit ? !password || password.length >= 10 : username && password.length >= 10) && (!needConfirm || !!confirmPw);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -111,6 +118,16 @@ function UserModal({
           <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
           有効（無効にするとログインできなくなり、ログイン中のセッションも切れます）
         </label>
+        {needConfirm && (
+          <div className="form-group">
+            <label className="form-label" htmlFor="user-confirm-pw">あなた（操作する管理者）のパスワード（確認）</label>
+            <input id="user-confirm-pw" type="password" autoComplete="current-password" value={confirmPw}
+                   onChange={(e) => setConfirmPw(e.target.value)} />
+            <p style={{ fontSize: 11, color: "var(--color-muted)", marginTop: 4 }}>
+              管理者のユーザーの作成・管理者への変更・無効な管理者の有効化・パスワードのリセットでは、本人の確認のためにパスワードを入れ直します
+            </p>
+          </div>
+        )}
         {error && <p className="form-error">{error}</p>}
         <div className="btn-row">
           <button className="btn" onClick={onClose}>キャンセル</button>
@@ -123,11 +140,52 @@ function UserModal({
   );
 }
 
+/** 2 段階認証の解除（管理者が本人に代わって）。操作する管理者のパスワードを入れ直す */
+function MfaResetModal({ user, onClose, onDone }: { user: User; onClose: () => void; onDone: () => void }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await api.post(`/users/${user.id}/mfa-reset`, { confirm_password: pw });
+      onDone();
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <p className="modal-title">2 段階認証の解除: {user.username}</p>
+        <p style={{ marginTop: 0, fontSize: 13 }}>
+          本人が認証アプリを無くしたときに使います。本人であることを確かめてから解除し、再設定を案内してください。
+          解除すると、この人のログイン中の画面は切れます。
+        </p>
+        <div className="form-group">
+          <label className="form-label" htmlFor="mfa-reset-pw">あなた（操作する管理者）のパスワード（確認）</label>
+          <input id="mfa-reset-pw" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="btn-row">
+          <button className="btn" onClick={onClose}>キャンセル</button>
+          <button className="btn btn-danger" onClick={submit} disabled={busy || !pw}>解除する</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function UsersPage() {
   const { me } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [modal, setModal] = useState<{ user: User | null } | null>(null);
+  const [mfaReset, setMfaReset] = useState<User | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -176,20 +234,10 @@ export default function UsersPage() {
   };
 
   // 認証アプリも予備コードも無くした人の 2 段階認証を解除する（本人は次のログインからパスワードだけで入れる）
-  const resetMfa = async (u: User) => {
-    if (!confirm(
-      `ユーザー「${u.username}」の 2 段階認証を解除しますか？\n` +
-      "本人が認証アプリを無くしたときに使います。本人であることを確かめてから解除し、再設定を案内してください。",
-    )) return;
+  const resetMfa = (u: User) => {
     setError("");
     setNotice("");
-    try {
-      await api.post(`/users/${u.id}/mfa-reset`);
-      setNotice(`「${u.username}」の 2 段階認証を解除しました`);
-      load();
-    } catch (e) {
-      setError(errorMessage(e));
-    }
+    setMfaReset(u);
   };
 
   const del = async (u: User) => {
@@ -207,6 +255,10 @@ export default function UsersPage() {
   return (
     <div className="page">
       {modal && <UserModal user={modal.user} roles={roles} onClose={() => setModal(null)} onSaved={load} />}
+      {mfaReset && (
+        <MfaResetModal user={mfaReset} onClose={() => setMfaReset(null)}
+          onDone={() => { setNotice(`「${mfaReset.username}」の 2 段階認証を解除しました`); load(); }} />
+      )}
       <div className="page-header">
         <span className="page-title">ユーザー管理</span>
         <button className="btn btn-primary" onClick={() => setModal({ user: null })}>＋ 追加</button>

@@ -138,7 +138,7 @@ exec "$FAKE_REAL_RM" "$@"
 # 本物のまま使ってよいコマンド（ファイルの読み書き・文字列の加工だけ）
 REAL_TOOLS = ["bash", "sh", "sed", "awk", "grep", "tr", "head", "tail", "cut", "base64", "sort", "mktemp", "date", "stat",
               "id", "basename", "dirname", "cat", "tee", "mkdir", "chmod", "cp", "env", "readlink", "wc", "seq",
-              "sha256sum", "uniq", "ls", "test", "[", "touch", "true", "false"]
+              "sha256sum", "uniq", "ls", "test", "[", "touch", "true", "false", "find"]
 # OS ごとに「ある」コマンド（dnf と apt-get が両方ある環境は無い）
 OS_COMMANDS = {
     "alma": ["dnf", "rpm", "firewall-cmd"],
@@ -306,10 +306,12 @@ def assert_safe(b):
     for c in calls:
         for pat in DESTRUCTIVE:
             assert not re.search(pat, c), f"消す操作が呼ばれました: {c}"
-    # rm は一時ファイルの後始末（rm -f <mktemp の名前>）と、ビルド用の追加の CA の写し（CA を使わない設定に戻したとき）だけ
+    # rm は一時ファイルの後始末（rm -f <mktemp の名前>）と、ビルド用の追加の CA の写し（CA を使わない設定に戻したとき）と、
+    # .env の古い控え（ncm_prune_env_backups。env-YYYYmmdd-HHMMSS の名前だけ）だけ
     for c in calls:
         if c.startswith("rm "):
-            assert re.fullmatch(r"rm -f \S*/tmp/tmp\.\S+", c) or re.fullmatch(r"rm -f \S*/(backend|frontend)/build-ca/outbound-ca\.crt", c), c
+            assert (re.fullmatch(r"rm -f \S*/tmp/tmp\.\S+", c) or re.fullmatch(r"rm -f \S*/(backend|frontend)/build-ca/outbound-ca\.crt", c)
+                    or re.fullmatch(r"rm -f -- \S*/rootbackup/env-\d{8}-\d{6}", c)), c
     # podman image prune -f（使われなくなった古いイメージ）以外の prune は呼ばない
     for c in calls:
         if "prune" in c:
@@ -957,7 +959,8 @@ def test_import_cert_normal_run_commands_are_only_the_backup_beyond_before(alma_
     assert not [c for c in calls if "podman-compose" in c]
     assert (b.install / ".env").read_text() == HTTPS_ENV  # 同じ値なので .env は変わらない（控えは取る）
     backup_calls = [c for c in calls if "netconfig-manager-backup" in c or "rootbackup" in c]
-    assert [c.split()[1] for c in backup_calls if c.startswith("sudo")] == ["mkdir", "chmod", "install"]
+    # 控え（mkdir・chmod・install）と、古い控えの一覧（find。10 個以下なので消すものは無い）だけ
+    assert [c.split()[1] for c in backup_calls if c.startswith("sudo")] == ["mkdir", "chmod", "install", "find"]
 
 
 @pytest.mark.parametrize("name", ["HTTP_PORT", "HTTPS_PORT", "PUBLIC_URL"])
@@ -1081,3 +1084,138 @@ def test_first_install_backs_up_env_even_when_lib_has_no_ncm_backup_env(alma):
     backups = list(alma.backup_dir.glob("env-*"))
     assert len(backups) == 1 and "DEVICE_ENCRYPTION_KEY=" in backups[0].read_text()  # 作った直後の .env（PUBLIC_URL は後で入る）
     assert (alma.backup_dir.stat().st_mode & 0o777) == 0o700 and (backups[0].stat().st_mode & 0o777) == 0o600
+
+
+# ------------------------------------------------------------------ 11/27 のレビュー（フロー図の突き合わせ）で見つかった点
+# grep の偽物: root だけが読める .env（600）を、sudo なしで読もうとすると失敗する（本物の一般ユーザー + sudo の実行と同じ）
+GREP_DENY = r"""#!/bin/bash
+if [ -z "${FAKE_IN_SUDO:-}" ]; then
+  for a in "$@"; do [ "$a" = "$FAKE_DENY_FILE" ] && { echo "grep: $a: Permission denied" >&2; exit 2; }; done
+fi
+exec "$FAKE_REAL_GREP" "$@"
+"""
+
+
+def test_backup_on_calendar_is_read_with_sudo(box):
+    """一般ユーザー + sudo の実行: .env（root の 600）を sudo なしの grep で読んで、いつも既定の 03:15 になっていた"""
+    all_installed(box)
+    env_file = box.env_file(OLD_ENV + 'BACKUP_ON_CALENDAR="*-*-* 01:30:00"\r\n')
+    stub(box.stubs / "grep", GREP_DENY)
+    r = box.run(FAKE_DENY_FILE=str(env_file), FAKE_REAL_GREP=real_command("grep"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    timer = (box.units / "netconfig-backup.timer").read_text()
+    assert "OnCalendar=*-*-* 01:30:00\n" in timer, timer
+    assert "Enabling scheduled backup (*-*-* 01:30:00)" in r.stdout
+    assert_safe(box)
+
+
+def test_completion_says_selfcheck_was_skipped_without_backend(box):
+    """backend のコンテナが見つからず自己診断を飛ばしたときは「✅ 完了」と出さず、未実施と分かる形にする"""
+    all_installed(box)
+    box.env_file()
+    r = box.run(FAKE_NO_BACKEND="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "✅ 完了" not in r.stdout
+    assert "⚠ 完了（自己診断は未実施" in r.stdout and "collect_logs.sh" in r.stdout
+    assert box.index("podman exec") == -1
+
+
+def test_up_failure_shows_where_it_stopped_and_how_to_retry(box):
+    all_installed(box)
+    box.env_file()
+    r = box.run(FAKE_FAIL_ON="podman-compose -f docker-compose.prod.yml up")
+    assert r.returncode != 0
+    assert "「コンテナの作り直し（up -d --force-recreate）」で止まりました" in r.stdout
+    assert "logs --tail 50 backend" in r.stdout and f"bash {box.install}/scripts/setup.sh" in r.stdout
+    assert "collect_logs.sh" in r.stdout
+    for later in ("systemctl enable", "curl", "podman exec"):
+        assert box.index(later) == -1, later  # 案内は表示だけ（コマンドは実行しない）
+    assert_safe(box)
+
+
+def test_env_backups_keep_only_the_newest_ten(alma):
+    """.env の控えは更新のたびに増える。新しい 10 個を残し、setup.sh / import_cert.sh が作った名前の形のものだけを消す"""
+    all_installed(alma)
+    alma.env_file()
+    d = alma.backup_dir
+    d.mkdir(mode=0o700)
+    old = [f"env-202601{i:02d}-000000" for i in range(1, 13)]   # 12 個（今回の 1 個と合わせて 13 個 → 古い 3 個が消える）
+    for n in old:
+        (d / n).write_text("OLD\n")
+        (d / n).chmod(0o600)
+    keep_others = ["env-before-restore-20260101-000000", "env-20260101-000000.bak", "env-2026010-000000", "memo.txt"]
+    for n in keep_others:
+        (d / n).write_text("x")
+    (d / "certs-20260101-000000").mkdir()
+    outside = alma.tmp / "outside-secret"
+    outside.write_text("keep")
+    (d / "env-20200101-000000").symlink_to(outside)   # シンボリックリンクは、名前が合っても消さない
+    r = alma.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    left = sorted(p.name for p in d.iterdir() if re.fullmatch(r"env-\d{8}-\d{6}", p.name) and not p.is_symlink())
+    assert len(left) == 10 and left[:9] == old[3:], left
+    for n in old[:3]:
+        assert not (d / n).exists(), n
+    for n in keep_others:
+        assert (d / n).exists(), n
+    assert (d / "certs-20260101-000000").is_dir() and (d / "env-20200101-000000").is_symlink() and outside.read_text() == "keep"
+    assert all((d / n).stat().st_mode & 0o777 == 0o600 for n in left)
+    assert "古い控えを 3 個消しました" in r.stdout
+    assert_safe(alma)
+    # 残す数は .env の ENV_BACKUP_KEEP で変えられる（0 は消さない）
+    alma.env_file(OLD_ENV + "ENV_BACKUP_KEEP=0\n")
+    r = alma.run()
+    assert r.returncode == 0 and len([p for p in d.iterdir() if re.fullmatch(r"env-\d{8}-\d{6}", p.name)]) >= 11
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="所有者を変えるには root が要る（root 以外では、もともと root 以外の所有になる）")
+def test_warns_when_backup_script_can_be_changed_by_non_root(alma):
+    """#39: 定期バックアップは root でリポジトリの backup.sh を動かす。root 以外が書き換えられるなら知らせる（止めない）"""
+    all_installed(alma)
+    alma.env_file()
+    r = alma.run()
+    assert r.returncode == 0 and "root 以外が書き換えられます" not in r.stdout  # root の所有・755 / 644 なら出ない
+    os.chown(alma.install / "scripts" / "backup.sh", 65534, 65534)
+    (alma.install / "scripts" / "lib").chmod(0o775)
+    r = alma.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "root 以外が書き換えられます" in r.stdout
+    assert f"{alma.install}/scripts/backup.sh（所有者" in r.stdout and f"{alma.install}/scripts/lib（権限 775" in r.stdout
+    assert "netconfig-backup.timer" in " ".join(alma.calls())  # タイマーの登録は続ける
+
+
+def test_warns_when_https_does_not_answer_with_certificates(alma):
+    """#39: 証明書を読み込めないと frontend は黙って HTTP で起動する。証明書があるのに HTTPS が応答しなければ知らせる"""
+    all_installed(alma)
+    alma.env_file()
+    (alma.install / "certs").mkdir()
+    (alma.install / "certs" / "server.crt").write_text("crt")
+    (alma.install / "certs" / "server.key").write_text("key")
+    r = alma.run(FAKE_FAIL_ON="curl --noproxy * -fsSk -m 5 https://localhost:443/api/health")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "HTTPS（443 番）で応答がありません" in r.stdout
+    r = alma.run()
+    assert "HTTPS（443 番）で応答がありません" not in r.stdout
+
+
+@pytest.mark.parametrize("ip", ["192.0.2.10|e", "x&y", "a b", "$(id)"])
+def test_first_install_rejects_ip_address_with_special_characters(alma, ip):
+    """IP アドレスは URL と .env の sed の置き換えに入るので、ホスト名・IP の文字だけを許す"""
+    r = alma.run(stdin=f"\n{ip}\n" + "\n" * 6)
+    assert r.returncode == 1 and "IP Address が不正です" in r.stdout
+    assert not (alma.install / ".env").exists()
+
+
+@pytest.mark.parametrize("value,kept,warn", [("010", 10, False), ("08", 8, False), ("-1", 10, True), ("x", 10, True), ("", 10, False)])
+def test_env_backup_keep_is_read_as_decimal(alma, value, kept, warn):
+    """ENV_BACKUP_KEEP の先頭のゼロ（010 は 8 進・08 は算術エラーになっていた）は 10 進として読む。数字以外・負の値は既定の 10"""
+    all_installed(alma)
+    alma.env_file(OLD_ENV + f"ENV_BACKUP_KEEP={value}\n")
+    d = alma.backup_dir
+    d.mkdir(mode=0o700)
+    for i in range(1, 16):
+        (d / f"env-202601{i:02d}-000000").write_text("OLD\n")
+    r = alma.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len([p for p in d.iterdir() if re.fullmatch(r"env-\d{8}-\d{6}", p.name)]) == kept
+    assert ("ENV_BACKUP_KEEP は 0 以上の整数で指定してください" in r.stdout) == warn

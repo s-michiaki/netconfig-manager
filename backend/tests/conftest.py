@@ -47,3 +47,7 @@ login_limit._client = _fake_redis()
 @pytest.fixture(autouse=True)
 def _login_limit_redis(monkeypatch):
     monkeypatch.setattr(login_limit, "_client", _fake_redis())
+    # ログアウトの確認（services/sessions.py）が、前のテストで Redis を止めたときの「しばらく確かめない」を引き継がない
+    from app.services import sessions
+    monkeypatch.setattr(sessions, "_skip_until", 0.0)
+    monkeypatch.setattr(sessions, "_warned", False)

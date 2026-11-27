@@ -241,11 +241,18 @@ async def _results(db: AsyncSession, run_id: str) -> list[CommandResult]:
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str, outputs: bool = True, db: AsyncSession = Depends(get_db)):
+async def get_run(run_id: str, outputs: bool = True, db: AsyncSession = Depends(get_db),
+                  audit: Audit = Depends(get_audit)):
     """実行の状態と、機器ごとの結果。outputs=true なら出力と、コマンドごとの「同じ出力の機器のまとめ（groups）」も返す
-    （実行中の進み具合の確認では outputs=false にして、出力を毎回送らない）"""
+    （実行中の進み具合の確認では outputs=false にして、出力を毎回送らない）。
+
+    ほかの人の実行の出力（outputs=true）を開いたら、監査ログ（command.view）に残す（出力は残さない）"""
     run = await _get_run(db, run_id)
     results = await _results(db, run_id)
+    if outputs and run.created_by_id != audit.user.id:
+        audit("command.view", target_type="command_run", target_id=run.id, target_name=(run.target_name or "")[:256],
+              detail={"created_by": run.created_by, "devices": len(results)})
+        await db.commit()
     counts = await _counts(db, [run_id])
     body = _run_dict(run, counts[run_id])
     devices, ok_for_groups = [], []

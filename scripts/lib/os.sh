@@ -200,11 +200,39 @@ ncm_env_get() {
 }
 
 # .env のバックアップ（引数: .env 保存先ディレクトリ 名前に付ける時刻）。root のみ読める場所へ（setup.sh と import_cert.sh が共通で使う）
+#   控えは更新のたびに 1 つ増えるので、取ったあとに古いものを消す（ncm_prune_env_backups。残す数は .env の ENV_BACKUP_KEEP、既定 10）
 ncm_backup_env() {
+  local keep
   echo "[INFO] Backing up .env..."
   sudo mkdir -p "$2"
   sudo chmod 700 "$2"
   sudo install -m 600 "$1" "$2/env-$3"
+  keep=$(ncm_env_get ENV_BACKUP_KEEP "$1" 2>/dev/null || true)
+  ncm_prune_env_backups "$2" "${keep:-10}"
+}
+
+# .env の古い控えを消す（引数: 保存先ディレクトリ 残す数）。新しいもの（名前の時刻が新しいもの）から「残す数」だけ残す
+#   消すのは ncm_backup_env が作った名前の形（env-YYYYmmdd-HHMMSS）の普通のファイルだけ。restore.sh の env-before-restore-*・
+#   証明書の控え（certs-*）・手で置いたファイル・シンボリックリンクには触れない
+#   （控えには秘密が入っているが、ディレクトリが root だけの 700・ファイルが 600 なので、上書きはせずに消す）。0 は消さない
+ncm_prune_env_backups() {
+  local dir="$1" keep="${2:-10}" names=() n i
+  # 先頭のゼロ（010・08）も 10 進として読む。数字以外（負の値・空白など）は既定の 10 に戻して知らせる
+  if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
+    echo "[WARN] ENV_BACKUP_KEEP は 0 以上の整数で指定してください。既定の 10 を使います"
+    keep=10
+  fi
+  keep=$((10#$keep))
+  [ "$keep" -gt 0 ] || return 0
+  mapfile -t names < <(sudo find "$dir" -maxdepth 1 -type f -regextype posix-extended -regex '.*/env-[0-9]{8}-[0-9]{6}' \
+                         -printf '%f\n' 2>/dev/null | LC_ALL=C sort)
+  n=${#names[@]}
+  [ "$n" -gt "$keep" ] || return 0
+  for ((i = 0; i < n - keep; i++)); do
+    [[ "${names[$i]}" =~ ^env-[0-9]{8}-[0-9]{6}$ ]] || continue
+    sudo rm -f -- "$dir/${names[$i]}" || return 0
+  done
+  echo "[INFO] .env の古い控えを $((n - keep)) 個消しました（新しい $keep 個を残します。.env の ENV_BACKUP_KEEP で変えられます）"
 }
 
 # ポートを開ける（引数: ポート番号...）。ファイアウォールが動いていなければ何もしない

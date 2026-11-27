@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require
 from app.core.database import get_db
 from app.core.permissions import Perm
+from app.core.ssh_hostkeys import take_events as take_hostkey_events
 from app.core.ssh_jump import (
     MAX_PRIVATE_KEY_LENGTH,
     JumpHostError,
@@ -30,6 +31,7 @@ from app.models.device import Device, JumpHost
 from app.models.user import User
 from app.services.audit import Audit, changed_fields, get_audit
 from app.services.connection import jump_info
+from app.services.hostkeys import record_events as record_hostkey_events
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -264,11 +266,18 @@ async def delete_jump_host(
 
 
 @router.post("/{jump_id}/test", response_model=TestResult, dependencies=[Depends(require(Perm.DEVICE_WRITE))])
-async def test_jump_host(jump_id: str, payload: TestRequest, db: AsyncSession = Depends(get_db)):
+async def test_jump_host(jump_id: str, payload: TestRequest, db: AsyncSession = Depends(get_db),
+                         audit: Audit = Depends(get_audit)):
     """踏み台への接続・認証（と、指定があれば機器への到達性）を確認する"""
     info = jump_info(await _get_or_404(db, jump_id))
     try:
         message = await run_in_threadpool(run_jump_test, info, payload.dest_host, payload.dest_port)
+        result = TestResult(ok=True, message=message)
     except JumpHostError as e:
-        return TestResult(ok=False, message=str(e))
-    return TestResult(ok=True, message=message)
+        result = TestResult(ok=False, message=str(e))
+    # 初めての接続で踏み台のホスト鍵を登録したら（TOFU）、アクティビティ・監査ログに残す
+    events = take_hostkey_events(lambda e: e.get("jump_id") == info.id)
+    if events:
+        record_hostkey_events(db, events, actor=audit.user.username, user=audit.user, ip=audit.ip)
+        await db.commit()
+    return result

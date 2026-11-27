@@ -486,6 +486,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .topo-dirty { font-size: 12px; color: var(--color-warning); }
 .topo-undo { font-size: 16px; line-height: 1; padding: 4px 10px; }
 .topo-notice { font-size: 12px; color: var(--color-success); }
+.account-sessions { border-top: 1px solid var(--color-border); margin-top: 12px; padding-top: 10px; }
 .users-notice { font-size: 12px; color: var(--color-success); margin-bottom: 10px; }
 /* 表示・非表示でボタンの位置が変わらない枠（幅は「未保存の変更あり」「保存中...」「書き出し ▾」が入る大きさ） */
 .topo-dirty-slot { display: inline-block; min-width: 8.5em; font-size: 12px; text-align: right; }
@@ -841,6 +842,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--color-accent); }
 .mail-hint { margin: -6px 0 12px; }
 .mail-consent { border: 1px solid var(--color-border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
 .mail-consent ol { margin: 6px 0 8px 18px; }
+.mail-warnings { border: 1px solid var(--color-warning); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 14px; font-size: 13px; color: var(--color-warning); }
+.mail-warnings ul { margin: 4px 0 0 18px; }
+.mail-insecure { color: var(--color-warning); }
 @media (max-width: 720px) { .mail-grid { grid-template-columns: 1fr; } }
 .ntf-lead { font-size: 13px; margin-bottom: 12px; line-height: 1.6; }
 .ntf-muted { font-size: 12px; color: var(--color-muted); line-height: 1.6; }

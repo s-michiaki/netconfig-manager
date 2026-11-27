@@ -276,8 +276,8 @@ fi
 HTTP_PORT=$(env_value HTTP_PORT 80)
 HTTPS_PORT=$(env_value HTTPS_PORT 443)
 if have curl; then
-  save app/health-http.txt curl -sS -m 10 -o /dev/null -w 'HTTP %{http_code}  転送先: %{redirect_url}\n' "http://127.0.0.1:${HTTP_PORT}/api/health"
-  save app/health-https.txt curl -sS -k -m 10 -w '\nHTTP %{http_code}\n' "https://127.0.0.1:${HTTPS_PORT}/api/health"
+  save app/health-http.txt curl --noproxy '*' -sS -m 10 -o /dev/null -w 'HTTP %{http_code}  転送先: %{redirect_url}\n' "http://127.0.0.1:${HTTP_PORT}/api/health"
+  save app/health-https.txt curl --noproxy '*' -sS -k -m 10 -w '\nHTTP %{http_code}\n' "https://127.0.0.1:${HTTPS_PORT}/api/health"
 fi
 
 # ---------------------------------------------------------------- 証明書・バックアップ
@@ -355,12 +355,17 @@ if ! $SUDO test -w "$OUT_DIR"; then
 fi
 OUT="$OUT_DIR/$NAME.tar.gz"
 RAW_KB=$(du -sk "$ROOT" | cut -f1)
-# テキストなので gzip でよく縮む（最高の圧縮率を使う）
-if ! tar -C "$WORK" -cf - "$NAME" | gzip -9 | $SUDO tee "$OUT" >/dev/null; then
+# テキストなので gzip でよく縮む（最高の圧縮率を使う）。まず自分だけが読める作業用のディレクトリ（mktemp -d の 700）に
+# 600 で作り、できあがってから保存先へ 600 のまま置く（保存先に 644 で書いてから chmod する、という読める隙間を作らない）
+PACK="$WORK/$NAME.tar.gz"
+if ! (umask 077; tar -C "$WORK" -cf - "$NAME" | gzip -9 > "$PACK"); then
+  echo "❌ ファイルを作れませんでした: $PACK"
+  exit 1
+fi
+if ! $SUDO install -m 600 "$PACK" "$OUT"; then
   echo "❌ ファイルを作れませんでした: $OUT"
   exit 1
 fi
-$SUDO chmod 600 "$OUT"
 [ -n "$SUDO" ] && $SUDO chown "$(id -u):$(id -g)" "$OUT" 2>/dev/null   # 実行した人が持ち出せるように
 SIZE_KB=$($SUDO du -k "$OUT" | cut -f1)
 

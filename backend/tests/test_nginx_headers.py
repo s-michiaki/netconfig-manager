@@ -67,7 +67,7 @@ def test_no_add_header_inside_common_locations():
 
 def test_app_csp_is_strict():
     values = csp_values()
-    assert set(values) == {"default", "/docs"}
+    assert set(values) == {"default"}  # /docs（Swagger UI）用の緩い CSP は無くした（#39）
     d = directives(values["default"])
     assert d["default-src"] == ["'self'"]
     assert d["script-src"] == ["'self'"]  # インライン・eval・外部のスクリプトは許可しない
@@ -82,12 +82,18 @@ def test_app_csp_is_strict():
     assert "http" not in values["default"]  # 外部のドメインを許可しない
 
 
-def test_docs_csp_only_allows_swagger_cdn():
-    d = directives(csp_values()["/docs"])
-    assert "'unsafe-eval'" not in d["script-src"]
-    assert d["script-src"] == ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"]
-    assert d["connect-src"] == ["'self'"]
-    assert d["frame-ancestors"] == ["'none'"]
+def test_docs_are_not_proxied_and_no_cdn_is_allowed():
+    """#39: /docs・/openapi.json を backend へ中継しない（ログインなしで見られ、Swagger UI は CDN のスクリプトを読むため）。
+    どの CSP も外部のスクリプト（cdn.jsdelivr.net など）とインラインのスクリプトを許さない"""
+    common = read("common.inc")
+    for loc in re.findall(r"location\s+([^{]*)\{", common):
+        assert "docs" not in loc and "openapi" not in loc, loc
+    # backend へ中継するのは /api/ だけ
+    assert re.findall(r"location\s+([^{]*?)\s*\{[^}]*proxy_pass", common) == ["/api/"]
+    for name, value in csp_values().items():
+        d = directives(value)
+        assert d["script-src"] == ["'self'"], name
+        assert "cdn.jsdelivr.net" not in value and "https://" not in value, name
 
 
 def test_index_html_has_no_external_resources():

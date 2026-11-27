@@ -46,7 +46,9 @@ COMPOSE_FILE="docker-compose.prod.yml"
 # 証明書を探す場所: 実行しているユーザー（root）のホーム → ログインした元のユーザーのホーム（su した場合）
 LOGIN_USER="$(logname 2>/dev/null || id -un)"
 SEARCH_HOMES=("$HOME")
-LOGIN_HOME=$(eval echo ~"$LOGIN_USER")
+# ホームは passwd の情報から引く（eval でユーザー名を展開しない）
+LOGIN_HOME=$(getent passwd "$LOGIN_USER" 2>/dev/null | cut -d: -f6 || true)
+LOGIN_HOME="${LOGIN_HOME:-$HOME}"
 [ "$LOGIN_HOME" != "$HOME" ] && SEARCH_HOMES+=("$LOGIN_HOME")
 # テスト用の差し替え（本番では設定しない。tests/test_setup_script.py が実際の /root に触れずに通すために使う）
 ENV_BACKUP_DIR="${NCM_ENV_BACKUP_DIR:-/root/netconfig-manager-backup}"
@@ -83,10 +85,25 @@ if [ -f "$LIB_CAND" ]; then OS_LIB="$LIB_CAND"; fi
 [ -n "$OS_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）"; exit 1; }
 # shellcheck source=lib/os.sh
 . "$OS_LIB"
-for fn in ncm_env_get ncm_backup_env ncm_env_append; do
+# コンテナの作り直し（setup.sh と同じ手順: プロキシの引き継ぎ・build-ca・OS_UPGRADE・出力の伏せ字）は lib/compose.sh、
+# プロキシ・追加の CA の読み込みは lib/proxy.sh（setup.sh と同じ読み方。.env の OUTBOUND_* → 環境変数）
+LIB_DIR="$(dirname "$OS_LIB")"
+# shellcheck source=lib/compose.sh
+[ -f "$LIB_DIR/compose.sh" ] && . "$LIB_DIR/compose.sh"
+# shellcheck source=lib/proxy.sh
+[ -f "$LIB_DIR/proxy.sh" ] && . "$LIB_DIR/proxy.sh"
+for fn in ncm_env_get ncm_backup_env ncm_env_append ncm_compose_build ncm_compose_up ncm_proxy_load; do
   declare -F "$fn" >/dev/null \
-    || { echo "❌ $OS_LIB が古く、$fn がありません（リポジトリを更新して scripts/ ごと同じ版にそろえてください。.env には触れていません）"; exit 1; }
+    || { echo "❌ $LIB_DIR の部品が古く、$fn がありません（リポジトリを更新して scripts/ ごと同じ版にそろえてください。.env には触れていません）"; exit 1; }
 done
+# プロキシの設定が不正なら、証明書・.env に触れる前に止める（値は表示しない）
+if ! ncm_proxy_load "$INSTALL_DIR"; then
+  echo "❌ $(ncm_proxy_error)"
+  echo "   値は表示していません。README「プロキシ環境での導入」の書き方（http://[ユーザー:パスワード@]ホスト:ポート）を確かめてください"
+  exit 1
+fi
+ncm_proxy_apply
+ncm_proxy_describe
 
 HTTPS_PORT="443"
 HTTP_PORT="80"
@@ -112,6 +129,8 @@ if [ -n "${Red_CA_FILE}" ]; then CA_FILE="${Red_CA_FILE}" ; fi
 
 read -r -p "IP Address Please Enter [${IPADD}]: " Red_IPADD
 if [ -n "${Red_IPADD}" ]; then IPADD="${Red_IPADD}" ; fi
+# URL と .env（sed の置き換え）に入れるので、ホスト名・IPv4・IPv6 の文字だけを許す
+[[ "$IPADD" =~ ^[A-Za-z0-9.:-]+$ ]] || { echo "IP Address が不正です（英数字と . : - だけ）: $IPADD"; exit 1; }
 
 read -r -p "HTTPS_PORT Please Enter [${HTTPS_PORT}]: " Red_HTTPS_PORT
 if [ -n "${Red_HTTPS_PORT}" ]; then HTTPS_PORT="${Red_HTTPS_PORT}" ; fi
@@ -135,7 +154,8 @@ command -v podman >/dev/null || { echo "podman が見つかりません（先に
 # =========================
 WORK=$(mktemp -d)
 chmod 700 "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+# 終了時に、作業用のディレクトリと、プロキシの一時ファイル（git 用の CA の束・sudo に渡す設定）を消す
+trap 'rm -rf "$WORK"; ncm_proxy_cleanup' EXIT
 
 copy_in() { # $1=元ファイル $2=コピー先 $3=表示名
   sudo test -f "$1" || { echo "❌ $3 が見つかりません: $1"; exit 1; }
@@ -299,9 +319,18 @@ else
   # HTTPS 対応前の構成で動いている・ポートを変えた場合は、コンテナを作り直す必要がある
   echo "[INFO] コンテナの作り直しが必要です（HTTPS 対応前の構成、HTTPS_PORT・PUBLIC_URL の変更）"
   echo "[INFO] Recreating containers..."
-  # setup.sh と同じ手順（ボリューム＝DB・コンフィグ履歴は保持される）
-  (cd "$INSTALL_DIR" && sudo podman-compose -f "$COMPOSE_FILE" build \
-     && sudo podman-compose -f "$COMPOSE_FILE" up -d --force-recreate)
+  # setup.sh と同じ手順（scripts/lib/compose.sh。ボリューム＝DB・コンフィグ履歴は保持される）。失敗したら、どこで止まったかと直し方を出す
+  RECREATE_STATE="証明書の配置と .env の変更は済んでいますが、コンテナは古いままです（以前の証明書・設定で動いているか、止まっています）"
+  RERUN="bash $INSTALL_DIR/scripts/setup.sh（証明書と .env は配置済みなので、作り直せば反映されます。import_cert.sh をもう一度実行してもかまいません）"
+  if ! ncm_compose_build "$INSTALL_DIR" "$COMPOSE_FILE"; then
+    ncm_proxy_fail_hint "コンテナのビルド"
+    ncm_compose_fail_hint "コンテナのビルド" "$INSTALL_DIR" "$COMPOSE_FILE" "$RERUN" "$RECREATE_STATE"
+    exit 1
+  fi
+  if ! ncm_compose_up "$INSTALL_DIR" "$COMPOSE_FILE"; then
+    ncm_compose_fail_hint "コンテナの作り直し（up -d --force-recreate）" "$INSTALL_DIR" "$COMPOSE_FILE" "$RERUN" "$RECREATE_STATE"
+    exit 1
+  fi
   FRONT=$(sudo podman ps -a --filter "label=com.docker.compose.project=${PROJECT_NAME}" \
             --filter "label=com.docker.compose.service=frontend" --format '{{.Names}}' 2>/dev/null | head -1 || true)
 fi
@@ -316,7 +345,7 @@ CURL_TRUST=()
 [ "$HAS_CA" -eq 1 ] && CURL_TRUST=(--cacert "$WORK/ca.crt")
 READY=0
 for _ in $(seq 1 40); do
-  if curl -fsS -m 3 -k "https://localhost:${HTTPS_PORT}/api/health" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
+  if curl --noproxy '*' -fsS -m 3 -k "https://localhost:${HTTPS_PORT}/api/health" 2>/dev/null | grep -q '"ok"'; then READY=1; break; fi
   sleep 3
 done
 
@@ -330,7 +359,8 @@ if [ "$READY" -ne 1 ]; then
 fi
 
 VERIFIED=0
-if curl -fsS -m 5 "${CURL_TRUST[@]}" "${BASE}/api/health" 2>/dev/null | grep -q '"ok"'; then VERIFIED=1; fi
+# サーバー自身への確認なので、プロキシ（ncm_proxy_apply が export したもの）を通さない
+if curl --noproxy '*' -fsS -m 5 "${CURL_TRUST[@]}" "${BASE}/api/health" 2>/dev/null | grep -q '"ok"'; then VERIFIED=1; fi
 
 # =========================
 # 完了

@@ -13,6 +13,7 @@
 先頭の語の省略形（sh / sho / dis など）は、CLI の解釈器が確実にある機種（ABBREV_PLATFORMS）だけに許す。
 それ以外は完全一致（show など）だけ。省略形を許すと、Linux のシェルに落ちる機種で `sh -c …` が通ってしまうため。
 """
+import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
@@ -72,10 +73,14 @@ _FILTER_ABBREV = {"include": 1, "exclude": 1, "begin": 1, "section": 3}
 _META_CHARS = set("*{}\"'")
 # シェルを経由する機種で使える文字
 _SHELL_SAFE_RE = re.compile(r"^[A-Za-z0-9 _.:/@%+=,^|-]+$")
-# 全機種で拒否する語（巨大な出力・VyOS の save など）。tech-support とその省略形
+# 全機種で拒否する語（巨大な出力）。tech-support とその省略形（tec 以上）
 _TECH_FULL = "tech-support"
 # 全機種で拒否する語: ファイル名を付けると機器内に書き出せる診断情報（Huawei・Comware の display diagnostic-information）
 _DIAG_FULL = "diagnostic-information"
+DIAG_MESSAGE = ("diagnostic-information（とその省略形。Huawei・Comware では di 以上）は、"
+                "ファイルへ書き出せ出力も大きいため使えません")
+# 本体の語で、ファイル名・記憶装置名らしい語を拒否する機種（display の引数でファイルを指定できるもの）
+FILE_WORD_PLATFORMS = frozenset({"huawei", "huawei_vrpv8", "hp_comware"})
 # 絞り込み語の短縮を認める機種（NX-OS・Arista は、本物の grep などへ渡るため完全一致だけ）
 FILTER_ABBREV_PLATFORMS = frozenset({"cisco_ios", "cisco_xe", "cisco_xr", "cisco_asa", "huawei", "huawei_vrpv8", "hp_comware"})
 
@@ -147,19 +152,61 @@ class CommandError(ValueError):
 
 
 def _is_tech_support(word: str) -> bool:
-    w = word.lower()
-    return w == "techsupport" or (len(w) >= 4 and _TECH_FULL.startswith(w))
+    """tech-support に解釈されうる語（tec 以上の前方一致）。
 
-
-def _is_diagnostic(word: str) -> bool:
-    w = word.lower()
-    return len(w) >= 4 and _DIAG_FULL.startswith(w)
-
-
-def _is_tech_prefix(word: str) -> bool:
-    """省略形の機種で、tech-support に解釈されうる語（tec 以上の前方一致）"""
+    先頭の語の省略形を許さない機種でも、引数の語は CLI が省略形として解釈しうる（Dell OS9・Ruckus・Aruba OS など
+    IOS 風の CLI の `show tec`）。そのため全機種で 3 文字から拒否する
+    """
     w = word.lower()
     return w == "techsupport" or (len(w) >= 3 and _TECH_FULL.startswith(w))
+
+
+# diagnostic-information の省略形として拒否する長さ。Huawei・Comware（ファイル名を付けると機器内へ書き出せる機種）は
+# di から（`dis di` は CLI の補完で diagnostic-information に解釈されうる。dialer など dial 以上の語は
+# 前方一致にならないので通る）。それ以外の機種には diagnostic-information が無いので、Cisco の `show diag`・
+# `show diagnostic result …` を通し、「diagnostic-」（11 文字）以上の前方一致だけを念のため拒否する
+_DIAG_MIN = 2
+_DIAG_MIN_OTHER = len("diagnostic-")
+
+
+def _is_diagnostic(word: str, platform: str = "") -> bool:
+    """diagnostic-information に解釈されうる語（Huawei・Comware は di 以上、それ以外は diagnostic- 以上の前方一致）。
+    platform を省略したとき（機種を問わない検査）は、全機種に共通の diagnostic- 以上だけを見る"""
+    w = word.lower()
+    n = _DIAG_MIN if platform in FILE_WORD_PLATFORMS else _DIAG_MIN_OTHER
+    return len(w) >= n and _DIAG_FULL.startswith(w)
+
+
+# 「ファイル名・記憶装置名らしい語」（Huawei・Comware の display の本体の語で拒否する）
+# - 記憶装置名: 最初の「:」の前に「/」が無く、英字を含む語（`flash:` `cfa0:` `cfcard:` `sd1:` `slot1#flash:` など）。
+#   IPv4 / IPv6 のアドレス・プレフィックス（ipaddress で判定）は通す。`Serial1/0/0:0`・`100GE1/0/1:1` のような
+#   分割ポート・チャネル化したインタフェース（「:」の前に「/」がある）、`100:1`（RD）・`10:00:00`（時刻）のような
+#   数字だけの語も通す
+# - 「/」で始まる語（絶対パス）、ファイルの拡張子で終わる語
+_FILE_EXT_RE = re.compile(
+    r"\.(txt|cfg|conf|log|zip|gz|tgz|tar|dat|bin|cc|bak|xml|json|py|sh|pem|key|crt|db|boot|img|pat|mod)$", re.IGNORECASE)
+
+
+def _is_ip(word: str) -> bool:
+    try:
+        ipaddress.ip_network(word, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def _looks_like_file(word: str) -> bool:
+    if word.startswith("/") or _FILE_EXT_RE.search(word):
+        return True
+    if ":" not in word or _is_ip(word):
+        return False
+    before = word.split(":", 1)[0]
+    return "/" not in before and any(c.isalpha() for c in before)
+
+
+def _is_path_word(word: str) -> bool:
+    """シェル経由の機種で拒否する「/」を含む語（IP アドレスのプレフィックス 10.0.0.0/24 などは通す）"""
+    return "/" in word and not ("/" in word and _is_ip(word))
 
 
 def check_universal(command: str) -> str:
@@ -194,9 +241,9 @@ def check_universal(command: str) -> str:
     if "\\" in cmd:
         raise CommandError("「\\」は使えません")
     if any(_is_tech_support(w) for w in cmd.replace("|", " ").split()):
-        raise CommandError("tech-support（とその省略形）は、出力が非常に大きくなるため使えません")
+        raise CommandError("tech-support（とその省略形。tec 以上）は、出力が非常に大きくなるため使えません")
     if any(_is_diagnostic(w) for w in cmd.replace("|", " ").split()):
-        raise CommandError("diagnostic-information（とその省略形）は、ファイルへ書き出せ出力も大きいため使えません")
+        raise CommandError(DIAG_MESSAGE)
     return cmd
 
 
@@ -277,12 +324,18 @@ def check_platform(platform: str, cmd: str) -> None:
         raise CommandError(
             f"「{body[0]}」から始まるコマンドは送れません（この機種で送れるのは {rule.hint} から始まるコマンドだけです）"
         )
-    if platform in ABBREV_PLATFORMS and any(_is_tech_prefix(w) for w in cmd.replace("|", " ").split()):
-        raise CommandError("tech-support（とその省略形）は、出力が非常に大きくなるため使えません")
     if rule.shell:
         for w in cmd.split():
             if w.startswith("-"):
                 raise CommandError("この機種では、「-」で始まる語（オプション）は使えません")
+        if any(_is_path_word(w) for w in body):
+            raise CommandError("この機種では、「/」を含む語（ファイルのパス）は使えません"
+                               "（10.0.0.0/24 のような IP アドレスのプレフィックスは使えます）")
+    if platform in FILE_WORD_PLATFORMS and any(_is_diagnostic(w, platform) for w in cmd.replace("|", " ").split()):
+        raise CommandError(DIAG_MESSAGE)
+    if platform in FILE_WORD_PLATFORMS and any(_looks_like_file(w) for w in body):
+        raise CommandError("この機種では、ファイル名・記憶装置名（flash: など）らしい語は使えません"
+                           "（機器内のファイルの読み書きにつながるため）")
     for seg in parts[1:]:
         words = seg.split()
         if not words:
@@ -418,19 +471,29 @@ async def mark_finished_if_done(db: AsyncSession, run_id: str) -> bool:
     return True
 
 
-async def fail_stale(db: AsyncSession, now: datetime | None = None) -> int:
+async def fail_stale(db: AsyncSession, now: datetime | None = None, stale_running: timedelta | None = None,
+                     waiting_runs: set[str] | frozenset[str] = frozenset(), system_active: bool = False) -> int:
     """止まった機器（worker の停止などで終わらないもの）を失敗にして、実行を終わらせる。失敗にした件数を返す
 
-    - 実行中: 機器ごとの started_at から STALE_RUNNING を過ぎたもの（台数が多くて長く動いている実行は、
-      機器が次々に始まり・終わるので失敗にしない）
-    - 待機中: その実行に動き（開始・終了・作成）が STALE_IDLE なく、実行中の機器も無いもの
+    - 実行中: 機器ごとの started_at から stale_running（worker はコマンド実行の時間の上限から計算した値を渡す。
+      既定は STALE_RUNNING）を過ぎたもの（台数が多くて長く動いている実行は、機器が次々に始まり・終わるので失敗にしない）
+    - 待機中: その実行に動き（開始・終了・作成）が STALE_IDLE なく、実行中の機器も無いもの。
+      ただし、同時実行の枠を待っているだけの実行（waiting_runs: worker の待ち行列に機器がある・枠を予約している）は、
+      全体が進んでいる（枠を使っている処理がある system_active、またはどれかの実行の機器が STALE_IDLE 以内に
+      始まった・終わった）間は失敗にしない（遅い実行が枠を占めている間に、待っている実行を止まったとみなさない）。
+      全体が止まっていれば、今までどおり失敗にする
     """
     now = now or utcnow()
+    stale_running = stale_running or STALE_RUNNING
     touched: set[str] = set()
     n = 0
+    # 全体が進んでいるかは、下で止まった機器を失敗にする（終了時刻に now が入る）前の時刻で見る。
+    # 後で見ると、いま失敗にした機器を「最近の動き」と数えてしまい、待っている実行を STALE_IDLE だけ余計に残す
+    g_start, g_end = (await db.execute(
+        select(func.max(CommandResult.started_at), func.max(CommandResult.finished_at)))).one()
     running = (await db.execute(
         select(CommandResult.id, CommandResult.run_id)
-        .where(CommandResult.status == STATUS_RUNNING, CommandResult.started_at < now - STALE_RUNNING)
+        .where(CommandResult.status == STATUS_RUNNING, CommandResult.started_at < now - stale_running)
     )).all()
     if running:
         await db.execute(update(CommandResult).where(CommandResult.id.in_([r[0] for r in running]))
@@ -440,6 +503,7 @@ async def fail_stale(db: AsyncSession, now: datetime | None = None) -> int:
     run_ids = list((await db.execute(
         select(CommandResult.run_id).where(CommandResult.status == STATUS_QUEUED).distinct()
     )).scalars().all())
+    progressing = system_active or any(t is not None and t >= now - STALE_IDLE for t in (g_start, g_end))
     for run_id in run_ids:
         run = await db.get(CommandRun, run_id)
         if run is None:
@@ -453,7 +517,7 @@ async def fail_stale(db: AsyncSession, now: datetime | None = None) -> int:
             .where(CommandResult.run_id == run_id)
         )).one()
         last = max(t for t in (run.created_at, last_start, last_end) if t is not None)
-        if busy or last >= now - STALE_IDLE:
+        if busy or last >= now - STALE_IDLE or (run_id in waiting_runs and progressing):
             continue
         r = await db.execute(update(CommandResult).where(CommandResult.run_id == run_id, CommandResult.status == STATUS_QUEUED)
                              .values(status=STATUS_FAILED, error=STALE_MESSAGE, finished_at=now))

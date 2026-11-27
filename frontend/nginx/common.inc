@@ -10,7 +10,7 @@ server_tokens off;
 add_header X-Content-Type-Options nosniff always;
 add_header X-Frame-Options DENY always;  # CSP の frame-ancestors 'none' と同じ意味（古いブラウザ向けに残す）
 add_header Referrer-Policy same-origin always;
-# CSP の値は csp.inc の map で決める（/docs だけ別の値）
+# CSP の値は csp.inc の map で決める（今はどのパスも同じ値）
 add_header Content-Security-Policy $ncm_csp always;
 # このアプリで使わないブラウザの機能（カメラ・マイク・位置情報など）を無効にする
 add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
@@ -31,11 +31,8 @@ location /api/ {
     proxy_send_timeout 3600s;
 }
 
-# API ドキュメント（不要なら削除してよい）
-location ~ ^/(docs|openapi\.json)$ {
-    proxy_pass http://backend:8000;
-    proxy_set_header X-Forwarded-For $remote_addr;
-}
+# API ドキュメント（/docs・/openapi.json）は中継しない（ログインなしで見られ、Swagger UI は CDN のスクリプトを読むため）。
+# 一覧は backend のコンテナで python -m app.tools.api_list（README「API トークン」）
 
 location /assets/ {
     # location 内で add_header を使うと server の add_header が継承されなくなるため expires のみ

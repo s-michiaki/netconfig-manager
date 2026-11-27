@@ -4,10 +4,9 @@ import { fileURLToPath } from "node:url";
 
 /**
  * 本番の nginx と同じ CSP の値を nginx/csp.inc から読み取る（画面テストと本番の設定がずれないようにするため）
- *   app  … 画面（既定）の CSP
- *   docs … /docs（Swagger UI）の CSP
+ *   app  … 画面（既定）の CSP。/docs も含め、どのパスも同じ値（/docs 用の例外は無くした。#39）
  */
-export function readCsp(): { app: string; docs: string } {
+export function readCsp(): { app: string } {
   const here = dirname(fileURLToPath(import.meta.url));
   const text = readFileSync(join(here, "..", "nginx", "csp.inc"), "utf-8");
   const value = (key: string) => {
@@ -15,5 +14,5 @@ export function readCsp(): { app: string; docs: string } {
     if (!m) throw new Error(`nginx/csp.inc に ${key} の CSP が見つかりません`);
     return m[1];
   };
-  return { app: value("default"), docs: value("/docs") };
+  return { app: value("default") };
 }

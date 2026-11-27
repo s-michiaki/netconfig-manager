@@ -22,6 +22,8 @@
              STALE_DAYS 日以上取得できていなければ warn（画面に注意を出すだけで、通知はしない）
   outbound : 外部への接続（core/outbound.py）。プロキシ（ホスト:ポートと認証の有無だけ）・追加の CA の件数と期限・
              最後の「接続を確かめる」の結果。CA の期限切れ・30 日以内・確認の失敗は warn（画面に出すだけで、通知はしない）
+  notes    : 通信の設定の注意（#30・#32）。メールサーバーの暗号化なしのパスワード・証明書の未検証、外部 Git の http:// は warn。
+             宛先のドメインの制限なしは ok のまま文だけ（既定の設定なので）。画面に出すだけで、通知はしない
   images   : コンテナのイメージ（DB・Redis・ビルドの土台）の作成日時。setup.sh が app.tools.image_report で伝える。
              古い（IMAGE_STALE_DAYS 日より前）・取り直せなかったら warn
 
@@ -472,6 +474,29 @@ async def check_mail(db: AsyncSession, redis_ok: bool = True) -> Component:
     return Component(key, label, "ok", "送信できています", detail)
 
 
+async def check_notes(db: AsyncSession) -> Component:
+    """通信の設定の注意（送信・push は止めない。画面に出すだけで、通知はしない＝ALERT_KEYS に入れない）
+
+    危険な組み合わせ（暗号化なしのパスワード・証明書の未検証・外部 Git の http://）だけを注意（warn）にする。
+    宛先のドメインの制限が空なのは既定の設定なので、正常のまま文だけ出す（恒常的な注意で本当の異常を埋もれさせない）
+    """
+    from app.services import mail  # notify → mail の循環を避ける
+
+    key, label = "notes", "通信の設定の注意"
+    cfg = await mail.load_config(db)
+    danger = [f"メール: {w}" for w in mail.config_warnings(cfg) if w != mail.DOMAIN_WARNING]
+    if git_export.enabled() and git_export.plain_http(settings.GIT_EXPORT_URL):
+        danger.append("外部 Git: GIT_EXPORT_URL が http:// です（トークンとコンフィグが暗号化されずに流れます）。"
+                      "https:// か SSH の URL にしてください")
+    info = ["宛先のドメインを制限していません（管理 → 通知設定 → メールサーバーで設定できます）"] \
+        if cfg.enabled and not cfg.allowed_domains else []
+    if danger:
+        return Component(key, label, "warn", "。".join(danger + info), {"notes": danger, "info": info}, items=danger)
+    if info:
+        return Component(key, label, "ok", info[0], {"notes": [], "info": info})
+    return Component(key, label, "ok", "注意する設定はありません")
+
+
 async def record_outbound_check(result: dict) -> None:
     try:
         await login_limit.client().set(OUTBOUND_CHECK_KEY, json.dumps(result, ensure_ascii=False))
@@ -527,7 +552,8 @@ async def collect_status(db: AsyncSession, now: datetime | None = None) -> list[
     worker = await check_worker(redis_c.status == "ok")
     out = [database, redis_c, worker, check_beat(heartbeat, worker, now)]
     if database.status == "ok":
-        out += [await check_schedules(db), await check_collect(db, now), await check_mail(db, redis_c.status == "ok")]
+        out += [await check_schedules(db), await check_collect(db, now), await check_mail(db, redis_c.status == "ok"),
+                await check_notes(db)]
     extra = [await check_vuln(db, now)] if database.status == "ok" and settings.VULN_ENABLED else []
     return [*out, check_disk(), await check_cert(now), await check_backup(now, redis_c.status == "ok"),
             await check_git_export(redis_c.status == "ok"), await check_images(now, redis_c.status == "ok"),

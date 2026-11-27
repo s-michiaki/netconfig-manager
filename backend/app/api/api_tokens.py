@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, StrictInt, StringConstraints, field_valid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import begin_step_up
 from app.api.config_reviews import iso_utc
 from app.api.deps import require_session
 from app.core.config import settings
@@ -113,19 +114,14 @@ async def create_token(
     if not settings.API_TOKENS_ENABLED:
         raise HTTPException(status_code=409, detail="API トークンは使えない設定です（API_TOKENS_ENABLED）")
     ip = client_ip(request)
-    # パスワードの確認は、ログインと同じ回数の制限の中で行う（漏れたログインのトークンから総当たりさせない）
-    wait, _ = await login_limit.begin_attempt(user.username, ip)
-    if wait:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"パスワードの誤りが続いたため、一時的に操作できません。{-(-wait // 60)} 分ほど待ってから再度お試しください",
-            headers={"Retry-After": str(wait)},
-        )
+    # パスワードの確認は、ログインと同じ回数の制限の中で行う（漏れたログインのトークンから総当たりさせない）。
+    # ほかの本人の確認と同じく、ロックの開始は監査ログに残す（auth.begin_step_up）
+    await begin_step_up(db, user, ip, "API トークンの発行")
     if not await run_in_threadpool(verify_password, payload.password, user.hashed_password):
         await record_now(db, make_log("api_token.create", user=user, ip=ip, success=False,
                                       detail={"name": payload.name, "reason": "パスワード誤り"}))
         raise HTTPException(status_code=422, detail="パスワードが正しくありません")
-    await login_limit.record_success(user.username, ip)
+    await login_limit.step_up_success(user.username, ip)
     now = utcnow()
     if await api_tokens.count_active(db, user.id, now) >= api_tokens.MAX_TOKENS_PER_USER:
         raise HTTPException(

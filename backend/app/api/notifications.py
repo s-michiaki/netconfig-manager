@@ -33,6 +33,7 @@ from app.services.notify import (
     normalize_teams_url,
     resolve_destinations,
     send_test,
+    setting_targets,
     teams_url_error,
     valid_webhook,
 )
@@ -253,11 +254,34 @@ async def _apply(db: AsyncSession, owner_type: str, owner_id: str, p: Notificati
     return s, changes
 
 
-async def _test(db: AsyncSession, s: NotificationSetting | None, label: str) -> dict:
+# テスト送信の最短の間隔（利用者ごと。グループは管理者×グループごと）。閲覧者も自分の宛先へ送れるので、
+# 組織の SMTP・Webhook から大量に送らせない（#30。「いま送る」の report.take_send_slot と同じ仕組み）
+TEST_INTERVAL_SEC = 60
+
+
+async def _test(db: AsyncSession, s: NotificationSetting | None, label: str, slot: str) -> dict:
     if not has_target(s):
         raise HTTPException(status_code=400, detail="通知先が登録されていません")
-    results = await send_test(s, label, await mail.load_config(db) if s.emails else None)
+    cfg = await mail.load_config(db) if s.emails else None
+    # 接続の前の検査（メールの設定の不備・宛先のドメインの制限、Webhook の URL の形）で、すべての通知先が弾かれるときは、
+    # 送らずにその理由を返し、間隔の枠を使わない（設定を直しながら試せるように）。1 か所でも実際に送る回は枠を使う
+    pre = {(f"email:{url}" if k == "email" else k): _precheck(k, url, cfg) for k, url in setting_targets(s)}
+    if all(pre.values()):
+        return {"results": pre}
+    wait = await report.take_slot(slot, "notify-test", TEST_INTERVAL_SEC)
+    if wait:
+        raise HTTPException(status_code=429, detail=f"テスト通知は続けて送れません。{wait} 秒ほど待ってからやり直してください",
+                            headers={"Retry-After": str(wait)})
+    results = await send_test(s, label, cfg)
     return {"results": {k: (err or "ok") for k, err in results.items()}}
+
+
+def _precheck(kind: str, url: str, cfg: "mail.MailConfig | None") -> str | None:
+    """送る前の検査（接続しない）。弾かれるなら理由"""
+    if kind == "email":
+        cfg = cfg or mail.MailConfig()
+        return mail.check_config(cfg) or mail.check_address(url, cfg.allowed_domains)
+    return None if valid_webhook(kind, url) else "Webhook URL の形式が正しくありません"
 
 
 # ---------------------------------------------------------------- 自分の設定
@@ -301,7 +325,7 @@ async def test_my_notification(
     user: User = Depends(require(Perm.NOTIFY_SELF)),
     audit: Audit = Depends(get_audit),
 ):
-    result = await _test(db, await _get_setting(db, "user", user.id), f"ユーザー {user.username}")
+    result = await _test(db, await _get_setting(db, "user", user.id), f"ユーザー {user.username}", user.id)
     audit("notify.test", target_type="user", target_id=user.id, target_name=user.username, detail=result["results"])
     await db.commit()
     return result
@@ -447,10 +471,11 @@ async def delete_group(group_id: str, db: AsyncSession = Depends(get_db), audit:
     await db.commit()
 
 
-@router.post("/groups/{group_id}/test", dependencies=[Depends(require(Perm.USER_ADMIN))])
-async def test_group_notification(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
+@router.post("/groups/{group_id}/test")
+async def test_group_notification(group_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit),
+                                  user: User = Depends(require(Perm.USER_ADMIN))):
     g = await _get_group(db, group_id)
-    result = await _test(db, await _get_setting(db, "group", g.id), f"グループ {g.name}")
+    result = await _test(db, await _get_setting(db, "group", g.id), f"グループ {g.name}", f"{user.id}:{g.id}")
     audit("notify.test", target_type="user_group", target_id=g.id, target_name=g.name, detail=result["results"])
     await db.commit()
     return result

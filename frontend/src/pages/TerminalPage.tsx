@@ -129,12 +129,19 @@ export default function TerminalPage() {
     ws.onclose = (e) => {
       if (wsRef.current !== ws) return; // 新しい接続に置き換え済み
       wsRef.current = null;
+      const current = getToken();
+      if (e.code === 4409 || (e.code === 4401 && current && current !== token)) {
+        // 本人の操作（パスワード変更・2 段階認証など）でトークンが新しくなった。機器との SSH は切れているので、自動では戻さない
+        setStatus("idle");
+        term.writeln("\r\n\x1b[33m接続が切れました（ログインのトークンが新しくなりました）。再接続してください\x1b[0m\r\n");
+        return;
+      }
       if (e.code === 4401) {
         // revoked: 管理者による強制ログアウト・無効化など（理由はサーバーが端末に表示済み）
         term.writeln(e.reason === "revoked"
           ? "\r\n\x1b[31mログインが無効になりました。再ログインしてください\x1b[0m"
           : "\r\n\x1b[31m認証の有効期限が切れました。再ログインしてください\x1b[0m");
-        setTimeout(redirectToLogin, 1500);
+        setTimeout(() => redirectToLogin(token), 1500);
         return;
       }
       setStatus((s) => (s === "error" ? s : "idle"));

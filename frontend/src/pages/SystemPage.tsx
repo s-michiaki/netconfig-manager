@@ -73,6 +73,7 @@ const HELP: Record<string, string> = {
   git_export: "コンフィグ履歴を GitLab / Gitea などへ push（.env の GIT_EXPORT_URL）",
   images: "PostgreSQL・Redis と、ビルドの土台（Python・Node.js・nginx）のイメージ。setup.sh で取り直す",
   mail: "メール通知の送信（通知設定 → メールサーバー）。最後の送信の結果",
+  notes: "メールサーバー・外部 Git の設定のうち、盗み見につながるもの（暗号化なしのパスワード・証明書の未検証・http://）を注意にします。宛先のドメインの制限なしは、正常のまま文だけ出します。送信は止めず、画面に出すだけです（通知はしません）",
   vuln: "脆弱性・サポート終了日の外部からの取得（.env の VULN_ENABLED=true のときだけ）。3 日以上取得できていないと注意",
   outbound: "Webhook の送信・メールの OAuth 2.0 のトークン・脆弱性情報の取り込みで、インターネットへ出るときの経路（.env の OUTBOUND_PROXY・OUTBOUND_CA_FILE）。SMTP・機器への接続はプロキシを通しません",
 };

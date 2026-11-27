@@ -45,6 +45,30 @@ info() { printf '         %s\n' "$*"; }
 section() { printf '\n%s== %s ==%s\n' "$C_H" "$*" "$C_0"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# 宛先（HOST[:PORT]・[IPv6]:PORT・IPv6）をホストとポートに分け、形を検査する（PARSED_HOST・PARSED_PORT に入れる）
+#   宛先は引数・-f のファイル（他人が作った機器の一覧のこともある）から来るので、ホスト名・IP アドレスに使う文字だけを許し、
+#   bash -c の文字列には埋め込まず、引数（$1・$2）として渡す
+PARSED_HOST=""; PARSED_PORT=""; PARSED_DISP=""
+parse_target() { # $1=HOST[:PORT]
+  local t="$1" host port=22
+  # IPv6 はゾーンつき（fe80::1%eth0）も受け付ける
+  local v6='[0-9A-Fa-f:.]+(%[A-Za-z0-9_.-]+)?'
+  if [[ "$t" =~ ^\[($v6)\]:([0-9]{1,5})$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[3]}"
+  elif [[ "$t" =~ ^\[($v6)\]$ ]]; then host="${BASH_REMATCH[1]}"
+  elif [[ "$t" =~ ^([A-Za-z0-9._-]+):([0-9]{1,5})$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
+  elif [[ "$t" =~ ^[A-Za-z0-9._-]+$ ]]; then host="$t"
+  elif [[ "$t" =~ ^$v6$ ]] && [[ "$t" == *:*:* ]]; then host="$t"   # 角かっこの無い IPv6（ポートは 22）
+  else return 1; fi
+  [[ "$host" != -* ]] && { [[ "$host" != *%* ]] || [[ "$host" == *:* ]]; } && [ "$((10#$port))" -ge 1 ] && [ "$((10#$port))" -le 65535 ] || return 1
+  PARSED_HOST="$host"; PARSED_PORT="$((10#$port))"
+  PARSED_DISP="$PARSED_HOST:$PARSED_PORT"; [[ "$PARSED_HOST" != *:* ]] || PARSED_DISP="[$PARSED_HOST]:$PARSED_PORT"
+}
+# TCP で接続できるか（引数: ホスト ポート。検査済みの値）。/dev/tcp の宛先は、文字列に埋め込まず引数で渡す
+tcp_open() { # $1=host $2=port $3=秒
+  # shellcheck disable=SC2016  # $1・$2 は中の bash で展開する
+  timeout "${3:-5}" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>/dev/null
+}
+
 # OS ごとの違い（判定・パッケージ名・案内文）は scripts/lib/os.sh にまとめてある
 NCM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/os.sh"
 [ -f "$NCM_LIB" ] || { echo "scripts/lib/os.sh が見つかりません（リポジトリの scripts/ ごと配置してください）" >&2; exit 2; }
@@ -54,20 +78,23 @@ NCM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/os.sh"
 usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ---------------------------------------------------------------- 引数
+# 宛先がどこから来たか（形式の誤りを、値ではなく出どころで示すため。値には制御文字などが入りうる）
+DEVICE_SRC=(); JUMP_SRC=(); N_D=0; N_J=0
 add_from_file() {
-  local line
+  local line n=0
   [ -r "$1" ] || { echo "ファイルを読めません: $1" >&2; exit 2; }
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"; line="$(echo "$line" | tr -d '[:space:]')"
-    [ -n "$line" ] && DEVICES+=("$line")
+    n=$((n + 1))
+    line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
+    [ -n "$line" ] && { DEVICES+=("$line"); DEVICE_SRC+=("$(basename "$1") の $n 行目"); }
   done < "$1"
 }
 
 while getopts ":d:j:f:m:c:rh" opt; do
   case "$opt" in
     c) export OUTBOUND_CA_FILE="$OPTARG" ;;
-    d) DEVICES+=("$OPTARG") ;;
-    j) JUMPS+=("$OPTARG") ;;
+    d) N_D=$((N_D + 1)); DEVICES+=("$OPTARG"); DEVICE_SRC+=("-d の $N_D 個目") ;;
+    j) N_J=$((N_J + 1)); JUMPS+=("$OPTARG"); JUMP_SRC+=("-j の $N_J 個目") ;;
     f) add_from_file "$OPTARG" ;;
     m) MODE="$OPTARG" ;;
     r) RUN_CONTAINER=1 ;;
@@ -276,7 +303,7 @@ if have ss; then
 else
   # ss が無い環境: 自分自身のポートに接続できるか（=待ち受けがあるか）で判定
   for p in "${PORTS[@]}"; do
-    if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null; then
+    if tcp_open 127.0.0.1 "$p" 2; then
       ng "ポート $p は使用中です"
     else
       ok "ポート $p は空いています"
@@ -351,39 +378,45 @@ fi
 section "7. ネットワーク機器・踏み台への到達性"
 # =============================================================================
 # 22番に TCP 接続し、SSH バナー（SSH-2.0-...）が返るかを見る。ログインはしない
-probe_ssh() { # $1=label $2=HOST[:PORT]
-  local target="$2" host port banner
-  if [[ "$target" =~ ^\[(.+)\]:([0-9]+)$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
-  elif [[ "$target" =~ ^([^:]+):([0-9]+)$ ]]; then host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
-  else host="$target"; port=22; fi
-
-  if ! timeout 5 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
-    ng "$1 $host:$port に TCP 接続できません"
+probe_ssh() { # $1=label $2=HOST[:PORT] $3=出どころ（-f の何行目など）
+  local host port banner disp
+  if ! parse_target "$2"; then
+    # 検査を通らなかった値は表示しない（制御文字などで画面を乱さないよう、出どころだけを示す）
+    ng "$1（$3）の宛先の形式が正しくありません（HOST・HOST:PORT・[IPv6]:PORT。ホスト名は英数字と . _ - だけ）"
+    return 1
+  fi
+  host="$PARSED_HOST"; port="$PARSED_PORT"; disp="$PARSED_DISP"
+  if ! tcp_open "$host" "$port" 5; then
+    ng "$1 $disp に TCP 接続できません"
     return 1
   fi
   # SSH サーバーは接続直後に1行のバナーを送ってくるので、その1行だけ読む
-  banner="$(timeout 6 bash -c "exec 3<>/dev/tcp/$host/$port; IFS= read -r -t 5 line <&3; printf '%s' \"\$line\"" 2>/dev/null | tr -d '\r')"
-  if [[ "$banner" == SSH-* ]]; then ok "$1 $host:$port 到達可（$banner）"
-  else warn "$1 $host:$port に接続できたが SSH の応答がありません（${banner:-応答なし}）"; fi
+  # shellcheck disable=SC2016
+  banner="$(timeout 6 bash -c 'exec 3<>"/dev/tcp/$1/$2"; IFS= read -r -t 5 line <&3; printf "%s" "$line"' _ "$host" "$port" 2>/dev/null | LC_ALL=C tr -cd '\40-\176')"   # 相手が送る文字列なので、表示できる ASCII だけにする
+  if [[ "$banner" == SSH-* ]]; then ok "$1 $disp 到達可（$banner）"
+  else warn "$1 $disp に接続できたが SSH の応答がありません（${banner:-応答なし}）"; fi
 }
 
 if [ ${#DEVICES[@]} -eq 0 ] && [ ${#JUMPS[@]} -eq 0 ]; then
   info "対象が指定されていないため省略（-d 機器 / -j 踏み台 / -f ファイル で指定）"
 fi
-for j in "${JUMPS[@]}"; do probe_ssh "踏み台" "$j"; done
-for d in "${DEVICES[@]}"; do
-  if [ ${#JUMPS[@]} -gt 0 ]; then
+for i in "${!JUMPS[@]}"; do probe_ssh "踏み台" "${JUMPS[$i]}" "${JUMP_SRC[$i]}"; done
+for i in "${!DEVICES[@]}"; do
+  d="${DEVICES[$i]}"
+  if [ ${#JUMPS[@]} -gt 0 ] && parse_target "$d"; then
     # 踏み台を使う構成ではサーバーから直接届かないのが普通なので、失敗しても警告扱い
-    if ! timeout 5 bash -c "exec 3<>/dev/tcp/${d%:*}/$([[ "$d" == *:* ]] && echo "${d##*:}" || echo 22)" 2>/dev/null; then
-      info "機器 $d: サーバーからは直接届きません（踏み台経由で使う想定なら問題なし）"
+    if ! tcp_open "$PARSED_HOST" "$PARSED_PORT" 5; then
+      info "機器 $PARSED_DISP: サーバーからは直接届きません（踏み台経由で使う想定なら問題なし）"
       continue
     fi
   fi
-  probe_ssh "機器" "$d"
+  probe_ssh "機器" "$d" "${DEVICE_SRC[$i]}"
 done
 if [ ${#JUMPS[@]} -gt 0 ] && [ ${#DEVICES[@]} -gt 0 ]; then
   info "踏み台経由の到達確認は認証が必要なため手動で実施してください:"
-  info "  ssh -J <踏み台ユーザー>@${JUMPS[0]} <機器ユーザー>@${DEVICES[0]}"
+  jd="<踏み台>"; ! parse_target "${JUMPS[0]}" || jd="$PARSED_HOST"
+  dd="<機器>"; ! parse_target "${DEVICES[0]}" || dd="$PARSED_HOST"
+  info "  ssh -J <踏み台ユーザー>@$jd <機器ユーザー>@$dd"
   info "  （失敗する場合は踏み台 sshd の AllowTcpForwarding を確認。アプリの「到達確認」ボタンでも確認可）"
 fi
 

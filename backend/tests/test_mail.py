@@ -280,6 +280,11 @@ def test_server_settings_api(api, smtp):
     r = c.post("/api/mail/server/test", json={"to": "ops@example.test"}, headers=admin).json()
     assert r == {"ok": True, "error": None} and smtp.sent[-1][1]["Subject"] == "[NCM] テストメール"
     assert ("connect", "smtp.example.test", 2525, "FakeSMTP") in smtp.log
+    # 続けては送れない（管理者ごとに 60 秒に 1 回）。試験では間隔の記録を消してから続ける
+    r2 = c.post("/api/mail/server/test", json={"to": "ops@example.test"}, headers=admin)
+    assert r2.status_code == 429 and "続けて送れません" in r2.json()["detail"]
+    from app.services import login_limit
+    asyncio.run(login_limit.client().delete(*asyncio.run(login_limit.client().keys("netconfig:report:mail-test:*"))))
     r = c.post("/api/mail/server/test", json={"to": "ops@other.test"}, headers=admin).json()
     assert not r["ok"] and "送れません" in r["error"]
     assert c.get("/api/mail/server", headers=admin).json()["last_result"]["ok"] is False

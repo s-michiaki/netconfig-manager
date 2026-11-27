@@ -23,7 +23,7 @@ def test_owner_and_group_access():
         t = uuid.uuid4().hex[:6]
         users = {}
         for key, role in (("owner", "admin"), ("mgr", "admin"), ("usr", "admin"), ("other", "admin"), ("op", "operator")):
-            u = c.post("/api/users/", json={"username": f"pa-{key}-{t}", "password": PW, "role": role}, headers=root).json()
+            u = c.post("/api/users/", json={"username": f"pa-{key}-{t}", "password": PW, "role": role, "confirm_password": "initial-pass-123"}, headers=root).json()
             users[key] = {"id": u["id"], "name": u["username"], "h": login(c, u["username"])}
         owner, mgr, usr, other, op = (users[k]["h"] for k in ("owner", "mgr", "usr", "other", "op"))
 

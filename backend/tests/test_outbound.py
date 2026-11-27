@@ -252,12 +252,15 @@ def test_discord_via_proxy_with_auth(monkeypatch, trust, corp_ca, block_direct):
     assert inner["headers"]["host"] == "discord.com" and not block_direct
 
 
-def test_slack_follows_redirect_teams_does_not(monkeypatch, trust, corp_ca):
+def test_webhooks_do_not_follow_redirects(monkeypatch, trust, corp_ca):
+    """#32: Teams に加えて Discord・Slack もリダイレクトをたどらない（転送先が http://・社内の宛先でも直接つながない）"""
     def respond(method, path, headers, body):
         if path.startswith("/powerautomate") and b"redirect" in body:
             return 302, {"Location": "https://evil.example.test/x"}, b""
         if path.startswith("/services/first"):
-            return 302, {"Location": "/services/second"}, b""
+            return 302, {"Location": "http://192.0.2.1/second"}, b""
+        if path.startswith("/api/webhooks/1/first"):
+            return 308, {"Location": "https://evil.example.test/y"}, b""
         return 202, {}, b""
 
     with FakeProxy(corp_ca, respond=respond) as px:
@@ -266,11 +269,15 @@ def test_slack_follows_redirect_teams_does_not(monkeypatch, trust, corp_ca):
         assert notify.send_webhook("teams", TEAMS, {"x": 1}) is None
         msg = notify.send_webhook("teams", TEAMS, {"x": "redirect"})
         assert "リダイレクト" in msg and "evil" not in msg
-        assert notify.send_webhook("slack", "https://hooks.slack.com/services/first", {"text": "a"}) is None
+        assert notify.send_webhook("slack", "https://hooks.slack.com/services/ok", {"text": "a"}) is None
+        msg = notify.send_webhook("slack", "https://hooks.slack.com/services/first", {"text": "a"})
+        assert "リダイレクトされました（HTTP 302）" in msg and "192.0.2.1" not in msg
+        msg = notify.send_webhook("discord", "https://discord.com/api/webhooks/1/first", {"content": "a"})
+        assert "リダイレクトされました（HTTP 308）" in msg and "evil" not in msg
     hosts = [c.split()[1] for c in px.connects]
     assert hosts[:2] == ["xxxx.environment.api.powerplatform.com:443"] * 2
-    assert "evil.example.test:443" not in hosts  # Teams はたどらない
-    assert [i["path"] for i in px.inner if i["host"] == "hooks.slack.com"] == ["/services/first", "/services/second"]
+    assert "evil.example.test:443" not in hosts and not any("192.0.2.1" in h for h in hosts)
+    assert [i["path"] for i in px.inner if i["host"] == "hooks.slack.com"] == ["/services/ok", "/services/first"]
 
 
 def test_mail_token_via_proxy(monkeypatch, trust, corp_ca):

@@ -100,6 +100,11 @@ def url_has_credentials(url: str) -> bool:
     return bool(user or password)
 
 
+def plain_http(url: str) -> bool:
+    """平文（http://）の URL か。トークンとコンフィグが暗号化されずに流れる（#32。動きは止めず、システム状態で注意を出す）"""
+    return urllib.parse.urlsplit(url.strip()).scheme.lower() == "http"
+
+
 def _layout(devices: list[DeviceFile]) -> dict[str, DeviceFile]:
     """相対パス → 機器。同じグループに同じ名前（安全な名前に直した結果）があれば ID の先頭を付けて分ける"""
     out: dict[str, DeviceFile] = {}

@@ -14,16 +14,16 @@
 import json
 import logging
 import secrets
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import AfterValidator, BaseModel, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import effective_permissions, get_current_user, require_session
+from app.api.deps import effective_permissions, get_current_user, oauth2_scheme, require_session
 from app.api.terminal import close_user_sessions
 from app.api.token_policy import token_route_perms
 from app.core import totp
@@ -42,7 +42,7 @@ from app.core.security import (
 )
 from app.core.timeutil import utcnow
 from app.models.user import User
-from app.services import login_limit
+from app.services import api_tokens, login_limit, sessions
 from app.services.audit import client_ip, make_log, record_now
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ class UserInfo(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: NewPassword
+    revoke_api_tokens: bool = False  # API トークンもすべて失効させる（漏れた疑いがあるとき）
 
 
 def user_info(user: User, token_perms: frozenset | None = None) -> UserInfo:
@@ -220,15 +221,88 @@ class MfaDisable(MfaCode):
     password: str
 
 
+class PasswordConfirm(BaseModel):
+    """重い操作の前の本人の確認（いまのパスワード）"""
+
+    password: str
+
+
 class RecoveryCodes(BaseModel):
     recovery_codes: list[str]
+    # 2 段階認証を有効にしたときは、それまでのトークンが使えなくなるので、新しいトークンを返す
+    access_token: str | None = None
+
+
+# ---------------------------------------------------------------- 本人の確認のやり直し（step-up）
+# パスワード・確認コードを照合する API は、ログインと同じ回数の制限（login_limit）の中で照合する（#28）。
+# 漏れたログインのトークンから総当たりさせないため。成功したら、その試行は数えない（正しい利用者を締め出さない）
+
+
+def _locked(wait: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"確認の誤りが続いたため、一時的に操作できません。{-(-wait // 60)} 分ほど待ってから再度お試しください",
+        headers={"Retry-After": str(wait)},
+    )
+
+
+async def begin_step_up(db: AsyncSession, user: User, ip: str | None, what: str) -> None:
+    """照合の前に試行を数える。上限を超えていたら照合せずに 429（ロックの開始は監査ログに残す）"""
+    wait, newly = await login_limit.begin_attempt(user.username, ip, per_ip=False)
+    if newly:
+        await record_now(db, make_log("auth.login_locked", user=user, ip=ip, success=False,
+                                      detail={"unit": f"本人の確認（{what}）", "minutes": settings.LOGIN_LOCK_MIN}))
+    if wait:
+        raise _locked(wait)
+
+
+async def confirm_password(db: AsyncSession, request: Request, user: User, password: str, *, action: str,
+                           what: str, status_code: int = 422, target: dict | None = None) -> None:
+    """いまのパスワードで本人を確かめる（回数の制限つき）。誤りは action の失敗として監査ログに残す。
+
+    呼ぶのは DB を変える前（誤りの記録で commit するため）
+    """
+    ip = client_ip(request)
+    await begin_step_up(db, user, ip, what)
+    if not await run_in_threadpool(verify_password, password, user.hashed_password):
+        await record_now(db, make_log(action, user=user, ip=ip, success=False, **(target or {}),
+                                      detail={"reason": "パスワード誤り", "step": what}))
+        raise HTTPException(status_code=status_code, detail="パスワードが正しくありません")
+    await login_limit.step_up_success(user.username, ip)
+
+
+async def _close_sessions_for_self(background: BackgroundTasks, user: User, reason: str, token: str) -> None:
+    """本人の操作で、開いているターミナル・Ping 監視を切る。
+
+    - ほかの端末（操作に使ったトークン以外）で開いたもの: 応答の**前**に 4401 で切る（後回しの処理が動かない経路でも残さない）
+    - 操作に使ったトークンで開いたもの: 応答（新しいトークン・予備コード）を返した**あと**に 4409 で切る。先に切ると、
+      同じブラウザの Ping 監視などの画面が、新しいトークンを受け取る前に古いトークンのままログイン画面へ移ってしまう
+    """
+    key = sessions.token_key(token)
+    await close_user_sessions(user.id, reason, exclude_key=key)
+    background.add_task(close_user_sessions, user.id, reason, token_key=key, refreshed_key=key)
+
+
+def _bump_token_version(user: User) -> None:
+    user.token_version = (user.token_version or 0) + 1
+
+
+def _self_target(user: User) -> dict:
+    return {"target_type": "user", "target_id": user.id, "target_name": user.username}
 
 
 @router.post("/mfa/setup", response_model=MfaSetup)
-async def mfa_setup(user: User = Depends(require_session), db: AsyncSession = Depends(get_db)):
-    """2 段階認証の設定を始める（新しい秘密鍵を作り、認証アプリで読み取る QR コードを返す。まだ有効にはしない）"""
+async def mfa_setup(
+    request: Request, payload: PasswordConfirm, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
+):
+    """2 段階認証の設定を始める（新しい秘密鍵を作り、認証アプリで読み取る QR コードを返す。まだ有効にはしない）。
+
+    パスワードを入れ直す（漏れたログインのトークンから、攻撃者が自分の認証アプリを登録して本人を締め出せないように。#29）
+    """
     if user.mfa_enabled:
         raise HTTPException(status_code=409, detail="2 段階認証は設定済みです（設定し直すときは、いったん解除してください）")
+    await confirm_password(db, request, user, payload.password, action="auth.mfa_enable", what="2 段階認証の設定",
+                           target=_self_target(user))
     secret = totp.new_secret()
     user.mfa_pending = secret
     await db.commit()
@@ -238,62 +312,94 @@ async def mfa_setup(user: User = Depends(require_session), db: AsyncSession = De
 
 @router.post("/mfa/enable", response_model=RecoveryCodes)
 async def mfa_enable(
-    request: Request, payload: MfaCode, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
+    request: Request, payload: MfaCode, background: BackgroundTasks, token: str = Depends(oauth2_scheme),
+    user: User = Depends(require_session), db: AsyncSession = Depends(get_db),
 ):
-    """認証アプリに表示されたコードで確認して、2 段階認証を有効にする。予備コードを返す（この 1 回だけ表示）"""
+    """認証アプリに表示されたコードで確認して、2 段階認証を有効にする。予備コードを返す（この 1 回だけ表示）。
+
+    それまでのログインのトークン（2 段階認証を通っていないもの）は使えなくする。自分には新しいトークンを返す
+    """
     if user.mfa_enabled:
         raise HTTPException(status_code=409, detail="2 段階認証は設定済みです")
     if not user.mfa_pending:
         raise HTTPException(status_code=409, detail="先に「設定を始める」で QR コードを表示してください")
+    # コードの照合も、ほかの本人の確認と同じ回数の制限の中で行う
+    ip = client_ip(request)
+    await begin_step_up(db, user, ip, "2 段階認証の有効化")
     step = totp.verify(user.mfa_pending, payload.code)
     if step is None:
+        await record_now(db, make_log("auth.mfa_enable", user=user, ip=ip, success=False, **_self_target(user),
+                                      detail={"reason": "確認コード誤り"}))
         raise HTTPException(status_code=422,
                             detail="確認コードが正しくありません（認証アプリの時刻がずれていないかも確認してください）")
+    await login_limit.step_up_success(user.username, ip)
     codes = totp.new_recovery_codes()
     user.mfa_secret, user.mfa_pending, user.mfa_last_step = user.mfa_pending, None, step
     user.mfa_enabled, user.mfa_enabled_at = True, utcnow()
     user.mfa_recovery = json.dumps([totp.hash_recovery(c) for c in codes])
-    db.add(make_log("auth.mfa_enable", user=user, ip=client_ip(request), target_type="user",
-                    target_id=user.id, target_name=user.username))
-    await db.commit()
+    _bump_token_version(user)
+    db.add(make_log("auth.mfa_enable", user=user, ip=client_ip(request), **_self_target(user)))
+    await db.commit()  # 失効（tv の +1）は応答の前に確定させる
+    await _close_sessions_for_self(background, user, "2 段階認証の設定", token)
     logger.info("2 段階認証を有効にしました user=%s", user.username)
-    return RecoveryCodes(recovery_codes=codes)
+    return RecoveryCodes(recovery_codes=codes,
+                         access_token=create_access_token(user.id, user.hashed_password, user.token_version))
 
 
 @router.post("/mfa/recovery-codes", response_model=RecoveryCodes)
 async def mfa_new_recovery_codes(
     request: Request, payload: MfaCode, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
 ):
-    """予備コードを作り直す（以前の予備コードは使えなくなる）。いまのワンタイムパスワードで確認する"""
+    """予備コードを作り直す（以前の予備コードは使えなくなる）。いまのワンタイムパスワードで確認する（回数の制限つき）"""
     if not user.mfa_enabled:
         raise HTTPException(status_code=409, detail="2 段階認証を設定していません")
+    ip = client_ip(request)
+    await begin_step_up(db, user, ip, "予備コードの作り直し")
     if _check_code(user, payload.code) != "totp":
-        await db.rollback()
+        await db.rollback()  # 予備コードを使用済みにした変更を戻す
+        await db.refresh(user)
+        await record_now(db, make_log("auth.mfa_recovery", user=user, ip=ip, success=False, **_self_target(user),
+                                      detail={"reason": "確認コード誤り"}))
         raise HTTPException(status_code=422, detail="確認コードが正しくありません（認証アプリのコードを入力してください）")
+    await login_limit.step_up_success(user.username, ip)
     codes = totp.new_recovery_codes()
     user.mfa_recovery = json.dumps([totp.hash_recovery(c) for c in codes])
-    db.add(make_log("auth.mfa_recovery", user=user, ip=client_ip(request), target_type="user",
-                    target_id=user.id, target_name=user.username))
+    db.add(make_log("auth.mfa_recovery", user=user, ip=ip, **_self_target(user)))
     await db.commit()
     return RecoveryCodes(recovery_codes=codes)
 
 
-@router.post("/mfa/disable", status_code=204)
+@router.post("/mfa/disable", response_model=Token)
 async def mfa_disable(
-    request: Request, payload: MfaDisable, user: User = Depends(require_session), db: AsyncSession = Depends(get_db)
+    request: Request, payload: MfaDisable, background: BackgroundTasks, token: str = Depends(oauth2_scheme),
+    user: User = Depends(require_session), db: AsyncSession = Depends(get_db),
 ):
-    """本人が 2 段階認証を解除する（パスワードと、ワンタイムパスワードか予備コードで確認する）"""
+    """本人が 2 段階認証を解除する（パスワードと、ワンタイムパスワードか予備コードで確認する。回数の制限つき）。
+
+    それまでのログインのトークンは使えなくする。自分には新しいトークンを返す
+    """
     if not user.mfa_enabled:
         raise HTTPException(status_code=409, detail="2 段階認証を設定していません")
+    ip = client_ip(request)
+    # パスワードとコードで 1 回と数える（どちらの誤りも同じ回数の制限の中）
+    await begin_step_up(db, user, ip, "2 段階認証の解除")
     if not await run_in_threadpool(verify_password, payload.password, user.hashed_password):
+        await record_now(db, make_log("auth.mfa_disable", user=user, ip=ip, success=False, **_self_target(user),
+                                      detail={"reason": "パスワード誤り"}))
         raise HTTPException(status_code=422, detail="パスワードが正しくありません")
     if _check_code(user, payload.code) is None:
         await db.rollback()
+        await db.refresh(user)
+        await record_now(db, make_log("auth.mfa_disable", user=user, ip=ip, success=False, **_self_target(user),
+                                      detail={"reason": "確認コード誤り"}))
         raise HTTPException(status_code=422, detail="確認コードが正しくありません")
+    await login_limit.step_up_success(user.username, ip)
     clear_mfa(user)
-    db.add(make_log("auth.mfa_disable", user=user, ip=client_ip(request), target_type="user",
-                    target_id=user.id, target_name=user.username))
+    _bump_token_version(user)
+    db.add(make_log("auth.mfa_disable", user=user, ip=ip, **_self_target(user)))
     await db.commit()
+    await _close_sessions_for_self(background, user, "2 段階認証の解除", token)
+    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
 
 
 def clear_mfa(user: User) -> None:
@@ -318,20 +424,82 @@ async def me(request: Request, user: User = Depends(get_current_user)):
 async def change_password(
     request: Request,
     payload: PasswordChange,
+    background: BackgroundTasks,
+    token: str = Depends(oauth2_scheme),
     user: User = Depends(require_session),
     db: AsyncSession = Depends(get_db),
 ):
-    if not await run_in_threadpool(verify_password, payload.current_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="現在のパスワードが正しくありません")
+    # 現在のパスワードの照合は、ログインと同じ回数の制限の中で行う（#28）
+    await confirm_password(db, request, user, payload.current_password, action="auth.password_change",
+                           what="パスワード変更", status_code=400, target=_self_target(user))
     user.hashed_password = await run_in_threadpool(hash_password, payload.new_password)
-    db.add(make_log("auth.password_change", user=user, ip=client_ip(request), target_type="user",
-                    target_id=user.id, target_name=user.username))
+    detail: dict = {}
+    if payload.revoke_api_tokens:
+        detail["revoked_tokens"] = await api_tokens.revoke_all(db, user.id)
+    db.add(make_log("auth.password_change", user=user, ip=client_ip(request), **_self_target(user), detail=detail or None))
     await db.commit()
-    # 変更前のパスワードで開いたターミナル（ほかの PC で開いたままのものを含む）も切る
-    closed = await close_user_sessions(user.id, "パスワードの変更")
-    logger.info("パスワード変更 user=%s terminals=%d", user.username, closed)
+    # 変更前のパスワードで開いたターミナル（ほかの PC で開いたままのものを含む）も切る（応答を返したあと）
+    await _close_sessions_for_self(background, user, "パスワードの変更", token)
+    logger.info("パスワード変更 user=%s tokens=%s", user.username, detail.get("revoked_tokens", "-"))
     # 変更前のトークンは無効になるため、新しいトークンを返す
     return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
+
+
+# ---------------------------------------------------------------- ログアウト（本人）
+
+
+class LogoutResult(BaseModel):
+    scope: Literal["session", "all"]  # session = この画面のログインだけ / all = すべての端末（Redis に書けなかったときも）
+    closed_terminals: int = 0
+    revoked_tokens: int = 0
+
+
+class LogoutAll(BaseModel):
+    revoke_api_tokens: bool = False  # API トークンも失効させる
+
+
+@router.post("/logout", response_model=LogoutResult)
+async def logout(
+    request: Request, token: str = Depends(oauth2_scheme), user: User = Depends(require_session),
+    db: AsyncSession = Depends(get_db),
+):
+    """このログイン（いま使っているトークン）を失効させる。ほかの端末のログインと API トークンはそのまま。
+
+    失効は Redis に期限つきで残す（services/sessions.py）。Redis に書けないときは、すべての端末からログアウトさせる
+    （token_version を上げる。ログアウトしたつもりのトークンが使えたままにならないように）。
+    このトークンで開いたターミナル・Ping 監視も切る
+    """
+    claims = decode_access_token(token) or {}
+    ip = client_ip(request)
+    if await sessions.revoke(token, claims.get("exp")):
+        closed = await close_user_sessions(user.id, "ログアウト", token_key=sessions.token_key(token))
+        db.add(make_log("auth.logout", user=user, ip=ip, detail={"scope": "この端末"}))
+        await db.commit()
+        return LogoutResult(scope="session", closed_terminals=closed)
+    _bump_token_version(user)
+    db.add(make_log("auth.logout", user=user, ip=ip, detail={"scope": "すべての端末（失効の記録に失敗したため）"}))
+    await db.commit()
+    closed = await close_user_sessions(user.id, "ログアウト")
+    return LogoutResult(scope="all", closed_terminals=closed)
+
+
+@router.post("/logout-all", response_model=LogoutResult)
+async def logout_all(
+    request: Request, payload: LogoutAll, user: User = Depends(require_session), db: AsyncSession = Depends(get_db),
+):
+    """すべての端末からログアウトする（token_version を上げる。この画面のログインも切れる）。
+
+    管理者の強制ログアウトと同じく、開いているターミナル・Ping 監視も切る。API トークンは選んだときだけ失効させる
+    """
+    _bump_token_version(user)
+    revoked = await api_tokens.revoke_all(db, user.id) if payload.revoke_api_tokens else 0
+    await db.commit()
+    closed = await close_user_sessions(user.id, "すべての端末からのログアウト")
+    db.add(make_log("auth.logout_all", user=user, ip=client_ip(request), **_self_target(user),
+                    detail={"closed_terminals": closed, "revoked_tokens": revoked}))
+    await db.commit()
+    logger.info("すべての端末からログアウト user=%s terminals=%d tokens=%d", user.username, closed, revoked)
+    return LogoutResult(scope="all", closed_terminals=closed, revoked_tokens=revoked)
 
 
 async def ensure_initial_admin(db: AsyncSession) -> None:

@@ -14,7 +14,7 @@ from app import worker
 from app.core.database import AsyncSessionLocal
 from app.main import app
 from app.services import config_service as cs
-from app.services import notify
+from app.services import mail, notify
 
 D = "https://discord.com/api/webhooks/{}/tok-{}"
 S = "https://hooks.slack.com/services/T000/B{}/xyz{}"
@@ -245,7 +245,7 @@ def test_send_webhook_retry_and_errors(monkeypatch):
             raise r
         return r
 
-    monkeypatch.setattr(notify, "_open_default", fake_urlopen)
+    monkeypatch.setattr(notify, "_open_no_redirect", fake_urlopen)
     url = "https://discord.com/api/webhooks/1/abc"
     assert notify.send_webhook("discord", url, {"content": "日本語"}) is None
     assert len(calls) == 2 and calls[0]["content"] == "日本語"
@@ -517,8 +517,8 @@ def test_teams_send_success_and_headers(monkeypatch):
         return Resp(b"")
 
     monkeypatch.setattr(notify, "_open_no_redirect", fake_open)
-    # Discord・Slack は _open_default（リダイレクトをたどる。Teams の経路を通らない）
-    monkeypatch.setattr(notify, "_open_default", lambda *a, **k: pytest.fail("Teams は _open_default を使わない"))
+    # リダイレクトをたどる経路は無い（Discord・Slack も _open_no_redirect。#32）
+    assert not hasattr(notify, "_open_default")
     payload = notify.build_test_payload("teams", "ops")
     assert notify.send_webhook("teams", TEAMS_OK, payload) is None  # 202 は成功
     url, method, headers, body, timeout = seen[0]
@@ -610,11 +610,6 @@ def test_teams_does_not_follow_redirects():
         with pytest.raises(urllib.error.HTTPError) as e:
             notify._open_no_redirect(req, 5)
         assert e.value.code == 302 and hits == [("POST", "/first")]  # /second へは行かない
-        # 比べ: Discord・Slack の経路（_open_default）は 302 をたどる
-        hits.clear()
-        with notify._open_default(urllib.request.Request(f"{base}/first", data=b"{}", method="POST"), timeout=5) as r:
-            assert r.status == 202
-        assert hits == [("POST", "/first"), ("GET", "/second")]
     finally:
         srv.shutdown()
         srv.server_close()
@@ -739,12 +734,7 @@ def test_teams_group_dedupe_and_failure_keeps_url_out_of_last_error(ctx, monkeyp
         def boom(req, timeout):
             raise urllib.error.HTTPError(hook, 500, "x", {}, io.BytesIO(f"{hook} sig=SIGEXAMPLE".encode()))
 
-        monkeypatch.setattr(notify, "_open_no_redirect", boom)
-
-        def no_net(*a, **k):  # 共有 DB に残った Discord / Slack の設定で、外へ送らない
-            raise urllib.error.URLError("blocked in test")
-
-        monkeypatch.setattr(notify, "_open_default", no_net)
+        monkeypatch.setattr(notify, "_open_no_redirect", boom)  # 共有 DB に残った Discord / Slack の設定も外へ送らない
         r = c.post(f"/api/notifications/groups/{gid}/test", headers=admin)
         assert r.status_code == 200 and r.json()["results"]["teams"].startswith("HTTP 500")
         assert "SIGEXAMPLE" not in r.text and "WFIDEXAMPLE" not in r.text
@@ -848,7 +838,7 @@ def test_teams_text_breaks_markdown_links():
     for src in (LINKS, "![x](https://evil.example/a.png)", "[[a](u1)](u2)", "[a](b)[c](d)[e](f)", "](](](", "]]((", "a](b",
                 "[a](\n)", "[x]\n(https://evil.example)"):
         assert "](" not in t(src), src
-    assert t(LINKS) == "[再ログインはこちら]\u200b(https://evil.example/login)"  # 見た目の文字は残る
+    assert t(LINKS) == "[再ログインはこちら]\u200b(https\u200b://evil.example/login)"  # 見た目の文字は残る
     assert t("a\nb") == "a\n\nb"
     # カードの題・項目の名前と値・本文のすべて
     card = notify._message("teams", LINKS, [(LINKS, LINKS)], "https://ncm.example.local/x", "開く", 0xEF4444, LINKS)
@@ -875,13 +865,29 @@ LEGIT_SLACK_LINK = re.compile(r"<https://ncm\.example\.local[^>|]*\|[^>]*>")  # 
 
 
 def test_break_md_and_slack_escape():
-    assert notify.break_md(LINKS) == "[再ログインはこちら]​(https://evil.example/login)"
+    assert notify.break_md(LINKS) == "[再ログインはこちら]\u200b(https\u200b://evil.example/login)"
+    # #32: 文字列の中の URL も自動でリンクにならないよう崩す（Ping の名前・機器のエラー文などに入れた偽のログイン画面）
+    assert notify.break_md("詳細は https://evil.example/login へ") == "詳細は https\u200b://evil.example/login へ"
+    assert notify.break_md("www.evil.example") == "www\u200b.evil.example"
+    assert notify.slack_escape("HTTPS://evil.example") == "HTTPS\u200b://evil.example"
+    assert notify.break_md("12:30 // a:b") == "12:30 // a:b"  # URL でないものは変えない
+    # M1: 日本語・数字・_ のすぐ後ろ、全角の「：／／」、崩した書き方（hxxps）、大文字、前後の記号でも崩す
+    for src in ("機器https://evil.example", "1https://evil.example/login", "_https://evil.example", "名前www.evil.example",
+                "https：／／evil.example", "hxxps://evil.example", "HTTPS://EVIL.EXAMPLE", "WWW.EVIL.EXAMPLE",
+                "(https://evil.example)", "<https://evil.example>", "「https://evil.example」"):
+        for f in (notify.break_md, notify.slack_escape, mail.defang_links):
+            out = f(src)
+            assert not re.search(r"[:：][/／]{2}", out.replace("\u200b:", "").replace("\u200b：", "")), (src, out)
+            assert not re.search(r"(?i)www[.．]", out), (src, out)
+            want = src if f is not notify.slack_escape else src.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            assert out.replace("\u200b", "") == want, (src, out)  # 見た目の文字は変わらない
+        assert notify.break_md(notify.break_md(src)) == notify.break_md(src)  # 2 回かけても同じ
     assert notify.break_md("a\nb") == "a\nb" and notify.break_md("") == ""
     for src in ("](](](", "]]((", "[[a](u1)](u2)"):
         assert "](" not in notify.break_md(src), src
     assert notify.break_md(notify.break_md(LINKS)) == notify.break_md(LINKS)  # 2 回かけても同じ
     esc = notify.slack_escape
-    assert esc("<!channel> <@U1|x> <https://e.example|l>") == "&lt;!channel&gt; &lt;@U1|x&gt; &lt;https://e.example|l&gt;"
+    assert esc("<!channel> <@U1|x> <https://e.example|l>") == "&lt;!channel&gt; &lt;@U1|x&gt; &lt;https\u200b://e.example|l&gt;"
     assert esc("a & b") == "a &amp; b"
     assert esc("&amp;") == "&amp;amp;"  # 入力にすでにある &amp; は、そのままの文字として見えるように置き換える
     assert esc("&lt;") == "&amp;lt;" and esc("あ→い ＜ ＞") == "あ→い ＜ ＞"
@@ -1011,10 +1017,16 @@ def test_every_event_neutralizes_links_and_mentions_for_discord_and_slack(ctx, m
         slack = {n: next(p for k, p in items if k == "slack")["text"] for n, items in out.items()}
         assert "&lt;!channel&gt;" in slack["change"] and "&amp;amp;" in slack["change"]
         assert "&lt;!channel&gt;" in slack["f1"] and "&lt;!channel&gt;" in slack["ping"] and "&lt;!channel&gt;" in slack["profile"]
-        assert "https://evil.example/login" in slack["inv"]  # リンクの URL の文字は残る（働かないだけ）
+        assert "https\u200b://evil.example/login" in slack["inv"]  # リンクの URL の文字は残る（働かないだけ）
         discord = {n: next(p for k, p in items if k == "discord") for n, items in out.items()}
         flat = json.dumps(discord["f1"], ensure_ascii=False)
-        assert "[再ログイン]​(https://evil.example/login)" in flat  # 見た目の文字は残り、リンクにならない
+        assert "[再ログイン]\u200b(https\u200b://evil.example/login)" in flat  # 見た目の文字は残り、リンクにならない
+        # 正当なリンク以外に、そのままの URL が残っていない（#32）
+        for name, items in out.items():
+            for kind, payload in items:
+                text = json.dumps(payload, ensure_ascii=False)
+                rest = (LEGIT_LINK if kind == "discord" else LEGIT_SLACK_LINK).sub("", text)
+                assert "https://evil" not in rest and "www.evil" not in rest, (name, kind)
         # 自分で組み立てる正当なリンクは、どのイベントでも壊れていない
         for name, p in discord.items():
             assert "](https://ncm.example.local" in p["embeds"][0]["description"], name

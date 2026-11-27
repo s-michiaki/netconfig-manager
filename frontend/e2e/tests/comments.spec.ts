@@ -21,6 +21,7 @@ test("オペレーターが世代にコメントを書き、閲覧者は世代�
   await page.getByRole("button", { name: "差分を表示" }).click();
   await expect(page.locator(".hist-comment-note")).toContainText(memo);
   await page.getByRole("button", { name: "ログアウト" }).click();
+  await expect(page).toHaveURL(/\/login/); // サーバー側の失効（/auth/logout）を待ってから移る
 
   // 閲覧者: コメントは読めるが、書くボタンは無い。ダッシュボードの「直近の変更」にも出る
   await login(page, USERS.viewer);
@@ -35,6 +36,7 @@ test("オペレーターが世代にコメントを書き、閲覧者は世代�
   await expect(page.locator(".hist-comment").first()).toContainText(memo);
   await expect(page.getByRole("button", { name: "メモ" })).toHaveCount(0);
   await page.getByRole("button", { name: "ログアウト" }).click();
+  await expect(page).toHaveURL(/\/login/); // サーバー側の失効（/auth/logout）を待ってから移る
 
   // 後始末: 書いた本人が削除する
   await login(page, USERS.op);

@@ -13,7 +13,15 @@ export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
 export const setToken = (token: string) => localStorage.setItem(TOKEN_KEY, token);
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 
-export function redirectToLogin() {
+/**
+ * ログイン画面へ移る（トークンを消す）。
+ * usedToken: 失敗した要求・接続に使ったトークン。いまのトークンがそれと違えば、ほかのタブ・同じ画面の操作
+ * （パスワード変更・2 段階認証の設定など）で新しいトークンに差し替わった後なので、消さずに何もしない
+ * （古いトークンの 401 で、受け取ったばかりの新しいトークンを消して全タブをログアウトさせないため）
+ */
+export function redirectToLogin(usedToken?: string | null) {
+  const now = getToken();
+  if (usedToken && now && usedToken !== now) return;
   clearToken();
   if (window.location.pathname !== "/login") {
     const next = encodeURIComponent(window.location.pathname + window.location.search);
@@ -33,7 +41,8 @@ api.interceptors.response.use(
   (r) => r,
   (err: AxiosError) => {
     if (err.response?.status === 401 && !err.config?.url?.startsWith("/auth/token") && !err.config?.url?.startsWith("/auth/mfa/verify")) {
-      redirectToLogin();
+      const auth = String(err.config?.headers?.Authorization ?? "");
+      redirectToLogin(auth.startsWith("Bearer ") ? auth.slice(7) : null);
     }
     return Promise.reject(err);
   }

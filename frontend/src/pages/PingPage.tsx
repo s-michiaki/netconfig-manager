@@ -404,7 +404,19 @@ export default function PingPage() {
     ws.onclose = (e) => {
       if (wsRef.current !== ws) return;
       wsRef.current = null;
-      if (e.code === 4401) return redirectToLogin();
+      // 4409: 本人の操作（パスワード変更・2 段階認証の設定と解除）でトークンが新しくなった。
+      // 4401 でも、いまのトークンが接続に使ったものと違えば、差し替え済み（ほかのタブの操作など）。どちらもつなぎ直す
+      const current = getToken();
+      if (e.code === 4409 || (e.code === 4401 && current && current !== token)) {
+        if (runningRef.current) {
+          setConnState("reconnecting");
+          reconnectTimer.current = window.setTimeout(connect, 300);
+        } else {
+          setConnState("idle");
+        }
+        return;
+      }
+      if (e.code === 4401) return redirectToLogin(token);
       if (e.code === 4403) {
         setError("Ping監視を利用する権限がありません");
         runningRef.current = false;

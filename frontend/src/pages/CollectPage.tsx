@@ -69,10 +69,10 @@ export default function CollectPage() {
   const shown = devices.filter(inGroup);
 
   const toggleAll = (checked: boolean) => {
-    // 絞り込み中は表示している機器だけを対象にする
+    // 絞り込み中は表示している機器だけを対象にする。無効な機器は収集しない（API も 409 で断る）ので選ばない
     setSelected((prev) => {
       const next = new Set(prev);
-      shown.forEach((d) => (checked ? next.add(d.id) : next.delete(d.id)));
+      shown.filter((d) => d.is_active).forEach((d) => (checked ? next.add(d.id) : next.delete(d.id)));
       return next;
     });
   };
@@ -129,7 +129,7 @@ export default function CollectPage() {
 
   const startCollect = async () => {
     if (selected.size === 0) return;
-    const targets = shown.filter((d) => selected.has(d.id)); // 絞り込み中は表示している機器だけ
+    const targets = shown.filter((d) => d.is_active && selected.has(d.id)); // 絞り込み中は表示している機器だけ
     setRunning(true);
     setError("");
     setJobs(targets.map((device) => ({ device, state: "queued" })));
@@ -156,7 +156,7 @@ export default function CollectPage() {
     <div className="page">
       <div className="page-header">
         <span className="page-title">コンフィグ収集</span>
-        <button className="btn btn-primary" onClick={startCollect} disabled={running || !shown.some((d) => selected.has(d.id))}>
+        <button className="btn btn-primary" onClick={startCollect} disabled={running || !shown.some((d) => d.is_active && selected.has(d.id))}>
           {running ? "収集中..." : "▶ 収集開始"}
         </button>
       </div>
@@ -194,7 +194,7 @@ export default function CollectPage() {
                   <th>
                     <input
                       type="checkbox"
-                      checked={shown.length > 0 && shown.every((d) => selected.has(d.id))}
+                      checked={shown.some((d) => d.is_active) && shown.filter((d) => d.is_active).every((d) => selected.has(d.id))}
                       onChange={(e) => toggleAll(e.target.checked)}
                       disabled={running}
                     />
@@ -210,9 +210,10 @@ export default function CollectPage() {
                     <td>
                       <input
                         type="checkbox"
-                        checked={selected.has(d.id)}
+                        checked={d.is_active && selected.has(d.id)}
                         onChange={() => toggleDevice(d.id)}
-                        disabled={running}
+                        disabled={running || !d.is_active}
+                        title={d.is_active ? undefined : "無効な機器は収集しません（機器の設定で有効にしてください）"}
                       />
                     </td>
                     <td style={{ fontWeight: 500 }}>{d.name}{d.group_name && <span className="topo-muted topo-small"> · {d.group_name}</span>}</td>

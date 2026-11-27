@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     LOGIN_LOCK_MIN: int = 15  # 上限に達したときにログインを止める時間（分）
     # API トークン（app/services/api_tokens.py）。false にすると、発行も、発行済みのトークンでの API の利用もできない
     API_TOKENS_ENABLED: bool = True
+    # API の一覧（/docs）と OpenAPI のスキーマ（/openapi.json）を backend で出すか。既定は出さない（ログインなしで見られるため）。
+    # 開発のときだけ true にする（本番の nginx は /docs を中継しない）。本番で一覧を見るには python -m app.tools.api_list
+    DOCS_ENABLED: bool = False
     API_TOKEN_MAX_DAYS: int = Field(default=365, ge=1, le=365)  # 発行するときに選べる期限の上限（日）
     # コンプライアンスの正規表現の照合にかけられる時間（1回の評価＝ルール × 機器 あたりの合計秒数。ReDoS 対策）
     COMPLIANCE_REGEX_TIMEOUT: float = 2.0
@@ -110,6 +113,9 @@ class Settings(BaseSettings):
     COMMAND_RUN_ENABLED: bool = True
     COMMAND_RUN_MAX_DEVICES: int = Field(default=100, ge=1, le=1000)  # 1 回の実行で対象にできる機器の数
     COMMAND_RUN_CONCURRENCY: int = Field(default=10, ge=1, le=100)  # 1 回の実行の中で同時に接続する機器の数
+    # すべての実行を合わせて、同時に機器へ接続するコマンド実行の数（worker の枠）。worker の並列数（compose の -c 4）より
+    # 小さくし、Ping 監視・スケジュールの収集・通知が動ける枠を残す（既定 2 で、残り 2）。超えた分は空くまで待つ
+    COMMAND_RUN_WORKER_SLOTS: int = Field(default=2, ge=1, le=100)
     COMMAND_RUN_MAX_OUTPUT: int = Field(default=200_000, ge=1000, le=5_000_000)  # 1 コマンドの出力の上限（文字数）
     COMMAND_RUN_MAX_RUN_OUTPUT: int = Field(default=20_000_000, ge=10_000, le=500_000_000)  # 1 回の実行の出力の合計（文字）
     # 終わっていない実行（待機中・実行中）の数の上限。1 人あたりと全体。超えたら新しい実行を 429 で断る

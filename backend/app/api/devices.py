@@ -76,7 +76,7 @@ Username = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 Secret = Annotated[str, StringConstraints(max_length=100)]
 Port = Annotated[int, Field(ge=1, le=65535)]
 PrivateKey = Annotated[str, StringConstraints(max_length=MAX_PRIVATE_KEY_LENGTH)]
-# 応答待ち時間（秒）。収集ロックの保持時間（15分）に収まる範囲
+# 応答待ち時間（秒）。worker のタスクの時間の上限（worker.py の MAX_READ_TIMEOUT）はこの上限で計算している
 ReadTimeoutSec = Annotated[int, Field(ge=10, le=600)]
 
 
@@ -610,8 +610,11 @@ async def delete_device(device_id: str, db: AsyncSession = Depends(get_db), audi
 
 @router.post("/{device_id}/collect", dependencies=[Depends(require(Perm.COLLECT))])
 async def trigger_collect(device_id: str, db: AsyncSession = Depends(get_db), audit: Audit = Depends(get_audit)):
-    """単一デバイスのコンフィグ収集をトリガー"""
+    """単一デバイスのコンフィグ収集をトリガー（無効な機器は、一括・グループ・スケジュールと同じく収集しない）"""
     device = await _get_or_404(db, device_id)
+    if not device.is_active:
+        raise HTTPException(status_code=409,
+                            detail="無効な機器は収集できません（機器の設定で「有効」にしてから収集してください）")
     await run_in_threadpool(mark_collect_queued, device_id, "manual")
     task = collect_device_config.delay(device_id, "manual", audit.user.username)
     audit("collect.run", target_type="device", target_id=device.id, target_name=device.name,

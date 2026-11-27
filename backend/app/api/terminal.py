@@ -31,14 +31,17 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.permissions import Perm, has_permission
 from app.core.ssh_hostkeys import describe_ssh_error, load_known_hosts
+from app.core.ssh_hostkeys import take_events as take_hostkey_events
 from app.core.ssh_jump import JumpHostError, connect_jump, open_tunnel
 from app.core.ssh_keys import PrivateKeyError, load_private_key
 from app.core.timeutil import utcnow
 from app.models.audit import TerminalSession
 from app.models.user import User
+from app.services import sessions
 from app.services.audit import TerminalRecorder, make_log
 from app.services.config_service import DeviceConnectionInfo
 from app.services.connection import load_connection_info
+from app.services.hostkeys import record_events as record_hostkey_events
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,6 +50,9 @@ AUTH_TIMEOUT_SEC = 10
 WS_CLOSE_UNAUTHORIZED = 4401
 WS_CLOSE_FORBIDDEN = 4403
 WS_CLOSE_NOT_FOUND = 4404
+# 本人の操作（パスワード変更・2 段階認証の設定と解除）で、その操作に使ったトークンで開いた接続を切るときのコード。
+# 画面には新しいトークンを返しているので、画面側はログイン画面へ移らずに（トークンを消さずに）つなぎ直せる
+WS_CLOSE_TOKEN_REFRESHED = 4409
 MIN_SIZE, MAX_SIZE = 1, 1000
 
 # 切断後の後片付けタスク（途中で破棄されないよう参照を保持する）
@@ -57,30 +63,52 @@ _cleanup_tasks: set[asyncio.Task] = set()
 class _LiveTerminal:
     websocket: WebSocket
     revoked: str | None = None  # 管理者の操作・パスワードの変更などで切ったときの理由（記録の終了理由に使う）
+    kind: str = "terminal"  # terminal / ping（Ping 監視の WebSocket も同じ表で切る。api/ping.py）
+    token_key: str | None = None  # 接続に使ったログインのトークン（sessions.token_key）。本人のログアウトでその接続だけ切る
 
 
-# 接続中のターミナル（ユーザー ID ごと）。管理者が強制ログアウト・無効化・パスワードのリセット・削除・
-# ターミナルの権限が無いロールへの変更をしたとき、本人がパスワードを変更したときに切るため。
+# 接続中のターミナル・Ping 監視（ユーザー ID ごと）。管理者が強制ログアウト・無効化・パスワードのリセット・削除・
+# ターミナルの権限が無いロールへの変更をしたとき、本人がパスワードの変更・2 段階認証の設定と解除・ログアウトをしたときに切るため。
 # プロセス内の記録なので、API を 1 プロセスで動かしている場合（既定の構成）だけ有効。
 # 複数のプロセス（uvicorn --workers など）にすると、ほかのプロセスが受け持つ接続は切れない
 _live: dict[str, set[_LiveTerminal]] = {}
+ALL_KINDS = ("terminal", "ping")
+# 本人の操作で切ったときの理由（記録の終了理由は「本人の○○で切断」。ほかは「管理者が切断（○○）」）
+SELF_REASONS = {"パスワードの変更": "パスワード変更", "2 段階認証の設定": "2 段階認証の設定",
+                "2 段階認証の解除": "2 段階認証の解除", "ログアウト": "ログアウト",
+                "すべての端末からのログアウト": "すべての端末からのログアウト"}
 
 
-async def close_user_sessions(user_id: str, reason: str) -> int:
-    """そのユーザーの接続中のターミナルを切る。切った数を返す（SSH の切断と記録は各接続の後片付けで行う）"""
-    targets = list(_live.get(user_id, ()))
+async def close_user_sessions(user_id: str, reason: str, kinds: tuple[str, ...] = ALL_KINDS,
+                              token_key: str | None = None, refreshed_key: str | None = None,
+                              exclude_key: str | None = None) -> int:
+    """そのユーザーの接続中のターミナル（と Ping 監視）を切る。切ったターミナルの数を返す
+
+    SSH の切断と記録は各接続の後片付けで行う。
+
+    kinds: 切る種類（ロールの変更でターミナルの権限が無くなったときは terminal だけ）
+    token_key: 指定すると、そのトークンで開いた接続だけ（本人のログアウト）
+    refreshed_key: このトークンで開いた接続は WS_CLOSE_TOKEN_REFRESHED で切る（本人の操作で新しいトークンを返したとき。
+                   ほかのトークンで開いたもの＝ほかの端末は今までどおり 4401）
+    exclude_key: このトークンで開いた接続は切らない（本人の操作で、ほかの端末の分だけを応答の前に切るとき）
+    """
+    targets = [t for t in _live.get(user_id, ()) if t.kind in kinds and (token_key is None or t.token_key == token_key)
+               and (exclude_key is None or t.token_key != exclude_key)]
     for t in targets:
         t.revoked = reason
         try:
-            await t.websocket.send_text(f"\r\n[{reason}のため、ターミナルを切断しました]\r\n")
-            await t.websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="revoked")
+            if t.kind == "terminal":
+                await t.websocket.send_text(f"\r\n[{reason}のため、ターミナルを切断しました]\r\n")
+            refreshed = refreshed_key is not None and t.token_key == refreshed_key
+            await t.websocket.close(code=WS_CLOSE_TOKEN_REFRESHED if refreshed else WS_CLOSE_UNAUTHORIZED,
+                                    reason="refreshed" if refreshed else "revoked")
         except Exception:  # noqa: BLE001 - すでに切れている
             pass
-    return len(targets)
+    return sum(1 for t in targets if t.kind == "terminal")
 
 
-def _register(user_id: str, websocket: WebSocket) -> _LiveTerminal:
-    live = _LiveTerminal(websocket)
+def _register(user_id: str, websocket: WebSocket, kind: str = "terminal", token: str | None = None) -> _LiveTerminal:
+    live = _LiveTerminal(websocket, kind=kind, token_key=sessions.token_key(token) if token else None)
     _live.setdefault(user_id, set()).add(live)
     return live
 
@@ -118,7 +146,12 @@ class SSHTerminal:
             self.jump_client = connect_jump(self.device.jump)
             sock = open_tunnel(self.jump_client, self.device.jump.name, self.device.hostname, self.device.port)
         self.ssh = paramiko.SSHClient()
-        load_known_hosts(self.ssh)
+        jump = self.device.jump
+        policy = load_known_hosts(
+            self.ssh, jump_id=jump.scope if jump else None, host=self.device.hostname, port=self.device.port,
+            context={"target": "device", "device_id": self.device.id, "device_name": self.device.name,
+                     "via": jump.name if jump else None},
+        )
         self.ssh.connect(
             hostname=self.device.hostname,
             port=self.device.port,
@@ -132,6 +165,7 @@ class SSHTerminal:
             allow_agent=False,
             sock=sock,
         )
+        policy.after_connect(self.ssh)
         self.channel = self.ssh.get_transport().open_session()
         self.channel.get_pty(term="xterm-256color", width=cols, height=rows)
         self.channel.invoke_shell()
@@ -173,6 +207,21 @@ async def _save(*objs) -> None:
         logger.exception("ターミナルの監査ログを保存できませんでした")
 
 
+async def _save_hostkeys(device: DeviceConnectionInfo, user: User, ip: str | None) -> None:
+    """この接続で TOFU により新しく登録したホスト鍵（機器・踏み台）を、アクティビティ・監査ログに残す"""
+    jump_id = device.jump.id if device.jump else None
+    events = take_hostkey_events(lambda e: e.get("device_id") == device.id
+                                 or (jump_id is not None and e.get("jump_id") == jump_id))
+    if not events:
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            record_hostkey_events(db, events, actor=user.username, user=user, ip=ip)
+            await db.commit()
+    except Exception:  # noqa: BLE001 - 記録の失敗でターミナルを止めない
+        logger.exception("新しいホスト鍵の記録に失敗しました")
+
+
 @router.websocket("/ws/{device_id}")
 async def terminal_ws(websocket: WebSocket, device_id: str):
     await websocket.accept()
@@ -194,7 +243,7 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     cols = _clamp_size(first.get("cols"), 120)
     rows = _clamp_size(first.get("rows"), 40)
     # 以降は管理者の強制ログアウトなどで切れるよう登録しておく（解除は _session の終わり）
-    live = _register(user.id, websocket)
+    live = _register(user.id, websocket, "terminal", str(first.get("token", "")))
     try:
         await _session(websocket, device_id, user, str(first.get("token", "")), cols, rows, live)
     finally:
@@ -219,6 +268,7 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
     try:
         await loop.run_in_executor(None, session.connect, cols, rows)
     except Exception as e:  # noqa: BLE001
+        await _save_hostkeys(device, user, ip)  # 鍵を登録してから認証などで失敗した場合も残す
         logger.warning("SSH接続失敗 user=%s device=%s: %r", user.username, device.name, e)
         await loop.run_in_executor(None, session.close)
         if isinstance(e, JumpHostError):
@@ -233,6 +283,7 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             await websocket.send_text(f"\r\nSSH接続に失敗しました: {reason}\r\n")
             await websocket.close()
         return
+    await _save_hostkeys(device, user, ip)
     # 接続を待つ間に強制ログアウト・ロールの変更などがあった場合（認証の照合と登録の間に起きた場合も含め、ここで確かめ直す）
     now_user = None if live.revoked is not None else await authenticate_token(token)
     if now_user is None or not has_permission(now_user.role, Perm.TERMINAL):
@@ -322,7 +373,8 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             ended = utcnow()
             record.ended_at = ended
             record.end_reason = (
-                ("本人のパスワード変更で切断" if live.revoked == "パスワードの変更" else f"管理者が切断（{live.revoked}）")
+                (f"本人の{SELF_REASONS[live.revoked]}で切断" if live.revoked in SELF_REASONS
+                 else f"管理者が切断（{live.revoked}）")
                 if live.revoked
                 else "機器側で終了" if remote_closed.is_set() else "利用者が切断"
             )

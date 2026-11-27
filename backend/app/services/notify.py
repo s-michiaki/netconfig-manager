@@ -56,7 +56,6 @@ WEBHOOK_RE = {
 TIMEOUT_SEC = 10
 MAX_RETRY_WAIT_SEC = 10
 TRIGGER_LABELS = {"manual": "手動収集", "schedule": "スケジュール収集"}
-EVENTS = ("change", "violation", "failure", "system")
 EVENT_LABELS = {"change": "変更通知", "violation": "違反の通知", "failure": "収集失敗の通知", "system": "システムの通知",
                 "inventory": "機器情報の変化の通知", "ping": "Ping監視の通知", "profile": "認証情報プロファイルの通知",
                 "drift": "基準からのずれの通知", "unsaved": "保存し忘れの通知", "report": "定期レポート",
@@ -220,13 +219,14 @@ async def resolve_destinations(db: AsyncSession, device_group_id: str | None,
 
 def break_md(s: str) -> str:
     """Markdown のリンク・画像 `[x](url)` を偽のリンクとして出させない（`](` のあいだにゼロ幅スペースを入れる）。
+    文字列の中の URL（https://…・www.…）も、自動でリンクにならないよう崩す（mail.defang_links。#32）。
 
     機器名・ルール名・Ping の名前・機器情報の値・エラー文などは利用者・機器が決められる。
     正当なリンク（画面への URL）は呼び出し側が自分で組み立てるので、この関数は通さない
     """
     while "](" in s:  # 1 回の置換で `](` が残らないようにする（連続・入れ子でも）
         s = s.replace("](", "]\u200b(")
-    return s
+    return mail.defang_links(s)
 
 
 def slack_escape(s: str) -> str:
@@ -235,7 +235,8 @@ def slack_escape(s: str) -> str:
     `&` を先に置き換える（二重には置き換わらない）。入力にすでに `&amp;` があれば `&amp;amp;` になり、
     画面には入力どおりの `&amp;` の文字が見える（これが正しい）
     """
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 文字列の中の URL も、自動でリンクにならないよう崩す（mail.defang_links。#32）
+    return mail.defang_links(s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
 def _discord(payload: dict) -> dict:
@@ -321,13 +322,9 @@ def build_test_payload(kind: str, owner_label: str) -> dict:
 # 外へ出る通信は core/outbound.py の opener を使う（OUTBOUND_PROXY・OUTBOUND_CA_FILE。環境変数のプロキシは見ない）
 
 
-def _open_default(req: urllib.request.Request, timeout: float):
-    """Discord・Slack（リダイレクトは urllib の既定どおりたどる）"""
-    return outbound.urlopen(req, timeout=timeout)
-
-
 def _open_no_redirect(req: urllib.request.Request, timeout: float):
-    """Teams: リダイレクトをたどらない（宛先は公式のホストに限るので、別のホストへ転送されないようにする）"""
+    """リダイレクトをたどらない（Discord・Slack・Teams とも。宛先は公式のホストに限るので、別のホスト・http:// へ
+    転送されないようにする。#32）。Discord・Slack の Webhook は 30x を返さず、直接 2xx / 4xx で答える（2026-11 に確認）"""
     return outbound.urlopen(req, timeout=timeout, redirect=False)
 
 
@@ -354,7 +351,7 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
     if not valid_webhook(kind, url):
         return "Webhook URL の形式が正しくありません"
     body = json.dumps(payload, ensure_ascii=False).encode()
-    opener = _open_no_redirect if kind == "teams" else _open_default
+    opener = _open_no_redirect
     for attempt in range(2):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Content-Type": "application/json", "User-Agent": "NetConfig-Manager",
@@ -369,13 +366,13 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
                 time.sleep(min(wait, MAX_RETRY_WAIT_SEC))
                 continue
             detail = e.read()[:200].decode(errors="replace")
-            if kind == "teams":
+            if 300 <= e.code < 400:
+                # たどらない（転送先は載せない）
+                return f"リダイレクトされました（HTTP {e.code}）。Webhook の URL を確認してください"
+            if kind == "teams" and e.code in (400, 401, 403, 404):
                 # 相手の応答の本文は載せない（URL などの秘密が入りうるため）。コードと案内だけ
-                if 300 <= e.code < 400:
-                    return f"リダイレクトされました（HTTP {e.code}）。Webhook の URL を確認してください"
-                if e.code in (400, 401, 403, 404):
-                    return (f"Webhook が無効です（HTTP {e.code}。ワークフローが削除・オフになっていないか、"
-                            "URL が再発行されていないか確認してください）")
+                return (f"Webhook が無効です（HTTP {e.code}。ワークフローが削除・オフになっていないか、"
+                        "URL が再発行されていないか確認してください）")
             if e.code in (401, 403, 404):
                 return f"Webhook が無効です（HTTP {e.code}。削除・再発行されていないか確認してください）"
             if kind == "teams":
@@ -388,10 +385,33 @@ def send_webhook(kind: str, url: str, payload: dict) -> str | None:
 
 
 def _send(kind: str, url: str, payload: dict, cfg: "mail.MailConfig | None") -> str | None:
-    """1 か所へ送る（スレッドで実行）。メールは mail.send_notification、ほかは Webhook"""
-    if kind == "email":
-        return mail.send_notification(cfg or mail.MailConfig(), url, payload)
-    return send_webhook(kind, url, payload)
+    """1 か所へ送る（スレッドで実行）。メールは mail.send_notification、ほかは Webhook。
+
+    例外は外へ出さず、失敗の説明にする（1 つの経路の想定外の例外で、その回のほかの経路の送信と記録を止めない。#31）
+    """
+    try:
+        if kind == "email":
+            return mail.send_notification(cfg or mail.MailConfig(), url, payload)
+        return send_webhook(kind, url, payload)
+    except Exception as e:  # noqa: BLE001
+        # 例外の文・トレースバック（Webhook の URL などが入りうる）はログにも出さない。種類だけ
+        logger.error("%s への送信で想定外のエラー（%s）", KIND_LABELS.get(kind, kind), type(e).__name__)
+        # 例外の文は載せない（URL などの秘密が入りうる）。種類だけ
+        return f"送信できません（想定外のエラー: {type(e).__name__}。サーバーのログを確認してください）"
+
+
+async def send_all(targets: list[tuple[str, str, dict]], cfg: "mail.MailConfig | None") -> list[str | None]:
+    """まとめて送る（[(種類, 宛先, 中身)] → [エラー or None]）。1 つが例外を出しても、ほかの結果は失わない"""
+    results = await asyncio.gather(*(asyncio.to_thread(_send, k, url, payload, cfg) for k, url, payload in targets),
+                                   return_exceptions=True)
+    out: list[str | None] = []
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.error("通知の送信で想定外のエラー（%s）", type(r).__name__)  # 文・トレースバックは出さない
+            out.append(f"送信できません（想定外のエラー: {type(r).__name__}。サーバーのログを確認してください）")
+        else:
+            out.append(r)
+    return out
 
 
 def _retry_after(e: urllib.error.HTTPError) -> float:
@@ -407,7 +427,7 @@ async def _deliver(db: AsyncSession, event: str, sends: list[tuple[Destination, 
     if not sends:
         return {"sent": 0, "failed": 0}
     cfg = await mail.load_config(db) if any(d.kind == "email" for d, _, _ in sends) else None
-    results = await asyncio.gather(*(asyncio.to_thread(_send, d.kind, d.url, payload, cfg) for d, payload, _ in sends))
+    results = await send_all([(d.kind, d.url, payload) for d, payload, _ in sends], cfg)
     await mail.record_last([err for (d, _, _), err in zip(sends, results, strict=True) if d.kind == "email"])
     now = utcnow()
     errors: dict[str, list[str]] = {}
@@ -959,8 +979,6 @@ async def send_test(s: NotificationSetting, owner_label: str,
                     cfg: "mail.MailConfig | None" = None) -> dict[str, str | None]:
     """設定されている通知先へテスト通知を送る。{kind: エラー or None}（メールは宛先ごとに "email:<宛先>"）"""
     targets = setting_targets(s)
-    results = await asyncio.gather(
-        *(asyncio.to_thread(_send, k, url, build_test_payload(k, owner_label), cfg) for k, url in targets)
-    )
+    results = await send_all([(k, url, build_test_payload(k, owner_label)) for k, url in targets], cfg)
     await mail.record_last([err for (k, _), err in zip(targets, results, strict=True) if k == "email"])
     return {(f"email:{url}" if k == "email" else k): err for (k, url), err in zip(targets, results, strict=True)}

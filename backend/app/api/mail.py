@@ -21,10 +21,11 @@ from app.core.permissions import Perm
 from app.core.timeutil import utcnow
 from app.models.mail import MailServer
 from app.models.user import User
-from app.services import mail
+from app.services import mail, report
 from app.services.audit import Audit, get_audit
 
 router = APIRouter()
+TEST_INTERVAL_SEC = 60  # テストメールの最短の間隔（管理者ごと）
 
 Str = Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)]
 Secret = Annotated[str, StringConstraints(max_length=1000)]
@@ -50,6 +51,8 @@ class MailServerIn(BaseModel):
     ms_client_secret: Secret | None = None
     google_client_secret: Secret | None = None
     google_sa_json: Annotated[str, StringConstraints(max_length=10000)] | None = None
+    # 暗号化なし＋パスワード認証を、危険を理解したうえで新しく保存する（社内のリレーなど。#32）
+    accept_insecure: bool = False
 
 
 class MailServerOut(BaseModel):
@@ -78,6 +81,7 @@ class MailServerOut(BaseModel):
     updated_at: datetime | None = None
     updated_by: str | None = None
     last_result: dict | None = None  # 最後の送信の結果
+    warnings: list[str] = []  # 設定の注意（暗号化なしのパスワード・証明書の未検証・宛先のドメインの制限なし。送信は止めない）
 
 
 class TestIn(BaseModel):
@@ -113,6 +117,7 @@ async def _out(row: MailServer | None) -> MailServerOut:
         google_sa_email=_sa_email(row) if row.google_sa_json else None,
         google_authorized=bool(row.google_refresh_token), google_authorized_at=row.google_authorized_at,
         updated_at=row.updated_at, updated_by=row.updated_by, last_result=last,
+        warnings=mail.config_warnings(mail.MailConfig.from_row(row)),
     )
 
 
@@ -129,6 +134,22 @@ async def get_server(db: AsyncSession = Depends(get_db), _: User = Depends(requi
 async def update_server(payload: MailServerIn, db: AsyncSession = Depends(get_db),
                         user: User = Depends(require(Perm.USER_ADMIN)), audit: Audit = Depends(get_audit)):
     row = await _row(db)
+    # 危険な組み合わせ（#32）は新しく保存させない。すでにその組み合わせで保存してある設定は、ほかの項目を直して保存し直せる
+    # （更新で送信が止まらないように。画面・システム状態に注意を出す）
+    # 「すでに保存してある」とみなすのは、同じ組み合わせで、送り先のサーバー（host・port）と認証の方式（プロバイダー）も
+    # 変わらないときだけ（保存済みの危険な設定のまま、別のサーバー・プロバイダーへ移せないように）
+    combo = mail.insecure_combo(payload.auth, payload.security, payload.verify_tls)
+    saved = (row is not None and mail.insecure_combo(row.auth, row.security, row.verify_tls) == combo
+             and (row.auth, row.host, row.port) == (payload.auth, payload.host, payload.port))
+    if combo and not saved:
+        if combo == "oauth_noverify":
+            raise HTTPException(status_code=422, detail="OAuth 2.0 では「証明書を確認する」を外せません（経路上の中間者に、"
+                                                        "メールボックスの権限のトークンを渡してしまうため）")
+        if not payload.accept_insecure:
+            raise HTTPException(status_code=422, detail="暗号化なしではパスワードが平文で流れます。STARTTLS か SSL/TLS を選ぶか、"
+                                                        "危険を理解したうえで「暗号化なしでパスワードを送ることを許可する」を選んでください")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in payload.from_name):
+        raise HTTPException(status_code=422, detail="送信者名に改行・制御文字は使えません")
     if row is None:
         row = MailServer(id="default")
         db.add(row)
@@ -142,7 +163,8 @@ async def update_server(payload: MailServerIn, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=422, detail="テナント ID の形式が正しくありません")
     if payload.google_sa_json:
         try:
-            mail._google_sa_key(mail.MailConfig(google_sa_json=payload.google_sa_json))
+            # 形だけでなく、実際に署名できるかまで確かめる（途中の欠けた鍵を保存させない。#31）
+            mail.check_sa_key(mail.MailConfig(google_sa_json=payload.google_sa_json))
         except mail.MailError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
     if row.google_client_id and payload.google_client_id != row.google_client_id:
@@ -155,6 +177,8 @@ async def update_server(payload: MailServerIn, db: AsyncSession = Depends(get_db
     changes: dict = {"enabled": payload.enabled, "auth": mail.AUTH_LABELS[payload.auth], "host": payload.host,
                      "port": payload.port, "security": payload.security, "verify_tls": payload.verify_tls,
                      "from_address": payload.from_address, "allowed_domains": row.allowed_domains}
+    if combo and payload.accept_insecure:
+        changes["accept_insecure"] = True
     for f in ("password", "ms_client_secret", "google_client_secret", "google_sa_json"):
         v = getattr(payload, f)
         if v is not None:
@@ -176,11 +200,20 @@ async def test_server(payload: TestIn, db: AsyncSession = Depends(get_db),
     cfg = mail.MailConfig.from_row(await _row(db))
     if not cfg.enabled:
         raise HTTPException(status_code=400, detail="メール送信が無効です（「有効にする」を選んで保存してください）")
-    body = (f"NetConfig Manager からのテストメールです（{user.username} が送信）。\n"
-            f"このメールが届いていれば、通知をメールで受け取れます。")
-    err = await asyncio.to_thread(mail.send_notification, cfg, payload.to, {
-        "title": "テストメール", "body": body,
-        "facts": [("SMTP サーバー", f"{cfg.host}:{cfg.port}"), ("認証", mail.AUTH_LABELS.get(cfg.auth, cfg.auth))]})
+    # 接続の前の検査（設定の不備・宛先の形・ドメインの制限）で弾かれたときは、間隔の枠を使わない（設定を直しながら試せるように）
+    err = mail.check_config(cfg) or mail.check_address(payload.to, cfg.allowed_domains)
+    if err is None:
+        # 実際に SMTP へつなぐ回は、成功でも失敗でも枠を使う。通知のテストと同じく、管理者ごとに間隔を空ける
+        # （任意の宛先へ組織の SMTP から連打させない）
+        wait = await report.take_slot(user.id, "mail-test", TEST_INTERVAL_SEC)
+        if wait:
+            raise HTTPException(status_code=429, headers={"Retry-After": str(wait)},
+                                detail=f"テストメールは続けて送れません。{wait} 秒ほど待ってからやり直してください")
+        body = (f"NetConfig Manager からのテストメールです（{user.username} が送信）。\n"
+                f"このメールが届いていれば、通知をメールで受け取れます。")
+        err = await asyncio.to_thread(mail.send_notification, cfg, payload.to, {
+            "title": "テストメール", "body": body,
+            "facts": [("SMTP サーバー", f"{cfg.host}:{cfg.port}"), ("認証", mail.AUTH_LABELS.get(cfg.auth, cfg.auth))]})
     await mail.record_last([err])
     audit("mail.test", target_type="mail_server", target_id="default", target_name="メールサーバー",
           detail={"to_domain": payload.to.rsplit("@", 1)[-1], "result": err or "ok"})

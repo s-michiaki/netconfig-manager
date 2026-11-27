@@ -12,7 +12,7 @@ from app.core.permissions import TOKEN_SCOPE_FULL, Perm, token_permissions
 from app.core.security import decode_access_token, password_fingerprint
 from app.core.timeutil import utcnow
 from app.models.user import User
-from app.services import api_tokens, login_limit
+from app.services import api_tokens, login_limit, sessions
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
@@ -40,6 +40,9 @@ async def _load_active_user(db: AsyncSession, token: str) -> User | None:
     except (TypeError, ValueError):
         return None
     if tv != (user.token_version or 0):
+        return None
+    # 本人がログアウトしたトークン（services/sessions.py。Redis に期限つきで残す）
+    if await sessions.is_revoked(token):
         return None
     return user
 

@@ -130,8 +130,10 @@ class Device(Base):
     startup_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
     startup_added: Mapped[int | None] = mapped_column(Integer, nullable=True)  # running にだけある行数
     startup_removed: Mapped[int | None] = mapped_column(Integer, nullable=True)  # startup にだけある行数
-    # unified diff（コンフィグの中身を含むので、API は GET /api/devices/{id}/startup-diff だけで返す）
-    startup_diff: Mapped[str | None] = mapped_column(Text, nullable=True, deferred=True)  # 一覧では読み込まない
+    # unified diff（コンフィグの中身を含むので、API は GET /api/devices/{id}/startup-diff だけで返す）。
+    # コマンド実行の出力と同じく DEVICE_ENCRYPTION_KEY で暗号化して保存する（0041。それより前の平文の値も読める。
+    # 次に比べて書き直すときに暗号化される）
+    startup_diff: Mapped[str | None] = mapped_column(EncryptedText, nullable=True, deferred=True)  # 一覧では読み込まない
     startup_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

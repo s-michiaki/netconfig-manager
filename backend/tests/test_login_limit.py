@@ -128,3 +128,43 @@ def test_counters_have_expiry():
 
     ttls = asyncio.run(run())
     assert len(ttls) == 2 and all(0 < t <= settings.LOGIN_FAILURE_WINDOW_MIN * 60 for t in ttls)
+
+
+def test_step_up_success_is_safe_with_concurrent_failures():
+    """本人の確認の成功（step_up_success）は DECR だけで、DELETE しない。
+    並行の流れ「成功の INCR → 成功の DECR → 別の誤りの INCR →（以前の作りの DELETE）」で、誤りの 1 回が消えない"""
+    import asyncio
+
+    async def run():
+        r = login_limit.client()
+        key = f"{login_limit.PREFIX}:fail:{login_limit._keys('su-race', '192.0.2.7')[0][0]}"
+        await login_limit.begin_attempt("su-race", "192.0.2.7", per_ip=False)  # 成功する確認の INCR → 1
+
+        class Interleaved:
+            """成功の DECR の直後に、別の要求の誤りの INCR が割り込む（並行の流れを順に再現する）"""
+
+            def __getattr__(self, name):
+                return getattr(r, name)
+
+            async def decr(self, k):
+                n = await r.decr(k)  # 成功の DECR → 0
+                await login_limit.begin_attempt("su-race", "192.0.2.7", per_ip=False)  # 別の誤りの INCR → 1
+                return n
+
+            async def decrby(self, k, amount):
+                n = await r.decrby(k, amount)
+                await login_limit.begin_attempt("su-race", "192.0.2.7", per_ip=False)
+                return n
+
+        login_limit._client, real = Interleaved(), r
+        try:
+            await login_limit.step_up_success("su-race", "192.0.2.7")
+        finally:
+            login_limit._client = real
+        assert int(await r.get(key)) == 1 and await r.ttl(key) > 0  # 割り込んだ誤りは消えない（DELETE しない）
+        # 期限でキーが消えたあとに成功を数えても、負の値・期限なしのキーを残さない
+        await r.delete(key)
+        await login_limit.step_up_success("su-race", "192.0.2.7")
+        assert int(await r.get(key) or 0) == 0 and await r.ttl(key) > 0
+        await r.delete(key)
+    asyncio.run(run())

@@ -27,6 +27,7 @@ from app.services import api_tokens as svc
 from app.services import login_limit
 
 PW = "password-1234"
+ADMIN_PW = "initial-pass-123"
 
 # ---------------------------------------------------------------- 全ルートの表
 # T: API トークンで呼べる（ロール・範囲の権限の判定は別）/ S: ログインのセッションだけ（トークンでは 403）
@@ -34,8 +35,7 @@ PW = "password-1234"
 # 新しいルートを作ったら、ここに足す（足さないとテストが落ちる）。T にするなら token_policy.TOKEN_ALLOWED にも足す
 T, S, P = "token", "session", "public"
 ROUTES = {
-    "GET /openapi.json": P, "HEAD /openapi.json": P, "GET /docs": P, "HEAD /docs": P,
-    "GET /docs/oauth2-redirect": P, "HEAD /docs/oauth2-redirect": P, "GET /redoc": P, "HEAD /redoc": P,
+    # /docs・/openapi.json・/redoc は既定（DOCS_ENABLED=false）では無い（tests/test_api_docs.py）
     "GET /api/health": P,
     # 認証・自分のアカウント
     "POST /api/auth/token": P,
@@ -46,6 +46,8 @@ ROUTES = {
     "POST /api/auth/mfa/disable": S,
     "GET /api/auth/me": T,
     "POST /api/auth/change-password": S,
+    "POST /api/auth/logout": S,
+    "POST /api/auth/logout-all": S,
     "GET /api/auth/tokens": S,
     "POST /api/auth/tokens": S,
     "DELETE /api/auth/tokens/{token_id}": S,
@@ -265,7 +267,7 @@ def ctx(client):
     admin = login(client, "admin", "initial-pass-123")
     ids = {}
     for name, role in [("tok-op", "operator"), ("tok-view", "viewer"), ("tok-adm", "admin")]:
-        r = client.post("/api/users/", json={"username": name, "password": PW, "role": role}, headers=admin)
+        r = client.post("/api/users/", json={"username": name, "password": PW, "role": role, "confirm_password": "initial-pass-123"}, headers=admin)
         assert r.status_code == 201, r.text
         ids[name] = r.json()["id"]
     dev = client.post(
@@ -407,7 +409,9 @@ def test_token_cannot_manage_tokens_or_account(client, ctx):
         ("post", "/api/auth/tokens", {"name": "x", "scope": "full", "days": 1, "password": PW}),
         ("delete", f"/api/auth/tokens/{tid}", None),
         ("post", "/api/auth/change-password", {"current_password": PW, "new_password": "another-pass-123"}),
-        ("post", "/api/auth/mfa/setup", None),
+        ("post", "/api/auth/mfa/setup", {"password": PW}),
+        ("post", "/api/auth/logout", None),
+        ("post", "/api/auth/logout-all", {}),
         ("get", "/api/users/", None),
         ("delete", f"/api/users/{ctx['ids']['tok-view']}/tokens", None),
         ("get", "/api/mail/server", None),
@@ -490,7 +494,8 @@ def test_role_change_revokes_tokens(client, ctx):
     r = client.post("/api/users/", json={"username": "tok-demote", "password": PW, "role": "viewer"}, headers=admin)
     uid = r.json()["id"]
     tok, tid = new_token(client, "tok-demote", scope="full")
-    assert client.patch(f"/api/users/{uid}", json={"role": "admin"}, headers=admin).status_code == 200
+    assert client.patch(f"/api/users/{uid}", json={"role": "admin", "confirm_password": ADMIN_PW},
+                        headers=admin).status_code == 200
     assert client.get("/api/devices/", headers=bearer(tok)).status_code == 401
     assert _token_row(tid).revoked_at is not None
     log = [x for x in _audits("user.update") if x.target_id == uid][-1]
@@ -508,7 +513,8 @@ def test_role_is_checked_on_every_request(client, ctx):
     """API を通らずにロールが変わった場合（DB を直接変えたなど）も、判定のたびにいまのロールを見る"""
     from app.models.user import User
     admin = ctx["admin"]
-    r = client.post("/api/users/", json={"username": "tok-direct", "password": PW, "role": "admin"}, headers=admin)
+    r = client.post("/api/users/", json={"username": "tok-direct", "password": PW, "role": "admin",
+                                         "confirm_password": ADMIN_PW}, headers=admin)
     uid = r.json()["id"]
     tok, _ = new_token(client, "tok-direct", scope="full")
     assert client.get("/api/audit/logs", headers=bearer(tok)).status_code == 200
@@ -631,7 +637,8 @@ def test_password_change_by_self_keeps_tokens_but_admin_reset_revokes(client, ct
                     headers=sess)
     assert r.status_code == 200
     assert client.get("/api/devices/", headers=bearer(tok)).status_code == 200  # 本人の変更では失効させない
-    assert client.patch(f"/api/users/{uid}", json={"password": "reset-pass-0000"}, headers=admin).status_code == 200
+    assert client.patch(f"/api/users/{uid}", json={"password": "reset-pass-0000", "confirm_password": ADMIN_PW},
+                        headers=admin).status_code == 200
     assert client.get("/api/devices/", headers=bearer(tok)).status_code == 401  # 管理者のリセットでは失効
 
 
@@ -800,7 +807,7 @@ def test_mfa_user_creates_token_from_mfa_session(client, ctx):
     assert client.post("/api/users/", json={"username": "tok-mfa", "password": PW, "role": "operator"},
                        headers=admin).status_code == 201
     sess = login(client, "tok-mfa")
-    secret = client.post("/api/auth/mfa/setup", headers=sess).json()["secret"]
+    secret = client.post("/api/auth/mfa/setup", json={"password": PW}, headers=sess).json()["secret"]
     r = client.post("/api/auth/mfa/enable", json={"code": totp.code_at(secret, totp.current_step())}, headers=sess)
     recovery = r.json()["recovery_codes"]
     first = client.post("/api/auth/token", data={"username": "tok-mfa", "password": PW}).json()
