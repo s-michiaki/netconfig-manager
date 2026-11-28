@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    # 無操作でログアウトするまでの時間（分。services/idle.py）。0 で無効。ログインからの期限（上）とは別に効く。
+    # 画面は切れる 1 分前に予告するので、1 は使えない（0 か 2 以上）
+    IDLE_TIMEOUT_MIN: int = Field(default=30, le=1440)
     # ユーザーが1人もいないときに作成する初期管理者
     ADMIN_USERNAME: str = "admin"
     # 未設定の場合はランダムなパスワードを生成し、起動ログに一度だけ出力する
@@ -185,6 +188,13 @@ class Settings(BaseSettings):
     def _empty_to_none(cls, v):
         # docker-compose で ${ADMIN_PASSWORD:-} のように空文字が渡された場合は未設定扱い
         return v or None
+
+    @field_validator("IDLE_TIMEOUT_MIN")
+    @classmethod
+    def _check_idle_timeout(cls, v: int) -> int:
+        if v < 0 or v == 1:
+            raise ValueError("IDLE_TIMEOUT_MIN は 0（無効）か、2 以上の分数にしてください（切れる 1 分前に予告するため）")
+        return v
 
     @field_validator("SECRET_KEY")
     @classmethod

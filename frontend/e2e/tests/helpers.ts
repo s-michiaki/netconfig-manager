@@ -53,3 +53,14 @@ export async function login(page: Page, user: { name: string; password: string }
   await openNav(page, "/devices");
   await expect(page).toHaveURL(/\/devices/);
 }
+
+/**
+ * 無操作のログアウト（idle.tsx）を、この画面では動かさない（/api/auth/me の idle_timeout_min を 0 にする）。
+ * page.clock で時計を何十分も進めるテストが、予告・ログアウトで止まらないように
+ */
+export async function disableIdle(page: Page) {
+  await page.route("**/api/auth/me", async (route) => {
+    const r = await route.fetch();
+    await route.fulfill({ response: r, json: { ...(await r.json()), idle_timeout_min: 0 } });
+  });
+}

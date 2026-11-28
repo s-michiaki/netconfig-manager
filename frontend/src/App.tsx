@@ -4,6 +4,7 @@ import { api, clearToken, errorMessage, getToken, setToken } from "./api/client"
 import { AuthProvider, PERM, Perm, RequirePerm, useAuth } from "./auth";
 import ApiTokenModal from "./components/ApiTokenModal";
 import MfaModal from "./components/MfaModal";
+import { IdleGuard } from "./idle";
 import DevicesPage from "./pages/DevicesPage";
 import LoginPage from "./pages/LoginPage";
 
@@ -288,6 +289,8 @@ function Layout() {
       {showPassword && <PasswordModal onClose={() => setShowPassword(false)} />}
       {showMfa && me && <MfaModal enabled={!!me.mfa_enabled} onClose={() => setShowMfa(false)} onChanged={() => { reload(); }} />}
       {showTokens && <ApiTokenModal onClose={() => setShowTokens(false)} />}
+      {/* 無操作でのログアウト（切れる 1 分前の予告）。ほかのモーダルより手前に出す */}
+      <IdleGuard minutes={me?.idle_timeout_min ?? 0} />
       <aside className="sidebar">
         <div className="sidebar-header">
           <span className="sidebar-logo">⬡ NetConfig</span>

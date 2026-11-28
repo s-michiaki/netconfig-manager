@@ -37,6 +37,8 @@ x-backend-env: &backend-env
   LOGIN_MAX_FAILURES_PER_IP: ${LOGIN_MAX_FAILURES_PER_IP:-20}
   LOGIN_FAILURE_WINDOW_MIN: ${LOGIN_FAILURE_WINDOW_MIN:-10}
   LOGIN_LOCK_MIN: ${LOGIN_LOCK_MIN:-15}
+  # 無操作でログアウトするまでの時間（分。0 で無効）
+  IDLE_TIMEOUT_MIN: ${IDLE_TIMEOUT_MIN:-30}
   API_TOKENS_ENABLED: ${API_TOKENS_ENABLED:-true}
   # API の一覧（http://localhost:8000/docs・/openapi.json）。開発用の構成だけ既定で有効（本番の構成には渡さない）
   DOCS_ENABLED: ${DOCS_ENABLED:-true}

@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { errorMessage, login, verifyMfa } from "../api/client";
+import { errorMessage, IDLE_REASON, login, verifyMfa } from "../api/client";
 
 /** ログイン。2 段階認証を設定している人は、パスワードのあとに認証アプリのコード（または予備コード）を入力する */
 export default function LoginPage() {
@@ -59,6 +59,9 @@ export default function LoginPage() {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <p className="login-title">⬡ NetConfig</p>
+        {params.get("reason") === IDLE_REASON && !mfaToken && (
+          <p className="login-note" role="status" data-testid="login-reason">操作が無い時間が続いたため、ログアウトしました。</p>
+        )}
         {mfaToken ? (
           <>
             <p className="login-note">2 段階認証: 認証アプリに表示されている 6 桁のコードを入力してください。</p>

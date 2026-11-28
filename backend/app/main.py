@@ -44,6 +44,7 @@ from app.core.database import AsyncSessionLocal, engine
 from app.core.migrate import run_migrations
 from app.core.permissions import Perm
 from app.models import Device
+from app.services import idle
 from app.services import system as system_service
 from app.services.config_service import migrate_legacy_repo
 
@@ -113,6 +114,8 @@ async def _migrate_legacy_repos() -> None:
 async def lifespan(app: FastAPI):
     # 外部への接続の設定（プロキシはホスト:ポートと認証の有無だけ）。廃止した VULN_HTTPS_PROXY が残っていれば知らせる
     outbound.startup_log(logger)
+    # 無操作でのログアウトの時間が、ログインの期限以上なら知らせる
+    idle.startup_log(logger)
     # DBスキーマを最新化（Alembic）。Alembic 導入前のDBも自動で引き継ぐ
     await asyncio.to_thread(run_migrations)
     await _encrypt_legacy_passwords()
@@ -131,7 +134,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NetConfig Manager API",
     description="ネットワーク機器のコンフィグ収集・世代管理システム",
-    version="1.68.0",
+    version="1.69.0",
     lifespan=lifespan,
     # Swagger UI・ReDoc（CDN のスクリプトを読む）は使わない。API の一覧は DOCS_ENABLED のときだけ、外部のスクリプトを
     # 使わない /docs と /openapi.json を出す（下の install_api_docs）。本番では python -m app.tools.api_list で見る

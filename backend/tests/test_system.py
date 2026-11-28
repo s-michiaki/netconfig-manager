@@ -86,7 +86,11 @@ def test_worker_down_and_redis_down(ctx, monkeypatch):
     class Down:
         async def ping(self):
             raise RedisConnectionError("down")
-        get = hgetall = hset = ttl = ping
+        hgetall = hset = ttl = ping
+
+        async def get(self, *a, **k):  # 無操作の確認（services/idle.py）も同じ Redis を使う
+            raise RedisConnectionError("down")
+        set = eval = get
 
         async def exists(self, *keys):
             raise RedisConnectionError("down")

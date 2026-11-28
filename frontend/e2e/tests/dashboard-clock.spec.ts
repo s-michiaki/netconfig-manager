@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { login } from "./helpers";
+import { disableIdle, login } from "./helpers";
 
 // ダッシュボードの時計（ブラウザのタイムゾーン。playwright.config.ts で Asia/Tokyo）。秒は出さない
 const FORMAT = /^\d{4}\/\d{2}\/\d{2}（[日月火水木金土]）\d{2}:\d{2}$/;
@@ -16,6 +16,7 @@ test("ダッシュボードに時計が出て、形式が合う", async ({ page 
 
 test("決めた時刻を表示し、分が変わった直後に進み、日付の変わり目で日付と曜日が変わる", async ({ page }) => {
   await page.clock.install({ time: new Date("2026-11-26T11:00:00+09:00") });
+  await disableIdle(page); // 時計を何十分も進めるので、無操作のログアウトを止める（idle.spec.ts で確かめる）
   await login(page);
   await page.goto("/dashboard");
   const clock = page.getByTestId("dash-clock");
@@ -44,6 +45,7 @@ test("ほかのページには時計が出ない", async ({ page }) => {
 
 test("裏にしているあいだは止まり、戻ったらすぐ正しい時刻になる", async ({ page }) => {
   await page.clock.install({ time: new Date("2026-11-26T11:00:00+09:00") });
+  await disableIdle(page); // 時計を何十分も進めるので、無操作のログアウトを止める（idle.spec.ts で確かめる）
   await login(page);
   await page.goto("/dashboard");
   const clock = page.getByTestId("dash-clock");

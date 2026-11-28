@@ -13,7 +13,9 @@ WebSocket SSHターミナル
 監査: 接続・切断を操作履歴に残し、画面出力を asciicast v2 形式で記録する（app/services/audit.py）
 
 認証の照合は接続の最初（と SSH の接続後にもう一度）だけ行う。接続中に管理者が強制ログアウト・無効化・
-パスワードのリセット・削除をしたときは、close_user_sessions でそのユーザーのターミナルを切る（API が 1 プロセスのとき）
+パスワードのリセット・削除をしたときは、close_user_sessions でそのユーザーのターミナルを切る（API が 1 プロセスのとき）。
+無操作の時間（IDLE_TIMEOUT_MIN。services/idle.py）は、接続中も idle.watch_ws が定期的に確かめ、過ぎたら切る
+（close の reason は "idle_timeout"。記録の終了理由は「無操作による切断」）
 """
 import asyncio
 import codecs
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 import paramiko
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.api.deps import authenticate_token
+from app.api.deps import authenticate_ws
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.permissions import Perm, has_permission
@@ -37,7 +39,7 @@ from app.core.ssh_keys import PrivateKeyError, load_private_key
 from app.core.timeutil import utcnow
 from app.models.audit import TerminalSession
 from app.models.user import User
-from app.services import sessions
+from app.services import idle, sessions
 from app.services.audit import TerminalRecorder, make_log
 from app.services.config_service import DeviceConnectionInfo
 from app.services.connection import load_connection_info
@@ -77,6 +79,8 @@ ALL_KINDS = ("terminal", "ping")
 SELF_REASONS = {"パスワードの変更": "パスワード変更", "2 段階認証の設定": "2 段階認証の設定",
                 "2 段階認証の解除": "2 段階認証の解除", "ログアウト": "ログアウト",
                 "すべての端末からのログアウト": "すべての端末からのログアウト"}
+# 無操作の時間を過ぎたので切ったときの理由（services/idle.py。記録の終了理由は IDLE_END_REASON）
+IDLE_END_REASON = "無操作による切断"
 
 
 async def close_user_sessions(user_id: str, reason: str, kinds: tuple[str, ...] = ALL_KINDS,
@@ -94,14 +98,18 @@ async def close_user_sessions(user_id: str, reason: str, kinds: tuple[str, ...] 
     """
     targets = [t for t in _live.get(user_id, ()) if t.kind in kinds and (token_key is None or t.token_key == token_key)
                and (exclude_key is None or t.token_key != exclude_key)]
+    is_idle = reason == idle.CLOSE_REASON
     for t in targets:
+        if is_idle and t.revoked is not None:
+            continue  # 切断済み（無操作の確認が重なったときなど）
         t.revoked = reason
         try:
             if t.kind == "terminal":
-                await t.websocket.send_text(f"\r\n[{reason}のため、ターミナルを切断しました]\r\n")
+                msg = "操作が無い時間が続いたため" if is_idle else f"{reason}のため"
+                await t.websocket.send_text(f"\r\n[{msg}、ターミナルを切断しました]\r\n")
             refreshed = refreshed_key is not None and t.token_key == refreshed_key
             await t.websocket.close(code=WS_CLOSE_TOKEN_REFRESHED if refreshed else WS_CLOSE_UNAUTHORIZED,
-                                    reason="refreshed" if refreshed else "revoked")
+                                    reason="refreshed" if refreshed else idle.REASON_CODE if is_idle else "revoked")
         except Exception:  # noqa: BLE001 - すでに切れている
             pass
     return sum(1 for t in targets if t.kind == "terminal")
@@ -227,13 +235,16 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     await websocket.accept()
 
     # --- 1. 認証（トークンはURLに載せずメッセージで受け取る。アクセスログに残さないため）
+    ip = websocket.client.host if websocket.client else None
+    why = "unauthorized"
     try:
         first = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SEC))
-        user = await authenticate_token(str(first.get("token", ""))) if first.get("type") == "auth" else None
+        user, why = (await authenticate_ws(str(first.get("token", "")), ip)) if first.get("type") == "auth" \
+            else (None, why)
     except (TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
         user = None
     if user is None:
-        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason=why)
         return
     if not has_permission(user.role, Perm.TERMINAL):
         logger.warning("ターミナル権限なし user=%s role=%s device=%s", user.username, user.role, device_id)
@@ -244,9 +255,12 @@ async def terminal_ws(websocket: WebSocket, device_id: str):
     rows = _clamp_size(first.get("rows"), 40)
     # 以降は管理者の強制ログアウトなどで切れるよう登録しておく（解除は _session の終わり）
     live = _register(user.id, websocket, "terminal", str(first.get("token", "")))
+    # 無操作の時間を、要求が来なくても確かめる（過ぎたら close_user_sessions で切る）
+    watcher = asyncio.create_task(idle.watch_ws(user, str(first.get("token", "")), ip))
     try:
         await _session(websocket, device_id, user, str(first.get("token", "")), cols, rows, live)
     finally:
+        watcher.cancel()
         _unregister(user.id, live)
 
 
@@ -285,11 +299,11 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
         return
     await _save_hostkeys(device, user, ip)
     # 接続を待つ間に強制ログアウト・ロールの変更などがあった場合（認証の照合と登録の間に起きた場合も含め、ここで確かめ直す）
-    now_user = None if live.revoked is not None else await authenticate_token(token)
+    now_user, why = (None, "unauthorized") if live.revoked is not None else await authenticate_ws(token, ip)
     if now_user is None or not has_permission(now_user.role, Perm.TERMINAL):
         await loop.run_in_executor(None, session.close)
         if live.revoked is None:
-            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason=why)
         return
 
     # --- 監査: セッションを登録し、画面出力の記録を開始する
@@ -373,7 +387,8 @@ async def _session(websocket: WebSocket, device_id: str, user: User, token: str,
             ended = utcnow()
             record.ended_at = ended
             record.end_reason = (
-                (f"本人の{SELF_REASONS[live.revoked]}で切断" if live.revoked in SELF_REASONS
+                (IDLE_END_REASON if live.revoked == idle.CLOSE_REASON
+                 else f"本人の{SELF_REASONS[live.revoked]}で切断" if live.revoked in SELF_REASONS
                  else f"管理者が切断（{live.revoked}）")
                 if live.revoked
                 else "機器側で終了" if remote_closed.is_set() else "利用者が切断"

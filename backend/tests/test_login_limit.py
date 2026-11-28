@@ -66,7 +66,7 @@ def test_redis_down_does_not_block_login(c, monkeypatch):
     class Down:
         async def ttl(self, *a):
             raise RedisConnectionError("down")
-        set = delete = decr = ttl
+        set = delete = decr = get = eval = ttl  # get・eval: 無操作の確認（services/idle.py）
 
         def pipeline(self, **kw):
             raise RedisConnectionError("down")

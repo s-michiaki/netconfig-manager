@@ -308,8 +308,9 @@ def test_revocation_check_does_not_block_when_redis_is_down(client, user, monkey
     h = login(client, user["name"])
 
     class Down:
-        async def exists(self, *a):
+        async def exists(self, *a, **k):
             raise RedisConnectionError("down")
+        get = set = eval = exists  # 無操作の確認（services/idle.py）も同じ Redis を使う
     monkeypatch.setattr(login_limit, "_client", Down())
     monkeypatch.setattr(sessions, "_skip_until", 0.0)
     assert client.get("/api/auth/me", headers=h).status_code == 200
@@ -478,8 +479,9 @@ def test_revocation_warning_is_logged_once(client, user, monkeypatch, caplog):
     h = login(client, user["name"])
 
     class Down:
-        async def exists(self, *a):
+        async def exists(self, *a, **k):
             raise RedisConnectionError("down")
+        get = set = eval = exists  # 無操作の確認（services/idle.py）も同じ Redis を使う
     monkeypatch.setattr(login_limit, "_client", Down())
     with caplog.at_level("WARNING", logger="app.services.sessions"):
         for _ in range(3):

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, errorMessage, getToken, redirectToLogin, wsUrl } from "../api/client";
+import { api, errorMessage, getToken, IDLE_REASON, redirectToLogin, wsUrl } from "../api/client";
 import { PERM, useAuth } from "../auth";
+import { useIdlePingHold } from "../idle";
 import PingMonitorPanel from "./PingMonitorPanel";
 import HelpLink from "../components/HelpLink";
 
@@ -305,8 +306,9 @@ function groupTargets(data: TargetList, targets: Target[]): Section[] {
 }
 
 export default function PingPage() {
-  const { can } = useAuth();
+  const { can, me } = useAuth();
   const canWrite = can(PERM.PING_WRITE);
+  const idleMin = me?.idle_timeout_min ?? 0;
   const [data, setData] = useState<TargetList | null>(null);
   const [loadError, setLoadError] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -327,6 +329,11 @@ export default function PingPage() {
   const runningRef = useRef(false);
   const reconnectTimer = useRef<number | null>(null);
   const startMsg = useRef<{ keys: string[]; interval: number } | null>(null);
+  // 監視が動いている間は、無操作でログアウトしない（サーバーも時刻を進める。ほかのタブにも伝える。idle.tsx）。
+  // 実際に PING を送る対象（名前解決できたもの）が無いときは、サーバーも進めないので印を立てない
+  const hasPingTargets = Object.values(resolved).some((r) => r.ip);
+  const holdsIdle = connState === "running" && hasPingTargets;
+  useIdlePingHold(holdsIdle && idleMin > 0);
 
   const load = useCallback(async () => {
     try {
@@ -417,7 +424,8 @@ export default function PingPage() {
         }
         return;
       }
-      if (e.code === 4401) return redirectToLogin(token);
+      // idle_timeout: 操作が無い時間が続いたため、サーバーが切った（ログイン画面に理由を出す）
+      if (e.code === 4401) return redirectToLogin(token, e.reason === "idle_timeout" ? IDLE_REASON : undefined);
       if (e.code === 4403) {
         setError("Ping監視を利用する権限がありません");
         runningRef.current = false;
@@ -635,6 +643,9 @@ export default function PingPage() {
         <p style={{ marginTop: 12, fontSize: 12, color: "var(--color-muted)" }}>
           PING はサーバーから送信します（踏み台の先にある機器など、サーバーから直接届かない宛先は「応答なし」になります）。
           統計はこの画面で集計しており、画面を離れるとリセットされます。
+          {idleMin > 0 && !(connState === "running" && !holdsIdle) && (
+            <span data-testid="ping-idle-note">（監視中は、無操作でも自動ではログアウトしません）</span>
+          )}
         </p>
       </div>
     </div>

@@ -382,6 +382,7 @@ PERMISSION_EXEMPT = {
     "POST /api/auth/change-password",
     "POST /api/auth/logout",
     "POST /api/auth/logout-all",
+    "POST /api/auth/activity",  # 無操作のログアウトの合図（本人のログインの時刻を進めるだけ）
     # 自分の API トークンの一覧・発行・失効（本人のものだけを扱う）
     "GET /api/auth/tokens",
     "POST /api/auth/tokens",

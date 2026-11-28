@@ -12,14 +12,19 @@ from app.core.permissions import TOKEN_SCOPE_FULL, Perm, token_permissions
 from app.core.security import decode_access_token, password_fingerprint
 from app.core.timeutil import utcnow
 from app.models.user import User
-from app.services import api_tokens, login_limit, sessions
+from app.services import api_tokens, idle, login_limit, sessions
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 SESSION_REQUIRED = "この操作は API トークンでは行えません。ログインして操作してください"
 
 
-async def _load_active_user(db: AsyncSession, token: str) -> User | None:
+class IdleExpired(Exception):
+    """無操作の時間を過ぎたログイン（services/idle.py）。画面が理由を出せるよう、ほかの 401 と分ける"""
+
+
+async def _load_active_user(db: AsyncSession, token: str, ip: str | None = None) -> User | None:
+    """有効なログインのトークンなら利用者を返す。無操作の時間を過ぎていれば IdleExpired"""
     # API トークン（ncm_…）はここでは受け付けない（WebSocket などはログインのトークンだけ）
     if api_tokens.looks_like_token(token):
         return None
@@ -43,12 +48,24 @@ async def _load_active_user(db: AsyncSession, token: str) -> User | None:
         return None
     # 本人がログアウトしたトークン（services/sessions.py。Redis に期限つきで残す）
     if await sessions.is_revoked(token):
+        # 無操作で失効させたものなら、そのあとの要求にも理由を返す（ほかのタブも理由つきでログイン画面へ）
+        if await idle.is_expired(token, payload):
+            raise IdleExpired
         return None
+    # 無操作の時間（IDLE_TIMEOUT_MIN。ふつうの要求では時刻を進めない。進めるのはログインと /api/auth/activity）
+    if not await idle.enforce(user, token, payload, ip):
+        raise IdleExpired
     return user
 
 
 def _unauthorized(detail: str = "認証情報が無効です") -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"})
+
+
+def _idle_unauthorized() -> HTTPException:
+    """無操作でログアウトしたときの 401（画面は X-Logout-Reason を見て、ログイン画面に理由を出す）"""
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=idle.DETAIL,
+                         headers={"WWW-Authenticate": "Bearer", "X-Logout-Reason": idle.REASON_CODE})
 
 
 async def _load_api_token_user(request: Request, db: AsyncSession, value: str) -> User:
@@ -96,7 +113,12 @@ async def get_current_user(
 ) -> User:
     if api_tokens.looks_like_token(token):
         return await _load_api_token_user(request, db, token)
-    user = await _load_active_user(db, token)
+    from app.services.audit import client_ip  # audit.py がこのファイルを読むため、ここで読む
+
+    try:
+        user = await _load_active_user(db, token, client_ip(request))
+    except IdleExpired:
+        raise _idle_unauthorized() from None
     if user is None:
         raise _unauthorized()
     return user
@@ -139,5 +161,14 @@ def require(perm: Perm) -> Callable[..., Coroutine[Any, Any, User]]:
 
 async def authenticate_token(token: str) -> User | None:
     """WebSocket など Depends が使いにくい場所向け。ログインのトークンだけを受け付ける（API トークンは None）"""
+    return (await authenticate_ws(token))[0]
+
+
+async def authenticate_ws(token: str, ip: str | None = None) -> tuple[User | None, str]:
+    """WebSocket の認証。（利用者か None, 断るときの close の reason: "unauthorized" / "idle_timeout"）"""
     async with AsyncSessionLocal() as db:
-        return await _load_active_user(db, token)
+        try:
+            user = await _load_active_user(db, token, ip)
+        except IdleExpired:
+            return None, idle.REASON_CODE
+    return user, "unauthorized"

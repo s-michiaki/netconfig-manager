@@ -51,3 +51,8 @@ def _login_limit_redis(monkeypatch):
     from app.services import sessions
     monkeypatch.setattr(sessions, "_skip_until", 0.0)
     monkeypatch.setattr(sessions, "_warned", False)
+    # 無操作の確認（services/idle.py）も同じ
+    from app.services import idle
+    monkeypatch.setattr(idle, "_skip_until", 0.0)
+    monkeypatch.setattr(idle, "_warned", False)
+    monkeypatch.setattr(idle, "_error_logged", -1e9)

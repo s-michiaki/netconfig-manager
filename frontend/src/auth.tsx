@@ -38,6 +38,8 @@ export interface Me {
   role_label: string;
   permissions: string[];
   mfa_enabled?: boolean;
+  /** 無操作でログアウトするまでの分（.env の IDLE_TIMEOUT_MIN。0 は無効） */
+  idle_timeout_min?: number;
 }
 
 interface AuthState {

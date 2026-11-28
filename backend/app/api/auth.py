@@ -42,11 +42,18 @@ from app.core.security import (
 )
 from app.core.timeutil import utcnow
 from app.models.user import User
-from app.services import api_tokens, login_limit, sessions
+from app.services import api_tokens, idle, login_limit, sessions
 from app.services.audit import client_ip, make_log, record_now
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _issue(user: User) -> str:
+    """ログインのトークンを発行し、無操作の時間をここから数え始める（services/idle.py）"""
+    token = create_access_token(user.id, user.hashed_password, user.token_version)
+    await idle.start(token)
+    return token
 
 
 class Token(BaseModel):
@@ -75,6 +82,8 @@ class UserInfo(BaseModel):
     mfa_enabled: bool = False
     # API トークンで呼んだときは、その範囲（read / full）。permissions もその範囲で絞ったもの
     api_token_scope: str | None = None
+    # 無操作でログアウトするまでの分（IDLE_TIMEOUT_MIN。0 は無効。API トークンは対象外なので 0）
+    idle_timeout_min: int = 0
 
 
 class PasswordChange(BaseModel):
@@ -98,6 +107,7 @@ def user_info(user: User, token_perms: frozenset | None = None) -> UserInfo:
                            if user.api_token is None or token_perms is None or p in token_perms),
         mfa_enabled=bool(user.mfa_enabled),
         api_token_scope=user.api_token.scope if user.api_token is not None else None,
+        idle_timeout_min=settings.IDLE_TIMEOUT_MIN if user.api_token is None else 0,
     )
 
 
@@ -148,7 +158,7 @@ async def login(
         return {"mfa_required": True, "mfa_token": create_mfa_token(user.id, user.hashed_password, user.token_version)}
     await login_limit.record_success(form_data.username, ip)
     await record_now(db, make_log("auth.login", user=user, ip=ip))
-    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
+    return {"access_token": await _issue(user), "token_type": "bearer"}
 
 
 class MfaVerify(BaseModel):
@@ -204,7 +214,7 @@ async def mfa_verify(request: Request, payload: MfaVerify, db: AsyncSession = De
         else {"mfa": "ワンタイムパスワード"}
     db.add(make_log("auth.login", user=user, ip=ip, detail=detail))
     await db.commit()
-    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
+    return {"access_token": await _issue(user), "token_type": "bearer"}
 
 
 class MfaSetup(BaseModel):
@@ -342,8 +352,7 @@ async def mfa_enable(
     await db.commit()  # 失効（tv の +1）は応答の前に確定させる
     await _close_sessions_for_self(background, user, "2 段階認証の設定", token)
     logger.info("2 段階認証を有効にしました user=%s", user.username)
-    return RecoveryCodes(recovery_codes=codes,
-                         access_token=create_access_token(user.id, user.hashed_password, user.token_version))
+    return RecoveryCodes(recovery_codes=codes, access_token=await _issue(user))
 
 
 @router.post("/mfa/recovery-codes", response_model=RecoveryCodes)
@@ -399,7 +408,7 @@ async def mfa_disable(
     db.add(make_log("auth.mfa_disable", user=user, ip=ip, **_self_target(user)))
     await db.commit()
     await _close_sessions_for_self(background, user, "2 段階認証の解除", token)
-    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
+    return {"access_token": await _issue(user), "token_type": "bearer"}
 
 
 def clear_mfa(user: User) -> None:
@@ -442,16 +451,46 @@ async def change_password(
     await _close_sessions_for_self(background, user, "パスワードの変更", token)
     logger.info("パスワード変更 user=%s tokens=%s", user.username, detail.get("revoked_tokens", "-"))
     # 変更前のトークンは無効になるため、新しいトークンを返す
-    return {"access_token": create_access_token(user.id, user.hashed_password, user.token_version), "token_type": "bearer"}
+    return {"access_token": await _issue(user), "token_type": "bearer"}
+
+
+# ---------------------------------------------------------------- 無操作のログアウト（services/idle.py）
+
+
+class ActivityResult(BaseModel):
+    idle_timeout_min: int
+
+
+@router.post("/activity", response_model=ActivityResult)
+async def activity(
+    request: Request, token: str = Depends(oauth2_scheme), user: User = Depends(require_session),
+):
+    """利用者の操作があった（画面が、マウス・キーボード・タッチの操作のあとに間引いて送る）。無操作の時間を数え直す。
+
+    画面の自動の更新（再読み込み・状態の確認）は送らない。時間を過ぎたログインは、認証（deps）の時点で 401 になり、
+    これを送っても生き返らない
+    """
+    # 判定と書き込みは不可分（認証のあと、ここまでの間に時間を過ぎていれば書かずに 401）
+    if not await idle.touch(user, token, decode_access_token(token) or {}, client_ip(request)):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=idle.DETAIL,
+                            headers={"WWW-Authenticate": "Bearer", "X-Logout-Reason": idle.REASON_CODE})
+    return ActivityResult(idle_timeout_min=settings.IDLE_TIMEOUT_MIN)
 
 
 # ---------------------------------------------------------------- ログアウト（本人）
 
 
 class LogoutResult(BaseModel):
-    scope: Literal["session", "all"]  # session = この画面のログインだけ / all = すべての端末（Redis に書けなかったときも）
+    # session = この画面のログインだけ / all = すべての端末（Redis に書けなかったときも）/
+    # none = 何も失効させられなかった（reason=idle で Redis に届かないとき。画面は手元のトークンを捨てる）
+    scope: Literal["session", "all", "none"]
     closed_terminals: int = 0
     revoked_tokens: int = 0
+
+
+class LogoutIn(BaseModel):
+    # idle: 画面の時計で無操作の時間が来た（idle.tsx）。このログインだけを失効させ、Redis に届かなくても全端末にはしない
+    reason: Literal["idle"] | None = None
 
 
 class LogoutAll(BaseModel):
@@ -460,10 +499,14 @@ class LogoutAll(BaseModel):
 
 @router.post("/logout", response_model=LogoutResult)
 async def logout(
-    request: Request, token: str = Depends(oauth2_scheme), user: User = Depends(require_session),
-    db: AsyncSession = Depends(get_db),
+    request: Request, payload: LogoutIn | None = None, token: str = Depends(oauth2_scheme),
+    user: User = Depends(require_session), db: AsyncSession = Depends(get_db),
 ):
     """このログイン（いま使っているトークン）を失効させる。ほかの端末のログインと API トークンはそのまま。
+
+    reason=idle（画面の時計で無操作の時間が来た）: 無操作のログアウトとして扱う（services/idle.py の expire_now）。
+    監査ログ・失効・WebSocket の切断はサーバーの判定と同じ 1 回だけ。Redis に届かないときは何もしない
+    （token_version を上げない。判定はサーバー側なので、画面の時計だけでほかの端末まで切らない）。
 
     失効は Redis に期限つきで残す（services/sessions.py）。Redis に書けないときは、すべての端末からログアウトさせる
     （token_version を上げる。ログアウトしたつもりのトークンが使えたままにならないように）。
@@ -471,6 +514,8 @@ async def logout(
     """
     claims = decode_access_token(token) or {}
     ip = client_ip(request)
+    if payload is not None and payload.reason == "idle" and idle.enabled():
+        return LogoutResult(scope="session" if await idle.expire_now(user, token, claims, ip) else "none")
     if await sessions.revoke(token, claims.get("exp")):
         closed = await close_user_sessions(user.id, "ログアウト", token_key=sessions.token_key(token))
         db.add(make_log("auth.logout", user=user, ip=ip, detail={"scope": "この端末"}))

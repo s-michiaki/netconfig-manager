@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { api, getToken, redirectToLogin, wsUrl } from "../api/client";
+import { api, getToken, IDLE_REASON, redirectToLogin, wsUrl } from "../api/client";
 import HelpLink from "../components/HelpLink";
 
 interface Device {
@@ -139,10 +139,14 @@ export default function TerminalPage() {
       }
       if (e.code === 4401) {
         // revoked: 管理者による強制ログアウト・無効化など（理由はサーバーが端末に表示済み）
-        term.writeln(e.reason === "revoked"
+        // idle_timeout: 操作が無い時間が続いたため、サーバーが切った（ログイン画面にも理由を出す）
+        const idle = e.reason === "idle_timeout";
+        term.writeln(idle
+          ? "\r\n\x1b[31m操作が無い時間が続いたため、ログアウトしました\x1b[0m"
+          : e.reason === "revoked"
           ? "\r\n\x1b[31mログインが無効になりました。再ログインしてください\x1b[0m"
           : "\r\n\x1b[31m認証の有効期限が切れました。再ログインしてください\x1b[0m");
-        setTimeout(() => redirectToLogin(token), 1500);
+        setTimeout(() => redirectToLogin(token, idle ? IDLE_REASON : undefined), 1500);
         return;
       }
       setStatus((s) => (s === "error" ? s : "idle"));

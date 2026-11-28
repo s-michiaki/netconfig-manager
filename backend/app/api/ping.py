@@ -14,6 +14,10 @@ WebSocket のやりとり（すべて JSON）
     {"type": "tick", "seq": 1, "results": {"<key>": 1.23 または null}}   … null は応答なし
     {"type": "error", "message": "..."}
 
+無操作のログアウト（services/idle.py）: 監視が動いている間（start から stop・切断・PING の失敗まで）は、
+この接続に使ったログインの最後の操作の時刻を進め続ける（同じログインのほかのタブ・API も切れない）。
+接続しただけ・止めている間は進めない。時間を過ぎたら idle.watch_ws が切る（close の reason は "idle_timeout"）
+
 常時監視（/monitors）: 画面を開いていなくても worker が一定間隔で PING し、結果を残して応答なし・復旧を通知する
 （services/ping_monitor.py）。ここでは対象の登録・解除と、状態・履歴の表示を扱う
 """
@@ -40,15 +44,17 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import authenticate_token, require
+from app.api.deps import authenticate_ws, require
 from app.api.terminal import _register, _unregister
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.permissions import Perm, has_permission
+from app.core.security import decode_access_token
 from app.core.timeutil import utcnow
 from app.models.device import Device, DeviceGroup
 from app.models.ping import PingMonitor, PingResult, PingTarget
 from app.models.user import User
+from app.services import idle
 from app.services import ping_monitor as monitor_svc
 from app.services.audit import Audit, get_audit
 from app.services.ping import PingUnavailable, Ticker, ping_many, resolve, valid_address
@@ -348,21 +354,28 @@ async def _resolve_all(items: list[dict]) -> None:
 @ws_router.websocket("/ws")
 async def ping_ws(websocket: WebSocket):
     await websocket.accept()
+    ip = websocket.client.host if websocket.client else None
+    why = "unauthorized"
     try:
         first = json.loads(await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SEC))
-        user = await authenticate_token(str(first.get("token", ""))) if first.get("type") == "auth" else None
+        user, why = (await authenticate_ws(str(first.get("token", "")), ip)) if first.get("type") == "auth" \
+            else (None, why)
     except (TimeoutError, json.JSONDecodeError, AttributeError, WebSocketDisconnect):
         user = None
     if user is None:
         # 認証の前に相手が切断していると、close は送れない（例外のログを残さない）
         with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="unauthorized")
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason=why)
         return
     if not has_permission(user.role, Perm.PING_USE):
         await websocket.close(code=WS_CLOSE_FORBIDDEN, reason="forbidden")
         return
     # ターミナルと同じく、強制ログアウト・無効化・パスワードの変更・本人のログアウトなどで切れるよう登録する（#29）
-    live = _register(user.id, websocket, "ping", str(first.get("token", "")))
+    token = str(first.get("token", ""))
+    live = _register(user.id, websocket, "ping", token)
+    # 無操作の時間を、要求が来なくても確かめる（監視が動いている間は下の run が時刻を進めるので切れない）
+    watcher = asyncio.create_task(idle.watch_ws(user, token, ip))
+    claims = decode_access_token(token) or {}
 
     runner: asyncio.Task | None = None
 
@@ -373,11 +386,21 @@ async def ping_ws(websocket: WebSocket):
         targets = {it["key"]: it["ip"] for it in items if it.get("ip")}
         ticker = Ticker(interval)
         seq = 0
+        touched = None  # 最後に無操作の時刻を進めた時刻（loop.time()）
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 seq += 1
                 # 応答待ちが間隔を超えないようにする（間隔ごとに必ず1回結果を返す）
                 results = await ping_many(targets, timeout=min(settings.PING_TIMEOUT, interval * 0.9))
+                # 監視が動いている間は、無操作でログアウトしない（PING_TOUCH_SEC ごとに時刻を進める）。
+                # 実際に PING を送る対象が無い（0 件・すべて名前解決できない）ときは進めない。
+                # 時間を過ぎていれば（止めていた間に過ぎた、など）書かずに監視を止め、接続を切る（touch の後始末）
+                if targets and (touched is None or loop.time() - touched >= idle.PING_TOUCH_SEC):
+                    touched = loop.time()
+                    if not await idle.touch(user, token, claims, ip):
+                        await idle.close_token_sessions(user.id, token)
+                        return
                 await send({"type": "tick", "seq": seq, "results": results})
                 await ticker.wait()
         except PingUnavailable as e:
@@ -409,6 +432,7 @@ async def ping_ws(websocket: WebSocket):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        watcher.cancel()
         _unregister(user.id, live)
         if runner is not None:
             runner.cancel()

@@ -48,6 +48,7 @@ ROUTES = {
     "POST /api/auth/change-password": S,
     "POST /api/auth/logout": S,
     "POST /api/auth/logout-all": S,
+    "POST /api/auth/activity": S,  # 無操作のログアウト（画面の操作の合図。API トークンは対象外）
     "GET /api/auth/tokens": S,
     "POST /api/auth/tokens": S,
     "DELETE /api/auth/tokens/{token_id}": S,
